@@ -1,0 +1,180 @@
+import { Theme } from "common.slint";
+import { PlayerPanel } from "player.slint";
+import { LibraryPanel } from "library.slint";
+import { PlaylistPanel } from "playlist.slint";
+
+export component MainWindow inherits Window {
+    title: "CrabBoss — Radio Automation";
+    min-width: 900px;
+    min-height: 600px;
+    background: Theme.bg-primary;
+
+    // -- Player state properties --
+    in-out property <bool> is-playing: false;
+    in-out property <string> now-playing-title: "No track loaded";
+    in-out property <string> now-playing-artist: "";
+    in-out property <string> current-time: "00:00";
+    in-out property <string> total-time: "00:00";
+    in-out property <float> player-volume: 0.8;
+    in-out property <float> player-progress: 0.0;
+
+    // -- Player callbacks --
+    callback play;
+    callback pause;
+    callback stop;
+    callback next;
+    callback prev;
+    callback set-volume(float);
+
+    // -- Library callbacks --
+    callback import-files;
+    callback library-search-changed(string);
+    callback library-track-selected(int);
+    callback library-track-double-clicked(int);
+
+    // -- Playlist callbacks --
+    callback playlist-play-item(int);
+    callback playlist-remove-item(int);
+    callback playlist-save;
+    callback playlist-new;
+    callback playlist-load(string);
+
+    HorizontalLayout {
+        // Left panel — Player (narrow sidebar)
+        Rectangle {
+            width: 300px;
+            background: Theme.bg-primary;
+
+            VerticalLayout {
+                // App title bar
+                Rectangle {
+                    height: 48px;
+                    background: Theme.bg-secondary;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+
+                        Text {
+                            text: "🦀 CrabBoss";
+                            color: Theme.accent;
+                            font-size: 18px;
+                            font-weight: 800;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        Text {
+                            text: "v0.1";
+                            color: Theme.text-dim;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Player controls
+                PlayerPanel {
+                    vertical-stretch: 1;
+                    is-playing: root.is-playing;
+                    now-playing-title: root.now-playing-title;
+                    now-playing-artist: root.now-playing-artist;
+                    current-time: root.current-time;
+                    total-time: root.total-time;
+                    volume: root.player-volume;
+                    progress: root.player-progress;
+
+                    play-pressed => { root.play(); }
+                    pause-pressed => { root.pause(); }
+                    stop-pressed => { root.stop(); }
+                    next-pressed => { root.next(); }
+                    prev-pressed => { root.prev(); }
+                    volume-changed(v) => { root.set-volume(v); }
+                }
+
+                // Mini status bar
+                Rectangle {
+                    height: 28px;
+                    background: Theme.bg-secondary;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+
+                        Text {
+                            text: "Ready";
+                            color: Theme.text-dim;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Right panel — Library + Playlist (tabbed area)
+        Rectangle {
+            horizontal-stretch: 1;
+            background: Theme.bg-primary;
+
+            VerticalLayout {
+                // Tab bar
+                Rectangle {
+                    height: 36px;
+                    background: Theme.bg-secondary;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        spacing: 4px;
+
+                        Rectangle {
+                            width: 120px;
+                            height: 28px;
+                            border-radius: 6px;
+                            background: Theme.accent;
+
+                            Text {
+                                text: "📚 Library";
+                                color: white;
+                                font-size: 12px;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            width: 120px;
+                            height: 28px;
+                            border-radius: 6px;
+                            background: Theme.bg-primary;
+
+                            TouchArea {
+                                clicked => { /* TODO: switch to playlist tab */ }
+                            }
+
+                            Text {
+                                text: "🎵 Playlist";
+                                color: Theme.text-secondary;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // Content area — Library (for now)
+                LibraryPanel {
+                    vertical-stretch: 1;
+
+                    search-changed(text) => { root.library-search-changed(text); }
+                    track-selected(idx) => { root.library-track-selected(idx); }
+                    track-double-clicked(idx) => { root.library-track-double-clicked(idx); }
+                    import-files => { root.import-files(); }
+                }
+            }
+        }
+    }
+}

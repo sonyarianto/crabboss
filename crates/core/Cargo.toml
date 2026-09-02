@@ -1,0 +1,27 @@
+[package]
+name = "crabcore"
+version = "0.1.0"
+edition = "2021"
+description = "CrabBoss core engine: audio playback, library management, and scheduling"
+
+[dependencies]
+# Workspace deps
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+# Audio
+rodio = { version = "0.19", features = ["symphonia"] }
+
+# Metadata
+lofty = "0.21"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Async file scanning
+walkdir = "2"

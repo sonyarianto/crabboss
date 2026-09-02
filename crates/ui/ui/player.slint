@@ -1,0 +1,204 @@
+import { Theme } from "common.slint";
+
+// Custom slider (Slint doesn't have a built-in Slider in base)
+component VolumeSlider inherits Rectangle {
+    in property <float> value: 0.8;
+    callback changed(float);
+
+    height: 20px;
+
+    // Track background
+    Rectangle {
+        y: 8px;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.bg-panel;
+
+        // Filled portion
+        Rectangle {
+            height: parent.height;
+            border-radius: parent.border-radius;
+            background: Theme.accent;
+            width: parent.width * max(0, min(root.value, 1));
+        }
+    }
+
+    // Draggable thumb area
+    TouchArea {
+        moved => {
+            if (self.pressed) {
+                let new-val = clamp(self.mouse-x / parent.width, 0, 1);
+                root.changed(new-val);
+            }
+        }
+    }
+}
+
+// Transport control buttons
+component TransportButton inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> active: false;
+    callback clicked;
+
+    width: 44px;
+    height: 44px;
+    border-radius: 8px;
+    background: active ? Theme.accent : Theme.bg-secondary;
+
+    animate background { duration: 150ms; }
+
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: root.label;
+        color: active ? white : Theme.text-primary;
+        font-size: 18px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Now-playing info bar
+component NowPlaying inherits Rectangle {
+    in property <string> track-title: "No track loaded";
+    in property <string> track-artist: "";
+    in property <string> track-time: "00:00";
+    in property <string> track-duration: "00:00";
+
+    height: 50px;
+    background: Theme.bg-secondary;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        alignment: stretch;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+
+            Text {
+                text: root.track-title;
+                color: Theme.text-primary;
+                font-size: 14px;
+                overflow: elide;
+            }
+            Text {
+                text: root.track-artist;
+                color: Theme.text-secondary;
+                font-size: 12px;
+                overflow: elide;
+            }
+        }
+
+        Text {
+            text: root.track-time + " / " + root.track-duration;
+            color: Theme.success;
+            font-size: 13px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Main player component
+export component PlayerPanel inherits Rectangle {
+    in property <bool> is-playing: false;
+    in property <string> now-playing-title: "No track loaded";
+    in property <string> now-playing-artist: "";
+    in property <string> current-time: "00:00";
+    in property <string> total-time: "00:00";
+    in property <float> volume: 0.8;
+    in property <float> progress: 0.0;
+
+    callback play-pressed;
+    callback pause-pressed;
+    callback stop-pressed;
+    callback next-pressed;
+    callback prev-pressed;
+    callback volume-changed(float);
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+
+        NowPlaying {
+            track-title: root.now-playing-title;
+            track-artist: root.now-playing-artist;
+            track-time: root.current-time;
+            track-duration: root.total-time;
+        }
+
+        // Progress bar
+        Rectangle {
+            height: 6px;
+            border-radius: 3px;
+            background: Theme.bg-panel;
+
+            Rectangle {
+                x: 0;
+                height: parent.height;
+                border-radius: parent.border-radius;
+                background: Theme.accent;
+                width: parent.width * max(0, min(root.progress, 1));
+            }
+        }
+
+        // Transport controls
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: center;
+
+            TransportButton {
+                label: "⏮";
+                clicked => { root.prev-pressed(); }
+            }
+
+            TransportButton {
+                label: root.is-playing ? "⏸" : "▶";
+                active: root.is-playing;
+                clicked => {
+                    if (root.is-playing) {
+                        root.pause-pressed();
+                    } else {
+                        root.play-pressed();
+                    }
+                }
+            }
+
+            TransportButton {
+                label: "⏹";
+                clicked => { root.stop-pressed(); }
+            }
+
+            TransportButton {
+                label: "⏭";
+                clicked => { root.next-pressed(); }
+            }
+        }
+
+        // Volume slider
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: stretch;
+
+            Text {
+                text: "🔊";
+                color: Theme.text-secondary;
+                font-size: 14px;
+                vertical-alignment: center;
+            }
+
+            VolumeSlider {
+                horizontal-stretch: 1;
+                value: root.volume;
+                changed(val) => { root.volume-changed(val); }
+            }
+        }
+    }
+}

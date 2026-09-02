@@ -1,0 +1,15 @@
+[package]
+name = "crabui"
+version = "0.1.0"
+edition = "2021"
+description = "CrabBoss desktop UI built with Slint"
+
+[dependencies]
+crabcore = { path = "../core" }
+slint = "1.11"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+slint-build = "1.11"

@@ -1,0 +1,195 @@
+import { Theme } from "common.slint";
+
+component PlaylistItemRow inherits Rectangle {
+    in property <int> index: 0;
+    in property <string> title: "";
+    in property <string> artist: "";
+    in property <string> duration: "";
+    in property <bool> is-even: false;
+
+    callback play-requested(int);
+    callback remove-requested(int);
+
+    height: 32px;
+    background: is-even ? Theme.bg-primary : Theme.bg-secondary;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 6px;
+
+        Text {
+            text: root.index + 1;
+            color: Theme.text-dim;
+            font-size: 11px;
+            vertical-alignment: center;
+            width: 28px;
+        }
+
+        Text {
+            text: root.title;
+            color: Theme.text-primary;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 3;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.artist;
+            color: Theme.text-secondary;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 2;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.duration;
+            color: Theme.text-dim;
+            font-size: 11px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        Rectangle {
+            width: 24px;
+            height: 24px;
+            border-radius: 4px;
+            background: Theme.bg-panel;
+
+            TouchArea {
+                clicked => { root.play-requested(root.index); }
+            }
+
+            Text {
+                text: "▶";
+                color: Theme.accent;
+                font-size: 10px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle {
+            width: 24px;
+            height: 24px;
+            border-radius: 4px;
+            background: Theme.bg-panel;
+
+            TouchArea {
+                clicked => { root.remove-requested(root.index); }
+            }
+
+            Text {
+                text: "✕";
+                color: Theme.text-dim;
+                font-size: 10px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component PlaylistPanel inherits Rectangle {
+    in property <string> playlist-name: "Untitled Playlist";
+    in property <int> item-count: 0;
+    in property <string> total-duration: "00:00:00";
+
+    callback play-item(int);
+    callback remove-item(int);
+    callback save-playlist;
+    callback new-playlist;
+    callback load-playlist(string);
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            height: 32px;
+            alignment: space-between;
+
+            VerticalLayout {
+                alignment: center;
+
+                Text {
+                    text: "🎵 " + root.playlist-name;
+                    color: Theme.text-primary;
+                    font-size: 14px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: root.item-count + " tracks — " + root.total-duration;
+                    color: Theme.text-dim;
+                    font-size: 11px;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 6px;
+                    background: Theme.bg-panel;
+
+                    TouchArea {
+                        clicked => { root.new-playlist(); }
+                    }
+
+                    Text {
+                        text: "📄";
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 6px;
+                    background: Theme.accent;
+
+                    TouchArea {
+                        clicked => { root.save-playlist(); }
+                    }
+
+                    Text {
+                        text: "💾";
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+
+            Flickable {
+                VerticalLayout {
+                    spacing: 0px;
+
+                    PlaylistItemRow {
+                        index: 0;
+                        title: "Empty playlist — add tracks from Library";
+                        artist: "";
+                        duration: "";
+                        is-even: true;
+                        play-requested(idx) => { root.play-item(idx); }
+                        remove-requested(idx) => { root.remove-item(idx); }
+                    }
+                }
+            }
+        }
+    }
+}
