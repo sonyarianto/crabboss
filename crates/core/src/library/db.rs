@@ -465,6 +465,16 @@ impl Library {
         Ok(())
     }
 
+    /// Proactive health pass: tracks whose files no longer resolve on disk.
+    /// Call at startup / on demand instead of failing silently at play time.
+    pub fn missing_files(&self) -> Result<Vec<Track>> {
+        Ok(self
+            .get_all_tracks()?
+            .into_iter()
+            .filter(|t| !Path::new(&t.file_path).is_file())
+            .collect())
+    }
+
     /// Recursively scan a directory for audio files and add them to the library.
     /// Returns the count of successfully added tracks.
     pub fn scan_directory(&self, dir: &Path) -> Result<usize> {

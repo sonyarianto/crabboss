@@ -85,6 +85,7 @@ export component MainWindow inherits Window {
 
     // -- Library callbacks --
     callback import-files;
+    callback library-health-check;
     callback library-search-changed(string);
     callback library-track-selected(int);
     callback library-track-double-clicked(int);
@@ -301,6 +302,7 @@ export component MainWindow inherits Window {
                         track-selected(idx) => { root.library-track-selected(idx); }
                         track-double-clicked(idx) => { root.library-track-double-clicked(idx); }
                         import-files => { root.import-files(); }
+                        health-check => { root.library-health-check(); }
                     }
                 }
             }
@@ -316,6 +318,7 @@ export component MainWindow inherits Window {
             track-selected(idx) => { root.library-track-selected(idx); }
             track-double-clicked(idx) => { root.library-track-double-clicked(idx); }
             import-files => { root.import-files(); }
+            health-check => { root.library-health-check(); }
         }
 
         // -- Settings --

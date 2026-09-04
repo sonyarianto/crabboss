@@ -23,6 +23,14 @@ pub trait Engine {
     fn current_track(&self) -> Option<TrackInfo>;
     fn has_audio_device(&self) -> bool;
     fn is_finished(&self) -> bool;
+    /// Dead-air alarm: true when output has been (near-)silent for longer
+    /// than the threshold while Playing. Backends without output metering
+    /// (rodio) report false; `CpalEngine` measures the real mix bus.
+    fn silence_alarm(&self) -> bool {
+        false
+    }
+    /// Seconds of continuous silence before [`Engine::silence_alarm`] trips.
+    fn set_silence_threshold_secs(&self, _secs: f32) {}
 }
 
 // Legacy rodio Player already satisfies the interface.

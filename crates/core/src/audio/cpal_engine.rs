@@ -12,6 +12,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crate::audio::engine::Engine;
 use crate::audio::mixer::{Frame, Mixer};
 use crate::audio::player::{PlayerState, TrackInfo};
+use crate::audio::silence::SilenceMonitor;
 use crate::error::{CrabError, Result};
 
 /// Decoded track: stereo-interleaved f32 at device rate.
@@ -122,6 +123,7 @@ pub struct CpalEngine {
     device_rate: u32,
     xfade: Arc<Mutex<XfadeState>>,
     crossfade_secs: f32,
+    silence: Arc<Mutex<SilenceMonitor>>,
     state: Arc<Mutex<PlayerState>>,
     current_track: Arc<Mutex<Option<TrackInfo>>>,
     volume: Arc<Mutex<f32>>,
@@ -142,15 +144,18 @@ impl CpalEngine {
         let current_track = Arc::new(Mutex::new(None));
         let volume = Arc::new(Mutex::new(1.0));
         let mixer = Arc::new(Mutex::new(Mixer::default()));
+        let silence = Arc::new(Mutex::new(SilenceMonitor::new(48000, 10.0)));
 
         let (stream, device_rate) = match Self::open_silent_stream(
             xfade.clone(),
             state.clone(),
             volume.clone(),
             mixer.clone(),
+            silence.clone(),
         ) {
             Ok((s, rate)) => {
                 tracing::info!("CpalEngine: output opened @ {} Hz", rate);
+                *silence.lock().unwrap() = SilenceMonitor::new(rate, 10.0);
                 (Some(s), rate)
             }
             Err(e) => {
@@ -164,6 +169,7 @@ impl CpalEngine {
             device_rate,
             xfade,
             crossfade_secs: 3.0,
+            silence,
             state,
             current_track,
             volume,
@@ -193,6 +199,7 @@ impl CpalEngine {
         state: Arc<Mutex<PlayerState>>,
         volume: Arc<Mutex<f32>>,
         mixer: Arc<Mutex<Mixer>>,
+        silence: Arc<Mutex<SilenceMonitor>>,
     ) -> std::result::Result<(cpal::Stream, u32), String> {
         let host = cpal::default_host();
         let device = host
@@ -211,6 +218,7 @@ impl CpalEngine {
                     let vol = *volume.lock().unwrap();
                     let mx = mixer.lock().unwrap();
                     let mut xf = xfade.lock().unwrap();
+                    let mut sil = silence.lock().unwrap();
                     let playing = *state.lock().unwrap() == PlayerState::Playing;
 
                     for frame in data.chunks_mut(channels) {
@@ -222,6 +230,7 @@ impl CpalEngine {
                             }
                             None => (0.0, 0.0),
                         };
+                        sil.push_frame(playing, l, r);
                         if channels == 1 {
                             frame[0] = (l + r) * 0.5;
                         } else {
@@ -307,6 +316,7 @@ impl Engine for CpalEngine {
             tracing::info!("CpalEngine playing: {}", path.display());
         }
         drop(xf);
+        self.silence.lock().unwrap().reset();
         *self.state.lock().unwrap() = PlayerState::Playing;
         *self.current_track.lock().unwrap() = Some(TrackInfo {
             path: path.to_path_buf(),
@@ -335,6 +345,7 @@ impl Engine for CpalEngine {
         xf.pos = 0;
         xf.len = 0;
         drop(xf);
+        self.silence.lock().unwrap().reset();
         *self.state.lock().unwrap() = PlayerState::Stopped;
         *self.current_track.lock().unwrap() = None;
     }
@@ -374,6 +385,14 @@ impl Engine for CpalEngine {
             PlayerState::Stopped => true,
             _ => self.xfade.lock().unwrap().is_done(),
         }
+    }
+
+    fn silence_alarm(&self) -> bool {
+        *self.state.lock().unwrap() == PlayerState::Playing && self.silence.lock().unwrap().alarm()
+    }
+
+    fn set_silence_threshold_secs(&self, secs: f32) {
+        self.silence.lock().unwrap().set_threshold_secs(secs);
     }
 }
 

@@ -183,7 +183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // row indices from Slint resolve against this.
     let last_shown: Rc<RefCell<Vec<crabcore::library::Track>>> = Rc::new(RefCell::new(Vec::new()));
 
-    // -- Library: push tracks to UI --
+    // -- Library: push tracks to UI (missing files get a ⚠ prefix) --
     fn refresh_library(
         ui: &MainWindow,
         tracks: Vec<crabcore::library::Track>,
@@ -191,15 +191,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ) {
         let rows: Vec<LibTrack> = tracks
             .iter()
-            .map(|t| LibTrack {
-                title: t
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| t.file_name.clone())
+            .map(|t| {
+                let missing = !PathBuf::from(&t.file_path).is_file();
+                let base = t.title.clone().unwrap_or_else(|| t.file_name.clone());
+                LibTrack {
+                    title: if missing {
+                        format!("⚠ {}", base)
+                    } else {
+                        base
+                    }
                     .into(),
-                artist: t.artist.clone().unwrap_or_default().into(),
-                duration: fmt_dur(t.duration_secs).into(),
-                kind: kind_label(t.kind).into(),
+                    artist: t.artist.clone().unwrap_or_default().into(),
+                    duration: fmt_dur(t.duration_secs).into(),
+                    kind: kind_label(t.kind).into(),
+                }
             })
             .collect();
         *last_shown.borrow_mut() = tracks;
@@ -212,6 +217,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &last_shown,
     );
     ui.set_library_status("".into());
+
+    // -- Library health: startup scan + on-demand --
+    fn run_health_check(
+        ui: &MainWindow,
+        state: &Rc<RefCell<AppState>>,
+        last_shown: &Rc<RefCell<Vec<crabcore::library::Track>>>,
+    ) {
+        let s = state.borrow();
+        let missing = s.library.missing_files().unwrap_or_default();
+        if missing.is_empty() {
+            ui.set_library_status("✓ All files OK".into());
+        } else {
+            for t in &missing {
+                tracing::warn!("Missing file: {}", t.file_path);
+            }
+            ui.set_library_status(format!("⚠ {} files missing (see log)", missing.len()).into());
+        }
+        let tracks = s.library.get_all_tracks().unwrap_or_default();
+        ui.set_track_count(tracks.len() as i32);
+        drop(s);
+        refresh_library(ui, tracks, last_shown);
+    }
+    {
+        let n_missing = state
+            .borrow()
+            .library
+            .missing_files()
+            .unwrap_or_default()
+            .len();
+        if n_missing > 0 {
+            tracing::warn!("Startup health scan: {} missing files", n_missing);
+            ui.set_library_status(format!("⚠ {} files missing (see log)", n_missing).into());
+        }
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let last_shown = last_shown.clone();
+        ui.on_library_health_check(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                tracing::info!("Manual library health scan");
+                run_health_check(&ui, &state, &last_shown);
+            }
+        });
+    }
 
     // -- Scheduler: push events to UI --
     fn refresh_scheduler(ui: &MainWindow, scheduler: &crabcore::scheduler::SchedulerManager) {
@@ -557,6 +607,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         );
         // App-lifetime timer: intentionally never stopped.
+        std::mem::forget(tick);
+    }
+
+    // -- Silence monitor: every 5s, recover dead air with a filler track --
+    // Metering lives in CpalEngine; on rodio (default) the alarm never trips.
+    // Recovery is rate-limited to once per minute to avoid storms.
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let last_recovery: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let tick = slint::Timer::default();
+        tick.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(5),
+            move || {
+                let s = state.borrow();
+                if !s.player.silence_alarm() {
+                    return;
+                }
+                let minute = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+                if last_recovery.borrow().as_ref() == Some(&minute) {
+                    return;
+                }
+                *last_recovery.borrow_mut() = Some(minute);
+                let current = s.player.current_track().map(|t| t.path);
+                let filler = s
+                    .library
+                    .list_by_kind(TrackKind::Music)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|t| {
+                        Some(PathBuf::from(&t.file_path)) != current
+                            && PathBuf::from(&t.file_path).is_file()
+                    });
+                match filler {
+                    Some(t) => {
+                        tracing::error!(
+                            "SILENCE DETECTED — auto-recovering with filler: {}",
+                            t.file_path
+                        );
+                        let path = PathBuf::from(&t.file_path);
+                        let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
+                        match s.player.play(&path) {
+                            Ok(()) => {
+                                drop(s);
+                                if let Some(ui) = ui_weak.upgrade() {
+                                    ui.set_is_playing(true);
+                                    ui.set_now_playing_title(
+                                        format!("⚠ Recovered: {}", label).into(),
+                                    );
+                                    ui.set_now_playing_artist("Silence detector".into());
+                                }
+                            }
+                            Err(e) => tracing::error!("Filler play failed: {}", e),
+                        }
+                    }
+                    None => {
+                        tracing::error!("SILENCE DETECTED — no playable filler in library");
+                        drop(s);
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_now_playing_title("⚠ SILENCE — no filler available".into());
+                        }
+                    }
+                }
+            },
+        );
         std::mem::forget(tick);
     }
 

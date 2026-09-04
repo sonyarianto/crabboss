@@ -7,8 +7,10 @@ mod cpal_engine;
 mod engine;
 mod mixer;
 mod player;
+mod silence;
 
 pub use cpal_engine::CpalEngine;
 pub use engine::Engine;
-pub use mixer::{Frame, Mixer};
+pub use mixer::{CrossfadeCurve, Frame, Mixer};
 pub use player::{Player, PlayerState, TrackInfo};
+pub use silence::{SilenceMonitor, SILENCE_FLOOR};

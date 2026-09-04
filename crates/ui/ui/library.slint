@@ -166,6 +166,7 @@ export component LibraryPanel inherits Rectangle {
     callback track-selected(int);
     callback track-double-clicked(int);
     callback import-files;
+    callback health-check;
 
     background: Theme.bg-primary;
 
@@ -185,22 +186,45 @@ export component LibraryPanel inherits Rectangle {
                 vertical-alignment: center;
             }
 
-            Rectangle {
-                width: 80px;
-                height: 28px;
-                border-radius: 6px;
-                background: Theme.accent;
+            HorizontalLayout {
+                spacing: 6px;
 
-                TouchArea {
-                    clicked => { root.import-files(); }
+                Rectangle {
+                    width: 70px;
+                    height: 28px;
+                    border-radius: 6px;
+                    background: Theme.bg-panel;
+
+                    TouchArea {
+                        clicked => { root.health-check(); }
+                    }
+
+                    Text {
+                        text: "✓ Health";
+                        color: Theme.text-secondary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
 
-                Text {
-                    text: "+ Import";
-                    color: white;
-                    font-size: 12px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                Rectangle {
+                    width: 80px;
+                    height: 28px;
+                    border-radius: 6px;
+                    background: Theme.accent;
+
+                    TouchArea {
+                        clicked => { root.import-files(); }
+                    }
+
+                    Text {
+                        text: "+ Import";
+                        color: white;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }

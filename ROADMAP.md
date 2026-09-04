@@ -74,11 +74,11 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
 | Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Unchecked | ❌ |
 | Mic / line-in | Mixed input, sidechain ducking, bed music | Unchecked | ❌ |
-| Silence detector | Dead-air auto-recovery | — | — |
-| Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — | — |
+| Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
+| Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
 | Reporting | Play logs → XLS/PDF, royalty reports | Unchecked | ❌ |
 | Library depth | Mass tag editor, BPM scan, dupe detection, scheduled sync, health scan | `scan_directory()` only | 🟡 |
-| Track health | Proactive missing/corrupt detection | Lazy `is_file()` at play time | 🟡 |
+| Track health | Proactive missing/corrupt detection | ✅ `missing_files()` + startup/on-demand scan, ⚠ row flags | ✅ |
 | UI niceties | Hotkeys, screen-reader a11y, drag-drop, waveform | — | — |
 | Stream archive | Scheduled output recording | — | — |
 | License | Offline key, holder, tier | MVP done (checksum → ed25519 TODO) | ✅ |
@@ -130,8 +130,12 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [ ] Mic "bed" music under live breaks
 
 ### 1.7 Reliability
-- [ ] Silence detector: quiet output for N seconds → skip / play filler cart
-- [ ] Background library health scan: verify `file_path`s resolve, flag missing in UI
+- [x] Silence detector: `SilenceMonitor` meters the cpal mix bus (−60 dBFS floor,
+      10 s default threshold); UI polls every 5 s and auto-recovers dead air
+      with a filler music track (rate-limited 1/min). Metering is cpal-only —
+      rodio (current default) reports no alarm.
+- [x] Background library health scan: `missing_files()` + startup scan, on-demand
+      `✓ Health` button in Media/Playout, ⚠ prefixes on missing rows
 
 ### 1.8 Library depth
 - [ ] Mass tag editor (multi-select batch edit)
