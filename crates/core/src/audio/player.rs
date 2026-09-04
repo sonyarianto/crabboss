@@ -49,6 +49,12 @@ pub struct Player {
     running: Arc<AtomicBool>,
 }
 
+impl Default for Player {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Player {
     /// Create a new player instance.
     ///
@@ -56,22 +62,20 @@ impl Player {
     /// Falls back to headless mode if no device is available.
     pub fn new() -> Self {
         let backend = match OutputStream::try_default() {
-            Ok((stream, handle)) => {
-                match Sink::try_new(&handle) {
-                    Ok(sink) => {
-                        tracing::info!("Audio output initialized (WASAPI/ALSA)");
-                        AudioBackend::Live {
-                            _stream: stream,
-                            handle,
-                            sink: Arc::new(Mutex::new(Some(sink))),
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to create audio sink: {}. Running headless.", e);
-                        AudioBackend::Headless
+            Ok((stream, handle)) => match Sink::try_new(&handle) {
+                Ok(sink) => {
+                    tracing::info!("Audio output initialized (WASAPI/ALSA)");
+                    AudioBackend::Live {
+                        _stream: stream,
+                        handle,
+                        sink: Arc::new(Mutex::new(Some(sink))),
                     }
                 }
-            }
+                Err(e) => {
+                    tracing::warn!("Failed to create audio sink: {}. Running headless.", e);
+                    AudioBackend::Headless
+                }
+            },
             Err(e) => {
                 tracing::warn!(
                     "No audio device available: {}. Running in headless mode.",
@@ -109,8 +113,8 @@ impl Player {
         let file = File::open(path).map_err(|_| CrabError::FileNotFound {
             path: path.to_path_buf(),
         })?;
-        let decoder = Decoder::new(BufReader::new(file))
-            .map_err(|e| CrabError::Audio(e.to_string()))?;
+        let decoder =
+            Decoder::new(BufReader::new(file)).map_err(|e| CrabError::Audio(e.to_string()))?;
 
         // Get total duration from metadata before playing
         let total_duration = self.read_duration(path);
@@ -159,7 +163,12 @@ impl Player {
 
     /// Stop playback and recreate sink so play() works again.
     pub fn stop(&self) {
-        if let AudioBackend::Live { ref handle, ref sink, .. } = self.backend {
+        if let AudioBackend::Live {
+            ref handle,
+            ref sink,
+            ..
+        } = self.backend
+        {
             let mut guard = sink.lock().unwrap();
             if let Some(old) = guard.take() {
                 drop(old);
@@ -222,11 +231,7 @@ impl Player {
     fn read_duration(&self, path: &Path) -> Option<f64> {
         lofty::read_from_path(path).ok().and_then(|tagged_file| {
             use lofty::file::AudioFile;
-            tagged_file
-                .properties()
-                .duration()
-                .as_secs_f64()
-                .into()
+            tagged_file.properties().duration().as_secs_f64().into()
         })
     }
 }

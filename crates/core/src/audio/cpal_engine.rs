@@ -1,8 +1,8 @@
-//! cpal-backed engine scaffold (ROADMAP: rodio → cpal).
+//! cpal-backed engine (ROADMAP: rodio → cpal).
 //!
-//! Status: MVP — device open + symphonia decode + mixer in callback.
-//! TODO: rubato resampling to device rate, gapless crossfade between
-//! tracks, EQ insert, mic input, Icecast tee.
+//! Status: stereo symphonia decode → rubato resample to device rate →
+//! dual-cursor equal-power/linear crossfade through `Mixer` in the callback.
+//! TODO: EQ insert, mic input, Icecast tee.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -10,38 +10,118 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::audio::engine::Engine;
-use crate::audio::mixer::Mixer;
+use crate::audio::mixer::{Frame, Mixer};
 use crate::audio::player::{PlayerState, TrackInfo};
 use crate::error::{CrabError, Result};
 
+/// Decoded track: stereo-interleaved f32 at device rate.
 struct PlaybackCursor {
-    samples_mono: Vec<f32>,
-    pos: usize,
-    #[allow(dead_code)]
-    file_rate: u32,
+    samples: Vec<f32>,
+    /// Position in frames (one frame = L+R).
+    pos_frames: usize,
 }
 
 impl PlaybackCursor {
-    fn next_sample(&mut self) -> Option<f32> {
-        if self.pos >= self.samples_mono.len() {
+    fn next_stereo(&mut self) -> Option<(f32, f32)> {
+        let i = self.pos_frames * 2;
+        if i + 1 >= self.samples.len() {
             return None;
         }
-        let s = self.samples_mono[self.pos];
-        self.pos += 1;
-        Some(s)
+        self.pos_frames += 1;
+        Some((self.samples[i], self.samples[i + 1]))
+    }
+
+    fn remaining_frames(&self) -> usize {
+        self.samples.len() / 2 - self.pos_frames.min(self.samples.len() / 2)
     }
 
     fn is_done(&self) -> bool {
-        self.pos >= self.samples_mono.len()
+        self.remaining_frames() == 0
+    }
+}
+
+/// Dual-cursor crossfade state, owned by the audio callback.
+struct XfadeState {
+    current: Option<PlaybackCursor>,
+    next: Option<PlaybackCursor>,
+    /// Frames elapsed in the active blend; `len == 0` means no blend.
+    pos: usize,
+    len: usize,
+}
+
+impl XfadeState {
+    /// Pull one frame: `(current, incoming, blend 0..1)`.
+    /// `None` = nothing left to play.
+    fn pull(&mut self) -> Option<(Frame, Option<Frame>, f32)> {
+        // Promote when the current deck is exhausted.
+        if self.current.as_ref().is_none_or(|c| c.is_done()) {
+            if self.next.is_some() {
+                self.current = self.next.take();
+                self.pos = 0;
+                self.len = 0;
+            } else {
+                return None;
+            }
+        }
+        let cur = self.current.as_mut().unwrap();
+        let (l, r) = match cur.next_stereo() {
+            Some(v) => v,
+            None => {
+                // Hit EOF exactly on this pull: hand over to next if any.
+                if self.next.is_some() {
+                    self.current = self.next.take();
+                    self.pos = 0;
+                    self.len = 0;
+                    match self.current.as_mut().unwrap().next_stereo() {
+                        Some((l, r)) => (l, r),
+                        None => return None,
+                    }
+                } else {
+                    return None;
+                }
+            }
+        };
+        let a = Frame { l, r };
+        if self.len > 0 {
+            if let Some(nxt) = self.next.as_mut() {
+                match nxt.next_stereo() {
+                    Some((l, r)) => {
+                        let x = (self.pos as f32 / self.len as f32).min(1.0);
+                        self.pos += 1;
+                        if self.pos >= self.len {
+                            // Blend finished: incoming deck takes over.
+                            self.current = self.next.take();
+                            self.pos = 0;
+                            self.len = 0;
+                        }
+                        return Some((a, Some(Frame { l, r }), x));
+                    }
+                    // Incoming clip shorter than the blend: keep playing current.
+                    None => {
+                        self.next = None;
+                        self.pos = 0;
+                        self.len = 0;
+                    }
+                }
+            } else {
+                self.len = 0;
+            }
+        }
+        Some((a, None, 0.0))
+    }
+
+    fn is_done(&self) -> bool {
+        self.current.as_ref().is_none_or(|c| c.is_done()) && self.next.is_none()
     }
 }
 
 /// Low-level engine. Keeps the cpal `Stream` alive; callback pulls
-/// decoded mono samples through `Mixer`.
+/// decoded stereo samples through `Mixer`.
 pub struct CpalEngine {
     _stream: Option<cpal::Stream>,
     device_rate: u32,
-    cursor: Arc<Mutex<Option<PlaybackCursor>>>,
+    xfade: Arc<Mutex<XfadeState>>,
+    crossfade_secs: f32,
     state: Arc<Mutex<PlayerState>>,
     current_track: Arc<Mutex<Option<TrackInfo>>>,
     volume: Arc<Mutex<f32>>,
@@ -52,14 +132,19 @@ impl CpalEngine {
     /// Open default output. Never panics — falls back to headless
     /// (`_stream: None`, still tracks state) when no device exists.
     pub fn new() -> Self {
-        let cursor: Arc<Mutex<Option<PlaybackCursor>>> = Arc::new(Mutex::new(None));
+        let xfade: Arc<Mutex<XfadeState>> = Arc::new(Mutex::new(XfadeState {
+            current: None,
+            next: None,
+            pos: 0,
+            len: 0,
+        }));
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
         let current_track = Arc::new(Mutex::new(None));
         let volume = Arc::new(Mutex::new(1.0));
         let mixer = Arc::new(Mutex::new(Mixer::default()));
 
         let (stream, device_rate) = match Self::open_silent_stream(
-            cursor.clone(),
+            xfade.clone(),
             state.clone(),
             volume.clone(),
             mixer.clone(),
@@ -77,7 +162,8 @@ impl CpalEngine {
         Self {
             _stream: stream,
             device_rate,
-            cursor,
+            xfade,
+            crossfade_secs: 3.0,
             state,
             current_track,
             volume,
@@ -89,20 +175,21 @@ impl CpalEngine {
         self.device_rate
     }
 
+    /// Blend length used when `play()` fires while something is playing.
+    pub fn set_crossfade_secs(&mut self, secs: f32) {
+        self.crossfade_secs = secs.clamp(0.0, 30.0);
+    }
+
     /// List output devices (for Settings screen later).
     pub fn list_output_devices() -> Vec<String> {
         cpal::default_host()
             .output_devices()
-            .map(|devs| {
-                devs
-                    .filter_map(|d| d.name().ok())
-                    .collect::<Vec<_>>()
-            })
+            .map(|devs| devs.filter_map(|d| d.name().ok()).collect::<Vec<_>>())
             .unwrap_or_default()
     }
 
     fn open_silent_stream(
-        cursor: Arc<Mutex<Option<PlaybackCursor>>>,
+        xfade: Arc<Mutex<XfadeState>>,
         state: Arc<Mutex<PlayerState>>,
         volume: Arc<Mutex<f32>>,
         mixer: Arc<Mutex<Mixer>>,
@@ -111,9 +198,7 @@ impl CpalEngine {
         let device = host
             .default_output_device()
             .ok_or_else(|| "no default output device".to_string())?;
-        let config = device
-            .default_output_config()
-            .map_err(|e| e.to_string())?;
+        let config = device.default_output_config().map_err(|e| e.to_string())?;
         let sample_rate = config.sample_rate().0;
         let channels = config.channels() as usize;
         let stream_config: cpal::StreamConfig = config.into();
@@ -125,28 +210,33 @@ impl CpalEngine {
                 move |data: &mut [f32], _| {
                     let vol = *volume.lock().unwrap();
                     let mx = mixer.lock().unwrap();
-                    let mut cur = cursor.lock().unwrap();
-                    let playing =
-                        *state.lock().unwrap() == PlayerState::Playing;
+                    let mut xf = xfade.lock().unwrap();
+                    let playing = *state.lock().unwrap() == PlayerState::Playing;
 
                     for frame in data.chunks_mut(channels) {
-                        let src = if playing {
-                            cur.as_mut().and_then(|c| c.next_sample())
-                        } else {
-                            None
+                        let req = if playing { xf.pull() } else { None };
+                        let (l, r) = match req {
+                            Some((a, b, x)) => {
+                                let f = mx.process_x(Some(a), b, x);
+                                (f.l * vol, f.r * vol)
+                            }
+                            None => (0.0, 0.0),
                         };
-                        // Mono through mixer (gain+limiter); duplicate to channels.
-                        let out = mx.process(src, None);
-                        let v = out.l * vol;
-                        for s in frame.iter_mut() {
-                            *s = v;
+                        if channels == 1 {
+                            frame[0] = (l + r) * 0.5;
+                        } else {
+                            frame[0] = l;
+                            if channels > 1 {
+                                frame[1] = r;
+                            }
+                            for s in frame.iter_mut().skip(2) {
+                                *s = 0.0;
+                            }
                         }
                     }
                     // Auto-stop at EOF.
-                    if let Some(c) = cur.as_ref() {
-                        if c.is_done() {
-                            *state.lock().unwrap() = PlayerState::Stopped;
-                        }
+                    if playing && xf.is_done() {
+                        *state.lock().unwrap() = PlayerState::Stopped;
                     }
                 },
                 err_fn,
@@ -158,9 +248,9 @@ impl CpalEngine {
     }
 
     fn read_duration(&self, path: &Path) -> Option<f64> {
-        lofty::read_from_path(path).ok().and_then(|f| {
+        lofty::read_from_path(path).ok().map(|f| {
             use lofty::file::AudioFile;
-            Some(f.properties().duration().as_secs_f64())
+            f.properties().duration().as_secs_f64()
         })
     }
 }
@@ -179,20 +269,44 @@ impl Engine for CpalEngine {
             });
         }
         let duration = self.read_duration(path);
-        let samples = decode_to_mono(path)?;
-        let file_rate = probe_sample_rate(path).unwrap_or(self.device_rate);
-        if file_rate != self.device_rate {
-            tracing::warn!(
-                "Rate mismatch file={} device={} — rubato resample TODO, playing at file speed",
-                file_rate,
-                self.device_rate
+        let (samples, file_rate) = decode_to_stereo(path)?;
+        let samples = if file_rate != self.device_rate {
+            tracing::info!("Resampling {} Hz → {} Hz", file_rate, self.device_rate);
+            resample_stereo(samples, file_rate, self.device_rate)?
+        } else {
+            samples
+        };
+        let new = PlaybackCursor {
+            samples,
+            pos_frames: 0,
+        };
+        let mut xf = self.xfade.lock().unwrap();
+        let live = *self.state.lock().unwrap() == PlayerState::Playing
+            && xf.current.as_ref().is_some_and(|c| !c.is_done());
+        if live {
+            // Crossfade: blend out of the current deck into the new one.
+            let remaining = xf
+                .current
+                .as_ref()
+                .map(|c| c.remaining_frames())
+                .unwrap_or(0);
+            let want = (self.crossfade_secs * self.device_rate as f32) as usize;
+            xf.len = want.min(remaining).min(new.remaining_frames()).max(1);
+            xf.pos = 0;
+            xf.next = Some(new);
+            tracing::info!(
+                "CpalEngine crossfading ({} frames): {}",
+                xf.len,
+                path.display()
             );
+        } else {
+            xf.current = Some(new);
+            xf.next = None;
+            xf.pos = 0;
+            xf.len = 0;
+            tracing::info!("CpalEngine playing: {}", path.display());
         }
-        *self.cursor.lock().unwrap() = Some(PlaybackCursor {
-            samples_mono: samples,
-            pos: 0,
-            file_rate,
-        });
+        drop(xf);
         *self.state.lock().unwrap() = PlayerState::Playing;
         *self.current_track.lock().unwrap() = Some(TrackInfo {
             path: path.to_path_buf(),
@@ -200,7 +314,6 @@ impl Engine for CpalEngine {
             artist: None,
             duration_secs: duration,
         });
-        tracing::info!("CpalEngine playing: {}", path.display());
         Ok(())
     }
 
@@ -210,13 +323,18 @@ impl Engine for CpalEngine {
 
     fn resume(&self) {
         // Only resume if there is something loaded.
-        if self.cursor.lock().unwrap().is_some() {
+        if !self.xfade.lock().unwrap().is_done() {
             *self.state.lock().unwrap() = PlayerState::Playing;
         }
     }
 
     fn stop(&self) {
-        *self.cursor.lock().unwrap() = None;
+        let mut xf = self.xfade.lock().unwrap();
+        xf.current = None;
+        xf.next = None;
+        xf.pos = 0;
+        xf.len = 0;
+        drop(xf);
         *self.state.lock().unwrap() = PlayerState::Stopped;
         *self.current_track.lock().unwrap() = None;
     }
@@ -254,18 +372,14 @@ impl Engine for CpalEngine {
     fn is_finished(&self) -> bool {
         match *self.state.lock().unwrap() {
             PlayerState::Stopped => true,
-            _ => self
-                .cursor
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_none_or(|c| c.is_done()),
+            _ => self.xfade.lock().unwrap().is_done(),
         }
     }
 }
 
-/// Decode any symphonia-supported file to mono f32.
-fn decode_to_mono(path: &Path) -> Result<Vec<f32>> {
+/// Decode any symphonia-supported file to stereo-interleaved f32.
+/// Returns `(samples, source_sample_rate)`. Mono is duplicated to both ears.
+fn decode_to_stereo(path: &Path) -> Result<(Vec<f32>, u32)> {
     use symphonia::core::audio::{AudioBufferRef, Signal};
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
@@ -282,7 +396,12 @@ fn decode_to_mono(path: &Path) -> Result<Vec<f32>> {
         hint.with_extension(ext);
     }
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .map_err(|e| CrabError::Audio(e.to_string()))?;
     let mut format = probed.format;
     let track = format
@@ -295,12 +414,9 @@ fn decode_to_mono(path: &Path) -> Result<Vec<f32>> {
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| CrabError::Audio(e.to_string()))?;
 
-    let mut mono: Vec<f32> = Vec::new();
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(_) => break,
-        };
+    let mut stereo: Vec<f32> = Vec::new();
+    let mut src_rate: Option<u32> = None;
+    while let Ok(packet) = format.next_packet() {
         if packet.track_id() != track_id {
             continue;
         }
@@ -310,51 +426,203 @@ fn decode_to_mono(path: &Path) -> Result<Vec<f32>> {
         };
         match decoded {
             AudioBufferRef::F32(buf) => {
-                if buf.spec().channels.count() == 1 {
-                    mono.extend(buf.chan(0));
+                src_rate = src_rate.or(Some(buf.spec().rate));
+                let ch = buf.spec().channels.count();
+                if ch == 1 {
+                    for s in buf.chan(0) {
+                        stereo.push(*s);
+                        stereo.push(*s);
+                    }
                 } else {
-                    let (c0, c1) = (buf.chan(0), buf.chan(1.min(buf.spec().channels.count() - 1)));
-                    mono.extend(c0.iter().zip(c1.iter()).map(|(a, b)| (a + b) * 0.5));
+                    let (c0, c1) = (buf.chan(0), buf.chan(1.min(ch - 1)));
+                    for (a, b) in c0.iter().zip(c1.iter()) {
+                        stereo.push(*a);
+                        stereo.push(*b);
+                    }
                 }
             }
             AudioBufferRef::S16(buf) => {
-                let n = buf.frames() as usize;
+                src_rate = src_rate.or(Some(buf.spec().rate));
                 let ch = buf.spec().channels.count();
+                let n = buf.frames();
                 for i in 0..n {
-                    let mut acc = 0i32;
-                    for c in 0..ch {
-                        acc += buf.chan(c)[i] as i32;
-                    }
-                    mono.push((acc as f32 / ch as f32) / i16::MAX as f32);
+                    let l = buf.chan(0)[i] as f32 / i16::MAX as f32;
+                    let r = if ch > 1 {
+                        buf.chan(1)[i] as f32 / i16::MAX as f32
+                    } else {
+                        l
+                    };
+                    stereo.push(l);
+                    stereo.push(r);
                 }
-                let _ = buf.spec();
             }
             AudioBufferRef::S32(buf) => {
-                let n = buf.frames() as usize;
+                src_rate = src_rate.or(Some(buf.spec().rate));
                 let ch = buf.spec().channels.count();
+                let n = buf.frames();
                 for i in 0..n {
-                    let mut acc = 0i64;
-                    for c in 0..ch {
-                        acc += buf.chan(c)[i] as i64;
-                    }
-                    mono.push((acc as f32 / ch as f32) / i32::MAX as f32);
+                    let l = buf.chan(0)[i] as f32 / i32::MAX as f32;
+                    let r = if ch > 1 {
+                        buf.chan(1)[i] as f32 / i32::MAX as f32
+                    } else {
+                        l
+                    };
+                    stereo.push(l);
+                    stereo.push(r);
                 }
             }
             _ => {
                 // Other sample formats: convert via intermediate is overkill for scaffold.
-                return Err(CrabError::Audio("unsupported sample format (scaffold)".into()));
+                return Err(CrabError::Audio(
+                    "unsupported sample format (scaffold)".into(),
+                ));
             }
         }
     }
-    if mono.is_empty() {
+    if stereo.is_empty() {
         return Err(CrabError::Audio("decoded 0 samples".into()));
     }
-    Ok(mono)
+    Ok((stereo, src_rate.unwrap_or(44100)))
 }
 
-fn probe_sample_rate(path: &Path) -> Option<u32> {
-    lofty::read_from_path(path).ok().and_then(|f| {
-        use lofty::file::AudioFile;
-        f.properties().sample_rate()
-    })
+/// Resample stereo-interleaved f32 from one rate to another (rubato sinc).
+/// Output is trimmed to the exact expected frame count.
+fn resample_stereo(interleaved: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>> {
+    if from == to || interleaved.is_empty() {
+        return Ok(interleaved);
+    }
+    use rubato::{
+        Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+    };
+    let params = SincInterpolationParameters {
+        sinc_len: 64,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 128,
+        window: WindowFunction::BlackmanHarris2,
+    };
+    let ratio = to as f64 / from as f64;
+    let mut resampler = SincFixedIn::<f32>::new(ratio, 2.0, params, 1024, 2)
+        .map_err(|e| CrabError::Audio(format!("resampler setup: {}", e)))?;
+    let frames = interleaved.len() / 2;
+    let mut waves: Vec<Vec<f32>> = (0..2).map(|_| Vec::with_capacity(frames)).collect();
+    for pair in interleaved.as_chunks::<2>().0 {
+        waves[0].push(pair[0]);
+        waves[1].push(pair[1]);
+    }
+    let mut out: Vec<Vec<f32>> = vec![Vec::new(); 2];
+    let mut pos = 0;
+    while pos < frames {
+        let need = resampler.input_frames_next();
+        let take = need.min(frames - pos);
+        let chunk: Vec<Vec<f32>> = waves
+            .iter()
+            .map(|w| {
+                let mut c = Vec::with_capacity(need);
+                c.extend_from_slice(&w[pos..pos + take]);
+                c.resize(need, 0.0);
+                c
+            })
+            .collect();
+        let rendered = resampler
+            .process(&chunk, None)
+            .map_err(|e| CrabError::Audio(format!("resample failed: {}", e)))?;
+        out[0].extend_from_slice(&rendered[0]);
+        out[1].extend_from_slice(&rendered[1]);
+        pos += take;
+    }
+    let want = (frames as f64 * ratio).round() as usize;
+    out[0].truncate(want);
+    out[1].truncate(want);
+    let mut stereo = Vec::with_capacity(want * 2);
+    for (l, r) in out[0].iter().zip(out[1].iter()) {
+        stereo.push(*l);
+        stereo.push(*r);
+    }
+    Ok(stereo)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ramp_stereo(frames: usize) -> Vec<f32> {
+        let mut v = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let t = i as f32 / frames as f32;
+            v.push(t);
+            v.push(1.0 - t);
+        }
+        v
+    }
+
+    #[test]
+    fn resample_passthrough_when_rates_match() {
+        let v = ramp_stereo(100);
+        assert_eq!(resample_stereo(v.clone(), 48000, 48000).unwrap(), v);
+    }
+
+    #[test]
+    fn resample_up_produces_expected_frame_count() {
+        let out = resample_stereo(ramp_stereo(4410), 44100, 48000).unwrap();
+        assert_eq!(out.len(), 4800 * 2);
+        // Monotonic-ish ramp preserved on L (allow filter ripple at edges).
+        assert!(out[200] > 0.0 && out[200] < 0.2);
+        assert!(out[out.len() - 200] > 0.8);
+    }
+
+    #[test]
+    fn resample_down_produces_expected_frame_count() {
+        let out = resample_stereo(ramp_stereo(4800), 48000, 44100).unwrap();
+        assert_eq!(out.len(), 4410 * 2);
+    }
+
+    #[test]
+    fn xfade_pull_blends_and_promotes() {
+        let mut xf = XfadeState {
+            current: Some(PlaybackCursor {
+                samples: vec![1.0, 1.0, 1.0, 1.0],
+                pos_frames: 0,
+            }),
+            next: Some(PlaybackCursor {
+                samples: vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                pos_frames: 0,
+            }),
+            pos: 0,
+            len: 2,
+        };
+        // Frame 0: full current.
+        let (a, b, x) = xf.pull().unwrap();
+        assert_eq!((a.l, x), (1.0, 0.0));
+        assert!(b.is_some());
+        // Frame 1: midpoint, then incoming takes over.
+        let (_a, b, x) = xf.pull().unwrap();
+        assert_eq!(x, 0.5);
+        assert!(b.is_some());
+        assert!(xf.next.is_none(), "blend finished, deck promoted");
+        // Continues from incoming deck at full volume.
+        let (a, _, x) = xf.pull().unwrap();
+        assert_eq!((a.l, x), (0.0, 0.0));
+    }
+
+    #[test]
+    fn xfade_short_incoming_keeps_current() {
+        let mut xf = XfadeState {
+            current: Some(PlaybackCursor {
+                samples: vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                pos_frames: 0,
+            }),
+            next: Some(PlaybackCursor {
+                samples: vec![0.0, 0.0],
+                pos_frames: 0,
+            }),
+            pos: 0,
+            len: 4,
+        };
+        xf.pull().unwrap(); // consumes the single incoming frame
+        let (_, b, _) = xf.pull().unwrap(); // incoming exhausted → blend ends
+        assert!(b.is_none());
+        assert!(xf.next.is_none());
+        assert!(!xf.is_done(), "current deck keeps playing");
+    }
 }

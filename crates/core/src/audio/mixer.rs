@@ -10,6 +10,16 @@ pub struct Frame {
     pub r: f32,
 }
 
+/// Crossfade loudness curve.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CrossfadeCurve {
+    /// Constant-power (equal-power): no dip at the midpoint. Default.
+    #[default]
+    EqualPower,
+    /// Straight linear blend (slight dip at midpoint, classic DJ feel).
+    Linear,
+}
+
 /// Mixer state for program bus.
 #[derive(Debug)]
 pub struct Mixer {
@@ -17,6 +27,8 @@ pub struct Mixer {
     pub gain: f32,
     /// Crossfade 0.0 = full A, 1.0 = full B.
     pub crossfade: f32,
+    /// Curve used for the A/B blend.
+    pub curve: CrossfadeCurve,
     /// Limiter ceiling (linear, e.g. 0.99).
     pub ceiling: f32,
 }
@@ -26,6 +38,7 @@ impl Default for Mixer {
         Self {
             gain: 1.0,
             crossfade: 0.0,
+            curve: CrossfadeCurve::EqualPower,
             ceiling: 0.99,
         }
     }
@@ -47,16 +60,41 @@ impl Mixer {
         self.crossfade = x.clamp(0.0, 1.0);
     }
 
-    /// Mix buses A and B with equal-power crossfade, then gain + hard limiter.
+    pub fn set_curve(&mut self, curve: CrossfadeCurve) {
+        self.curve = curve;
+    }
+
+    fn gains(curve: CrossfadeCurve, x: f32) -> (f32, f32) {
+        match curve {
+            CrossfadeCurve::Linear => (1.0 - x, x),
+            CrossfadeCurve::EqualPower => {
+                use std::f32::consts::FRAC_PI_2;
+                let a = x * FRAC_PI_2;
+                (a.cos(), a.sin())
+            }
+        }
+    }
+
+    /// Mix buses A and B with the configured curve, then gain + hard limiter.
     /// `a` / `b` are mono sources (duplicated to stereo); either may be `None`.
     pub fn process(&self, a: Option<f32>, b: Option<f32>) -> Frame {
-        use std::f32::consts::FRAC_PI_2;
-        let x = self.crossfade * FRAC_PI_2;
-        let (ga, gb) = (x.cos(), x.sin());
-        let m = a.unwrap_or(0.0) * ga + b.unwrap_or(0.0) * gb;
-        let m = m * self.gain;
-        let l = soft_clip(m, self.ceiling);
-        Frame { l, r: l }
+        self.process_x(
+            a.map(|v| Frame { l: v, r: v }),
+            b.map(|v| Frame { l: v, r: v }),
+            self.crossfade,
+        )
+    }
+
+    /// Per-frame stereo crossfade at explicit position `x` (0.0 = full A).
+    /// Used by the engine so every audio frame gets its own blend point.
+    pub fn process_x(&self, a: Option<Frame>, b: Option<Frame>, x: f32) -> Frame {
+        let x = x.clamp(0.0, 1.0);
+        let (ga, gb) = Self::gains(self.curve, x);
+        let a = a.unwrap_or_default();
+        let b = b.unwrap_or_default();
+        let l = soft_clip((a.l * ga + b.l * gb) * self.gain, self.ceiling);
+        let r = soft_clip((a.r * ga + b.r * gb) * self.gain, self.ceiling);
+        Frame { l, r }
     }
 
     /// Process an interleaved stereo slice in place (gain + limiter only).
@@ -106,5 +144,40 @@ mod tests {
         let f = m.process(None, None);
         assert_eq!(f.l, 0.0);
         assert_eq!(f.r, 0.0);
+    }
+
+    #[test]
+    fn stereo_endpoints_keep_channels() {
+        let m = Mixer::default();
+        let a = Frame { l: 0.8, r: 0.2 };
+        let b = Frame { l: 0.1, r: 0.9 };
+        let f = m.process_x(Some(a), Some(b), 0.0);
+        assert!((f.l - 0.8).abs() < 1e-5 && (f.r - 0.2).abs() < 1e-5);
+        let f = m.process_x(Some(a), Some(b), 1.0);
+        assert!((f.l - 0.1).abs() < 1e-5 && (f.r - 0.9).abs() < 1e-5);
+    }
+
+    #[test]
+    fn equal_power_midpoint_holds_level() {
+        let m = Mixer::default();
+        let a = Frame { l: 0.5, r: 0.5 };
+        let b = Frame { l: 0.5, r: 0.5 };
+        let f = m.process_x(Some(a), Some(b), 0.5);
+        // cos45 + sin45 ≈ √2, times 0.5 per bus sum
+        assert!(
+            (f.l - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6,
+            "got {}",
+            f.l
+        );
+    }
+
+    #[test]
+    fn linear_curve_dips_at_midpoint() {
+        let mut m = Mixer::default();
+        m.set_curve(CrossfadeCurve::Linear);
+        let a = Frame { l: 0.5, r: 0.5 };
+        let b = Frame { l: 0.5, r: 0.5 };
+        let f = m.process_x(Some(a), Some(b), 0.5);
+        assert!((f.l - 0.5).abs() < 1e-5, "got {}", f.l);
     }
 }

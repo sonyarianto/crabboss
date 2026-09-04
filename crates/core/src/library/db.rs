@@ -27,7 +27,7 @@ impl TrackKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "jingle" | "bumper" | "sweeper" | "id" | "stationid" | "toth" => TrackKind::Jingle,
             "ad" | "advert" | "commercial" | "promo" => TrackKind::Ad,
@@ -47,7 +47,18 @@ impl TrackKind {
                 })
                 .unwrap_or(false)
         };
-        if is_dir_hit(&["jingle", "bumper", "sweeper", "stationid", "station id", "toth", "stinger", "beds", "liners", "drops"]) {
+        if is_dir_hit(&[
+            "jingle",
+            "bumper",
+            "sweeper",
+            "stationid",
+            "station id",
+            "toth",
+            "stinger",
+            "beds",
+            "liners",
+            "drops",
+        ]) {
             return TrackKind::Jingle;
         }
         if is_dir_hit(&["ads", "advert", "commercial", "promo", "spot"]) {
@@ -57,7 +68,14 @@ impl TrackKind {
             .file_stem()
             .map(|s| s.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        for key in ["jingle", "bumper", "sweeper", "toth", "stationid", "stinger"] {
+        for key in [
+            "jingle",
+            "bumper",
+            "sweeper",
+            "toth",
+            "stationid",
+            "stinger",
+        ] {
             if stem.contains(key) {
                 return TrackKind::Jingle;
             }
@@ -167,9 +185,13 @@ impl Library {
             ",
         )?;
         // Migrate pre-kind databases: add the column if missing.
-        let has_kind: bool = self.conn.prepare("PRAGMA table_info(tracks)")?.query_map([], |row| {
-            row.get::<_, String>(1)
-        })?.collect::<std::result::Result<Vec<_>, _>>()?.iter().any(|c| c == "kind");
+        let has_kind: bool = self
+            .conn
+            .prepare("PRAGMA table_info(tracks)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .iter()
+            .any(|c| c == "kind");
         if !has_kind {
             self.conn.execute(
                 "ALTER TABLE tracks ADD COLUMN kind TEXT NOT NULL DEFAULT 'music'",
@@ -262,7 +284,7 @@ impl Library {
              FROM tracks WHERE kind = ?1 ORDER BY file_name",
         )?;
         let tracks = stmt
-            .query_map(params![kind.as_str()], |row| Self::map_row(row))?
+            .query_map(params![kind.as_str()], Self::map_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(tracks)
     }
@@ -283,7 +305,7 @@ impl Library {
             file_size: row.get(10)?,
             sample_rate: row.get(11)?,
             channels: row.get(12)?,
-            kind: TrackKind::from_str(&row.get::<_, String>(13).unwrap_or_default()),
+            kind: TrackKind::parse(&row.get::<_, String>(13).unwrap_or_default()),
             tags: Vec::new(),
             added_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(14)?)
                 .map(|dt| dt.with_timezone(&Utc))
@@ -306,7 +328,7 @@ impl Library {
         )?;
 
         let tracks = stmt
-            .query_map([], |row| Self::map_row(row))?
+            .query_map([], Self::map_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(tracks)
@@ -321,7 +343,7 @@ impl Library {
              FROM tracks WHERE id = ?1",
         )?;
 
-        let mut rows = stmt.query_map(params![id], |row| Self::map_row(row))?;
+        let mut rows = stmt.query_map(params![id], Self::map_row)?;
 
         Ok(rows.next().transpose()?)
     }
@@ -340,7 +362,7 @@ impl Library {
         )?;
 
         let tracks = stmt
-            .query_map(params![like], |row| Self::map_row(row))?
+            .query_map(params![like], Self::map_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(tracks)
@@ -403,6 +425,7 @@ impl Library {
 }
 
 /// Read metadata from an audio file using lofty.
+#[allow(clippy::type_complexity)]
 fn read_metadata(
     path: &Path,
 ) -> Result<(
@@ -487,17 +510,19 @@ mod tests {
         let lib = Library::open(&dir.join("lib.db")).unwrap();
         // Seed rows directly (avoids needing real audio files).
         for (name, kind) in [("a.mp3", "music"), ("b.mp3", "jingle"), ("c.mp3", "ad")] {
-            lib.conn.execute(
-                "INSERT INTO tracks (id, file_path, file_name, added_at, play_count, kind)
+            lib.conn
+                .execute(
+                    "INSERT INTO tracks (id, file_path, file_name, added_at, play_count, kind)
                  VALUES (?1, ?2, ?3, ?4, 0, ?5)",
-                rusqlite::params![
-                    uuid::Uuid::new_v4().to_string(),
-                    format!("/m/{}", name),
-                    name,
-                    chrono::Utc::now().to_rfc3339(),
-                    kind,
-                ],
-            ).unwrap();
+                    rusqlite::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        format!("/m/{}", name),
+                        name,
+                        chrono::Utc::now().to_rfc3339(),
+                        kind,
+                    ],
+                )
+                .unwrap();
         }
         assert_eq!(lib.list_by_kind(TrackKind::Music).unwrap().len(), 1);
         assert_eq!(lib.list_by_kind(TrackKind::Jingle).unwrap().len(), 1);
@@ -527,12 +552,14 @@ mod tests {
                     added_at TEXT NOT NULL, last_played_at TEXT,
                     play_count INTEGER NOT NULL DEFAULT 0
                 );",
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO tracks (id, file_path, file_name, added_at)
                  VALUES ('1', '/m/old.mp3', 'old.mp3', '2024-01-01T00:00:00Z')",
                 [],
-            ).unwrap();
+            )
+            .unwrap();
         }
         let lib = Library::open(&path).unwrap();
         let all = lib.get_all_tracks().unwrap();

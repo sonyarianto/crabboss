@@ -35,7 +35,9 @@ impl ScheduledEvent {
         if self.days.eq_ignore_ascii_case("daily") {
             return true;
         }
-        self.days.split(',').any(|d| d.trim().eq_ignore_ascii_case(weekday))
+        self.days
+            .split(',')
+            .any(|d| d.trim().eq_ignore_ascii_case(weekday))
     }
 }
 
@@ -155,7 +157,15 @@ impl SchedulerManager {
             "INSERT INTO scheduled_events
              (id, name, action_type, target, start_time, days, enabled, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
-            params![id, name, action_type, target, start_time, days, now.to_rfc3339()],
+            params![
+                id,
+                name,
+                action_type,
+                target,
+                start_time,
+                days,
+                now.to_rfc3339()
+            ],
         )?;
         Ok(ScheduledEvent {
             id,
@@ -281,7 +291,9 @@ mod tests {
     #[test]
     fn toggle_and_delete() {
         let m = mem_manager();
-        let e = m.create("Night", "generate", "Day", "00:00", "Daily").unwrap();
+        let e = m
+            .create("Night", "generate", "Day", "00:00", "Daily")
+            .unwrap();
         m.set_enabled(&e.id, false).unwrap();
         assert_eq!(m.due_events("00:00", "Fri").unwrap().len(), 0);
         m.delete(&e.id).unwrap();
@@ -306,8 +318,11 @@ mod tests {
     fn update_rejects_bad_time() {
         let m = mem_manager();
         let e = m.create("X", "play", "a.mp3", "08:00", "Daily").unwrap();
-        assert!(m.update(&e.id, "X", "play", "a.mp3", "99:99", "Daily").is_err());
-        m.update(&e.id, "Y", "load", "b.m3u", "09:30", "Mon,Fri").unwrap();
+        assert!(m
+            .update(&e.id, "X", "play", "a.mp3", "99:99", "Daily")
+            .is_err());
+        m.update(&e.id, "Y", "load", "b.m3u", "09:30", "Mon,Fri")
+            .unwrap();
         let all = m.list_all().unwrap();
         assert_eq!(all[0].name, "Y");
         assert_eq!(all[0].start_time, "09:30");

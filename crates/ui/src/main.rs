@@ -98,21 +98,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     // Seed a starter flow for a new station (only when empty)
-    if scheduler.borrow().list_all().map(|v| v.is_empty()).unwrap_or(false) {
-        let _ = scheduler.borrow().create(
-            "Midnight generate",
-            "generate",
-            "Day",
-            "00:00",
-            "Daily",
-        );
-        let _ = scheduler.borrow().create(
-            "Morning show",
-            "load",
-            "Morning.m3u",
-            "08:00",
-            "Daily",
-        );
+    if scheduler
+        .borrow()
+        .list_all()
+        .map(|v| v.is_empty())
+        .unwrap_or(false)
+    {
+        let _ = scheduler
+            .borrow()
+            .create("Midnight generate", "generate", "Day", "00:00", "Daily");
+        let _ = scheduler
+            .borrow()
+            .create("Morning show", "load", "Morning.m3u", "08:00", "Daily");
         let _ =
             scheduler
                 .borrow()
@@ -135,14 +132,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     // Seed carts from jingles first, then music (only when empty)
-    if carts.borrow().list_all().map(|v| v.is_empty()).unwrap_or(false) {
+    if carts
+        .borrow()
+        .list_all()
+        .map(|v| v.is_empty())
+        .unwrap_or(false)
+    {
         let jingles = library.list_by_kind(TrackKind::Jingle).unwrap_or_default();
         let music = library.list_by_kind(TrackKind::Music).unwrap_or_default();
         for t in jingles.iter().chain(music.iter()).take(4) {
-            let label = t
-                .title
-                .clone()
-                .unwrap_or_else(|| t.file_name.clone());
+            let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
             let _ = carts.borrow().create(&label, &t.file_path);
         }
         if track_count > 0 {
@@ -182,8 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Tracks currently shown in the library list (all or search-filtered);
     // row indices from Slint resolve against this.
-    let last_shown: Rc<RefCell<Vec<crabcore::library::Track>>> =
-        Rc::new(RefCell::new(Vec::new()));
+    let last_shown: Rc<RefCell<Vec<crabcore::library::Track>>> = Rc::new(RefCell::new(Vec::new()));
 
     // -- Library: push tracks to UI --
     fn refresh_library(
@@ -194,7 +192,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rows: Vec<LibTrack> = tracks
             .iter()
             .map(|t| LibTrack {
-                title: t.title.clone().unwrap_or_else(|| t.file_name.clone()).into(),
+                title: t
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| t.file_name.clone())
+                    .into(),
                 artist: t.artist.clone().unwrap_or_default().into(),
                 duration: fmt_dur(t.duration_secs).into(),
                 kind: kind_label(t.kind).into(),
@@ -656,11 +658,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let next = tracks
                 .iter()
                 .find(|t| t.kind == TrackKind::Jingle && !existing.contains(&t.file_path))
-                .or_else(|| {
-                    tracks
-                        .iter()
-                        .find(|t| !existing.contains(&t.file_path))
-                });
+                .or_else(|| tracks.iter().find(|t| !existing.contains(&t.file_path)));
             match next {
                 Some(t) => {
                     let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
@@ -791,7 +789,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .set_title("Import audio files")
                 .add_filter(
                     "Audio",
-                    &["mp3", "flac", "wav", "ogg", "oga", "aac", "m4a", "opus", "aiff", "wv"],
+                    &[
+                        "mp3", "flac", "wav", "ogg", "oga", "aac", "m4a", "opus", "aiff", "wv",
+                    ],
                 )
                 .pick_files();
             let Some(files) = files else { return };

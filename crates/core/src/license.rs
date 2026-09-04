@@ -19,17 +19,12 @@ use serde::{Deserialize, Serialize};
 use crate::error::{CrabError, Result};
 
 /// License tier.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LicenseTier {
+    #[default]
     Trial,
     Standard,
     Pro,
-}
-
-impl Default for LicenseTier {
-    fn default() -> Self {
-        Self::Trial
-    }
 }
 
 /// Validated license info.
@@ -129,7 +124,9 @@ pub fn validate_key(input: &str) -> Result<(String, LicenseTier, Option<Duration
         ));
     }
     if !payload.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(CrabError::Library("License contains invalid characters".into()));
+        return Err(CrabError::Library(
+            "License contains invalid characters".into(),
+        ));
     }
     let (data8, check4) = payload.split_at(8);
     let expected = checksum_for(data8);
@@ -150,7 +147,12 @@ pub fn validate_key(input: &str) -> Result<(String, LicenseTier, Option<Duration
     };
 
     // Canonical display form: CB-XXXX-XXXX-XXXX
-    let canonical = format!("CB-{}-{}-{}", &payload[0..4], &payload[4..8], &payload[8..12]);
+    let canonical = format!(
+        "CB-{}-{}-{}",
+        &payload[0..4],
+        &payload[4..8],
+        &payload[8..12]
+    );
     Ok((canonical, tier, validity))
 }
 
@@ -205,8 +207,8 @@ impl LicenseStore {
     pub fn activate(&mut self, input: &str, holder: &str) -> Result<LicenseInfo> {
         let info = activate_key(input, holder)?;
         let stored = StoredLicense { info: info.clone() };
-        let json = serde_json::to_string_pretty(&stored)
-            .map_err(|e| CrabError::Library(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(&stored).map_err(|e| CrabError::Library(e.to_string()))?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }

@@ -7,4 +7,6 @@
 
 mod manager;
 
-pub use manager::{days_from_mask, mask_from_days, validate_hhmm, ScheduledEvent, SchedulerManager};
+pub use manager::{
+    days_from_mask, mask_from_days, validate_hhmm, ScheduledEvent, SchedulerManager,
+};

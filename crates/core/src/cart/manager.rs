@@ -61,9 +61,11 @@ impl CartManager {
         let pos: i32 = self
             .conn
             .borrow()
-            .query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM carts", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM carts",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         self.conn.borrow().execute(
             "INSERT INTO carts (id, label, file_path, position, created_at)

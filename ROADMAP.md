@@ -90,10 +90,10 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 ## 1. Parity Work (ordered by priority)
 
 ### 1.1 Finish the audio core (blocks everything downstream)
-- [ ] `CpalEngine`: stereo passthrough (stop downmixing to mono)
-- [ ] `CpalEngine`: dual-cursor playback so `Mixer::process(a, b)` can actually crossfade
-- [ ] Configurable crossfade curve (linear / equal-power / parabolic)
-- [ ] `rubato` resampling to device rate (currently wrong speed on mismatch)
+- [x] `CpalEngine`: stereo passthrough (no more mono downmix; mono devices get L+R mix-down)
+- [x] `CpalEngine`: dual-cursor playback — `play()` while playing crossfades instead of cutting
+- [x] Configurable crossfade curve (`CrossfadeCurve::EqualPower` default / `Linear`)
+- [x] `rubato` sinc resampling to device rate at decode time
 - [ ] 12-band EQ insert (biquad chain) + limiter tuning
 - [ ] Loudness normalization (ReplayGain-style)
 - [ ] Wire `library.search()` results into the Slint model (currently a no-op) — ✅ done (live list + search filter + tap-to-play)
@@ -145,8 +145,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 
 ### 1.10 Quality gates
 - [ ] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — `playlist` done, `library` partial (kind tests only)
-- [ ] `cargo fmt` + `clippy` in CI
-- [ ] Basic CI pipeline (build + test on push)
+- [x] `cargo fmt` + `clippy` in CI (`-D warnings`, zero warnings) + `ci.yml` (fmt/clippy/test on push+PR)
 
 ## 2. Beyond Parity — Where CrabBoss Wins
 

@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use crate::error::Result;
 use crate::audio::player::{PlayerState, TrackInfo};
+use crate::error::Result;
 
 /// Minimal transport + volume interface every backend must provide.
 /// NOTE: no Send+Sync bound — cpal::Stream and rodio::OutputStream are
