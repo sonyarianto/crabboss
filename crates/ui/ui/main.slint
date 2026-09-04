@@ -6,6 +6,7 @@ import { PlaylistPanel } from "playlist.slint";
 import { SettingsScreen } from "settings.slint";
 import { SchedulerScreen, SchedRow } from "scheduler.slint";
 import { CartScreen, CartRow } from "cart.slint";
+import { ReportScreen, ReportRow } from "report.slint";
 
 component NavButton inherits Rectangle {
     in property <string> label: "";
@@ -36,7 +37,7 @@ export component MainWindow inherits Window {
     min-height: 600px;
     background: Theme.bg-primary;
 
-    // -- Router: 1=home, 2=playout, 3=media, 4=settings, 5=scheduler, 6=cartwall --
+    // -- Router: 1=home, 2=playout, 3=media, 4=settings, 5=scheduler, 6=cartwall, 7=reports --
     in-out property <int> current-screen: 1;
     in-out property <string> station-name: "CrabBoss FM";
     in-out property <string> license-status: "Unlicensed";
@@ -71,6 +72,11 @@ export component MainWindow inherits Window {
     // -- Library state (live model; both Playout tab and Media screen bind here) --
     in-out property <[LibTrack]> library-tracks;
     in-out property <string> library-status: "";
+
+    // -- Report state --
+    in-out property <[ReportRow]> report-entries;
+    in-out property <string> report-summary: "";
+    in-out property <int> report-range: 1;
 
     // -- Nav --
     callback navigate(int);
@@ -112,6 +118,10 @@ export component MainWindow inherits Window {
     callback cart-play(int);
     callback cart-delete(int);
     callback cart-add;
+
+    // -- Report callbacks --
+    callback report-range-changed(int);
+    callback report-export;
 
     VerticalLayout {
         // Top nav bar
@@ -167,6 +177,13 @@ export component MainWindow inherits Window {
                     label: "🎛 Carts";
                     active: root.current-screen == 6;
                     clicked => { root.navigate(6); }
+                }
+
+                NavButton {
+                    width: 100px;
+                    label: "📊 Reports";
+                    active: root.current-screen == 7;
+                    clicked => { root.navigate(7); }
                 }
 
                 Rectangle { horizontal-stretch: 1; }
@@ -359,6 +376,17 @@ export component MainWindow inherits Window {
             play-cart(idx) => { root.cart-play(idx); }
             delete-cart(idx) => { root.cart-delete(idx); }
             add-cart => { root.cart-add(); }
+        }
+
+        // -- Reports --
+        if (root.current-screen == 7) : ReportScreen {
+            vertical-stretch: 1;
+            entries: root.report-entries;
+            summary: root.report-summary;
+            range-idx <=> root.report-range;
+
+            set-range(idx) => { root.report-range-changed(idx); }
+            export-csv => { root.report-export(); }
         }
     }
 }

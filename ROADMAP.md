@@ -54,7 +54,7 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [ ] Ad scheduler (blocks with start/end dates, intros/outros — see §1.3)
 - [ ] Icecast/Shoutcast output (see §1.5)
 - [ ] Mic/line-in input with ducking (see §1.6)
-- [ ] Report generator (play logs → XLS/PDF — see §1.9)
+- [x] Report generator (play logs → CSV + screen; XLS/PDF open — see §1.9)
 - [ ] File dialog (`rfd`), progress timer in UI (see §1.9) — `rfd` import done, progress timer still open
 - [ ] Settings screen (audio device, streaming, license details — see §1.9)
 - [ ] Quality: `cargo fmt/clippy`, unit tests (`library`, `playlist`), CI (see §1.10)
@@ -144,9 +144,11 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [ ] Scheduled folder auto-sync (timer re-scan, not just manual import)
 
 ### 1.9 Reporting & Ops
-- [ ] Play-log reports (CSV/XLS/PDF) — royalty reporting is a broadcaster requirement
+- [x] Play logging on every play path (library tap, cart fire, scheduler run, silence filler)
+- [x] Play-log reports: range presets (Today/7d/30d/All), jingle+ad exclusion, newest-100 list, CSV export
+- [ ] XLS/PDF export (CSV done — spreadsheets/royalty bodies accept it; native XLS/PDF later)
 - [ ] Settings screen: audio device picker, streaming config, license details
-- [ ] `rfd` native file dialog for import
+- [x] `rfd` native file dialog for import (+ report export)
 
 ### 1.10 Quality gates
 - [ ] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — `playlist` done, `library` partial (kind tests only)

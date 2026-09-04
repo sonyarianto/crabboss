@@ -8,6 +8,7 @@ pub mod error;
 pub mod library;
 pub mod license;
 pub mod playlist;
+pub mod report;
 pub mod scheduler;
 
 pub use error::{CrabError, Result};

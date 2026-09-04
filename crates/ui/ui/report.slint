@@ -1,0 +1,161 @@
+import { Theme } from "common.slint";
+
+export struct ReportRow {
+    time: string,
+    title: string,
+    artist: string,
+    kind: string,
+}
+
+component PresetBtn inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> active: false;
+    callback clicked;
+
+    height: 28px;
+    horizontal-stretch: 1;
+    border-radius: 6px;
+    background: root.active ? Theme.accent : Theme.bg-panel;
+
+    TouchArea { clicked => { root.clicked(); } }
+
+    Text {
+        text: root.label;
+        color: root.active ? white : Theme.text-secondary;
+        font-size: 12px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component ReportScreen inherits Rectangle {
+    in-out property <[ReportRow]> entries;
+    in-out property <string> summary: "";
+    in-out property <int> range-idx: 1;
+
+    callback set-range(int);
+    callback export-csv;
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            height: 34px;
+            spacing: 8px;
+            alignment: space-between;
+
+            Text {
+                text: "📊 Reports";
+                color: Theme.text-primary;
+                font-size: 14px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                width: 130px;
+                height: 28px;
+                border-radius: 6px;
+                background: Theme.accent;
+                TouchArea { clicked => { root.export-csv(); } }
+                Text {
+                    text: "Export CSV";
+                    color: white;
+                    font-size: 12px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            PresetBtn {
+                label: "Today";
+                active: root.range-idx == 0;
+                clicked => { root.set-range(0); }
+            }
+            PresetBtn {
+                label: "7 days";
+                active: root.range-idx == 1;
+                clicked => { root.set-range(1); }
+            }
+            PresetBtn {
+                label: "30 days";
+                active: root.range-idx == 2;
+                clicked => { root.set-range(2); }
+            }
+            PresetBtn {
+                label: "All";
+                active: root.range-idx == 3;
+                clicked => { root.set-range(3); }
+            }
+        }
+
+        Text {
+            text: root.summary == "" ? "Music airplay (jingles/ads excluded)" : root.summary;
+            color: Theme.text-dim;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            if (root.entries.length == 0) : Text {
+                text: "No plays logged yet — play something first";
+                color: Theme.text-dim;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            Flickable {
+                VerticalLayout {
+                    spacing: 0px;
+                    for e[i] in root.entries : Rectangle {
+                        height: 32px;
+                        background: mod(i, 2) == 0 ? Theme.bg-primary : Theme.bg-secondary;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            Text {
+                                text: e.time;
+                                color: Theme.text-dim;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                width: 110px;
+                            }
+                            Text {
+                                text: e.title;
+                                color: Theme.text-primary;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 3;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: e.artist;
+                                color: Theme.text-secondary;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 2;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

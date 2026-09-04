@@ -170,7 +170,6 @@ impl Library {
         Ok(lib)
     }
 
-    #[cfg(test)]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
@@ -419,6 +418,19 @@ impl Library {
 
         let mut rows = stmt.query_map(params![id], Self::map_row)?;
 
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Find a track by its exact file path (used to log cart/scheduler plays).
+    pub fn find_by_path(&self, path: &str) -> Result<Option<Track>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, file_path, file_name, title, artist, album, genre, year,
+                    track_number, duration_secs, file_size, sample_rate, channels,
+                    kind, added_at, last_played_at, play_count,
+                    daypart_start, daypart_end, daypart_days
+             FROM tracks WHERE file_path = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![path], Self::map_row)?;
         Ok(rows.next().transpose()?)
     }
 

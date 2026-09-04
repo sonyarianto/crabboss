@@ -376,8 +376,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "load" | "play" => {
                 let path = PathBuf::from(&event.target);
                 if path.is_file() {
+                    let logged = s
+                        .library
+                        .find_by_path(&event.target)
+                        .ok()
+                        .flatten()
+                        .map(|t| (t.id, t.duration_secs));
                     match s.player.play(&path) {
                         Ok(()) => {
+                            if let Some((id, dur)) = logged {
+                                let _ = s.library.record_play(&id, dur);
+                            }
                             drop(s);
                             if let Some(ui) = ui_weak.upgrade() {
                                 ui.set_is_playing(true);
@@ -651,6 +660,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
                         match s.player.play(&path) {
                             Ok(()) => {
+                                let _ = s.library.record_play(&t.id, t.duration_secs);
                                 drop(s);
                                 if let Some(ui) = ui_weak.upgrade() {
                                     ui.set_is_playing(true);
@@ -736,9 +746,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
             let s = state.borrow();
+            let logged = s
+                .library
+                .find_by_path(&cart.file_path)
+                .ok()
+                .flatten()
+                .map(|t| (t.id, t.duration_secs));
             match s.player.play(&path) {
                 Ok(()) => {
                     tracing::info!("Cart fired: {}", cart.label);
+                    if let Some((id, dur)) = logged {
+                        let _ = s.library.record_play(&id, dur);
+                    }
                     drop(s);
                     if let Some(ui) = ui_weak.upgrade() {
                         ui.set_is_playing(true);
@@ -1005,6 +1024,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             match s.player.play(&path) {
                 Ok(()) => {
+                    let _ = s.library.record_play(&track.id, track.duration_secs);
                     if let Some(ui) = ui_weak.upgrade() {
                         let title = track
                             .title
@@ -1022,6 +1042,129 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => {
                     tracing::error!("Failed to play: {}", e);
                 }
+            }
+        });
+    }
+
+    // -- Reports: range query (jingles/ads excluded), newest first --
+    fn report_range_bounds(idx: i32) -> (chrono::DateTime<chrono::Utc>, String) {
+        use chrono::{Duration, Local};
+        let now = Local::now();
+        let label = match idx {
+            0 => "Today",
+            2 => "Last 30 days",
+            3 => "All time",
+            _ => "Last 7 days",
+        }
+        .to_string();
+        let from = match idx {
+            0 => now
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_local_timezone(Local)
+                .unwrap(),
+            2 => now - Duration::days(30),
+            3 => now - Duration::days(365 * 20),
+            _ => now - Duration::days(7),
+        };
+        (from.with_timezone(&chrono::Utc), label)
+    }
+
+    fn refresh_report(ui: &MainWindow, state: &Rc<RefCell<AppState>>, range_idx: i32) {
+        use crabcore::library::TrackKind;
+        let (from, label) = report_range_bounds(range_idx);
+        let to = chrono::Utc::now();
+        let s = state.borrow();
+        let entries = crabcore::report::play_report(
+            &s.library,
+            from,
+            to,
+            &[TrackKind::Jingle, TrackKind::Ad],
+        )
+        .unwrap_or_default();
+        drop(s);
+        let airtime: f64 = entries.iter().filter_map(|e| e.duration_secs).sum();
+        let rows: Vec<ReportRow> = entries
+            .iter()
+            .take(100)
+            .map(|e| ReportRow {
+                time: e.played_at.format("%d/%m %H:%M").to_string().into(),
+                title: e.title.clone().into(),
+                artist: e.artist.clone().into(),
+                kind: e.kind.as_str().into(),
+            })
+            .collect();
+        let model = Rc::new(slint::VecModel::from(rows));
+        ui.set_report_entries(model.into());
+        ui.set_report_summary(
+            format!(
+                "{}: {} plays • {:.0} min music airtime (jingles/ads excluded{})",
+                label,
+                entries.len(),
+                airtime / 60.0,
+                if entries.len() > 100 {
+                    "; showing newest 100"
+                } else {
+                    ""
+                }
+            )
+            .into(),
+        );
+    }
+    refresh_report(&ui, &state, 1);
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_report_range_changed(move |idx| {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_report_range(idx);
+                refresh_report(&ui, &state, idx);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_report_export(move || {
+            let path = rfd::FileDialog::new()
+                .set_title("Export play report (CSV)")
+                .set_file_name("crabboss-report.csv")
+                .add_filter("CSV", &["csv"])
+                .save_file();
+            let Some(path) = path else { return };
+            let (from, _) = report_range_bounds(
+                ui_weak
+                    .upgrade()
+                    .map(|ui| ui.get_report_range())
+                    .unwrap_or(1),
+            );
+            let s = state.borrow();
+            let entries = crabcore::report::play_report(
+                &s.library,
+                from,
+                chrono::Utc::now(),
+                &[
+                    crabcore::library::TrackKind::Jingle,
+                    crabcore::library::TrackKind::Ad,
+                ],
+            )
+            .unwrap_or_default();
+            drop(s);
+            match std::fs::write(&path, crabcore::report::to_csv(&entries)) {
+                Ok(()) => {
+                    tracing::info!(
+                        "Report exported: {} ({} rows)",
+                        path.display(),
+                        entries.len()
+                    );
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_report_summary(
+                            format!("Exported {} rows to {}", entries.len(), path.display()).into(),
+                        );
+                    }
+                }
+                Err(e) => tracing::error!("Report export failed: {}", e),
             }
         });
     }
