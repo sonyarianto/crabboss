@@ -7,6 +7,7 @@ import { SettingsScreen } from "settings.slint";
 import { SchedulerScreen, SchedRow } from "scheduler.slint";
 import { CartScreen, CartRow } from "cart.slint";
 import { ReportScreen, ReportRow } from "report.slint";
+import { AdsScreen, AdRow } from "ads.slint";
 
 component NavButton inherits Rectangle {
     in property <string> label: "";
@@ -37,7 +38,7 @@ export component MainWindow inherits Window {
     min-height: 600px;
     background: Theme.bg-primary;
 
-    // -- Router: 1=home, 2=playout, 3=media, 4=settings, 5=scheduler, 6=cartwall, 7=reports --
+    // -- Router: 1=home, 2=playout, 3=media, 4=settings, 5=scheduler, 6=cartwall, 7=reports, 8=ads --
     in-out property <int> current-screen: 1;
     in-out property <string> station-name: "CrabBoss FM";
     in-out property <string> license-status: "Unlicensed";
@@ -77,6 +78,11 @@ export component MainWindow inherits Window {
     in-out property <[ReportRow]> report-entries;
     in-out property <string> report-summary: "";
     in-out property <int> report-range: 1;
+
+    // -- Ads state --
+    in-out property <[AdRow]> ads-items;
+    in-out property <bool> ads-show-editor: false;
+    in-out property <string> ads-error: "";
 
     // -- Nav --
     callback navigate(int);
@@ -122,6 +128,12 @@ export component MainWindow inherits Window {
     // -- Report callbacks --
     callback report-range-changed(int);
     callback report-export;
+
+    // -- Ads callbacks --
+    callback ads-toggle-block(int);
+    callback ads-delete-block(int);
+    callback ads-run-block(int);
+    callback ads-save-block(int, string, string, string, string, string, string, string, bool, bool, bool, bool, bool, bool, bool);
 
     VerticalLayout {
         // Top nav bar
@@ -184,6 +196,13 @@ export component MainWindow inherits Window {
                     label: "📊 Reports";
                     active: root.current-screen == 7;
                     clicked => { root.navigate(7); }
+                }
+
+                NavButton {
+                    width: 80px;
+                    label: "📢 Ads";
+                    active: root.current-screen == 8;
+                    clicked => { root.navigate(8); }
                 }
 
                 Rectangle { horizontal-stretch: 1; }
@@ -387,6 +406,21 @@ export component MainWindow inherits Window {
 
             set-range(idx) => { root.report-range-changed(idx); }
             export-csv => { root.report-export(); }
+        }
+
+        // -- Ads --
+        if (root.current-screen == 8) : AdsScreen {
+            vertical-stretch: 1;
+            blocks: root.ads-items;
+            show-editor <=> root.ads-show-editor;
+            editor-error <=> root.ads-error;
+
+            toggle-block(idx) => { root.ads-toggle-block(idx); }
+            delete-block(idx) => { root.ads-delete-block(idx); }
+            run-block(idx) => { root.ads-run-block(idx); }
+            save-block(idx, name, spot, intro, outro, start, end, time, mon, tue, wed, thu, fri, sat, sun) => {
+                root.ads-save-block(idx, name, spot, intro, outro, start, end, time, mon, tue, wed, thu, fri, sat, sun);
+            }
         }
     }
 }

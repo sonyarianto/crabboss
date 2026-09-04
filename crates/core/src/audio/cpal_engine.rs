@@ -4,6 +4,7 @@
 //! dual-cursor equal-power/linear crossfade through `Mixer` in the callback.
 //! TODO: EQ insert, mic input, Icecast tee.
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -44,7 +45,8 @@ impl PlaybackCursor {
 /// Dual-cursor crossfade state, owned by the audio callback.
 struct XfadeState {
     current: Option<PlaybackCursor>,
-    next: Option<PlaybackCursor>,
+    /// Pending decks in play order (queue primitive: ad chains, auto-DJ).
+    next: VecDeque<PlaybackCursor>,
     /// Frames elapsed in the active blend; `len == 0` means no blend.
     pos: usize,
     len: usize,
@@ -58,36 +60,30 @@ impl XfadeState {
     fn pull(&mut self) -> Option<(Frame, Option<Frame>, f32)> {
         // Promote when the current deck is exhausted.
         if self.current.as_ref().is_none_or(|c| c.is_done()) {
-            if self.next.is_some() {
-                self.current = self.next.take();
-                self.pos = 0;
-                self.len = 0;
-            } else {
-                return None;
-            }
+            let n = self.next.pop_front()?;
+            self.current = Some(n);
+            self.pos = 0;
+            self.len = 0;
         }
         let cur = self.current.as_mut().unwrap();
         let (l, r) = match cur.next_stereo() {
             Some(v) => v,
             None => {
                 // Hit EOF exactly on this pull: hand over to next if any.
-                if self.next.is_some() {
-                    self.current = self.next.take();
-                    self.pos = 0;
-                    self.len = 0;
-                    match self.current.as_mut().unwrap().next_stereo() {
-                        Some((l, r)) => (l, r),
-                        None => return None,
-                    }
-                } else {
-                    return None;
+                let n = self.next.pop_front()?;
+                self.current = Some(n);
+                self.pos = 0;
+                self.len = 0;
+                match self.current.as_mut().unwrap().next_stereo() {
+                    Some((l, r)) => (l, r),
+                    None => return None,
                 }
             }
         };
         let a = Frame { l, r };
         // Queued deck waiting and current nearly done: ease into the blend.
         if self.len == 0 && self.auto_len > 0 {
-            if let (Some(cur), Some(nxt)) = (self.current.as_ref(), self.next.as_ref()) {
+            if let (Some(cur), Some(nxt)) = (self.current.as_ref(), self.next.front()) {
                 let remaining = cur.remaining_frames();
                 if remaining > 0 && remaining <= self.auto_len && nxt.remaining_frames() > 0 {
                     self.len = self
@@ -100,22 +96,22 @@ impl XfadeState {
             }
         }
         if self.len > 0 {
-            if let Some(nxt) = self.next.as_mut() {
+            if let Some(nxt) = self.next.front_mut() {
                 match nxt.next_stereo() {
                     Some((l, r)) => {
                         let x = (self.pos as f32 / self.len as f32).min(1.0);
                         self.pos += 1;
                         if self.pos >= self.len {
                             // Blend finished: incoming deck takes over.
-                            self.current = self.next.take();
+                            self.current = self.next.pop_front();
                             self.pos = 0;
                             self.len = 0;
                         }
                         return Some((a, Some(Frame { l, r }), x));
                     }
-                    // Incoming clip shorter than the blend: keep playing current.
+                    // Front clip exhausted mid-blend: drop it, keep current.
                     None => {
-                        self.next = None;
+                        self.next.pop_front();
                         self.pos = 0;
                         self.len = 0;
                     }
@@ -128,7 +124,7 @@ impl XfadeState {
     }
 
     fn is_done(&self) -> bool {
-        self.current.as_ref().is_none_or(|c| c.is_done()) && self.next.is_none()
+        self.current.as_ref().is_none_or(|c| c.is_done()) && self.next.is_empty()
     }
 }
 
@@ -152,7 +148,7 @@ impl CpalEngine {
     pub fn new() -> Self {
         let xfade: Arc<Mutex<XfadeState>> = Arc::new(Mutex::new(XfadeState {
             current: None,
-            next: None,
+            next: VecDeque::new(),
             pos: 0,
             len: 0,
             auto_len: 0,
@@ -218,7 +214,7 @@ impl CpalEngine {
     }
 
     /// Queue a file to start at the current deck's end (insert-after).
-    /// Latest call wins if one is already pending.
+    /// Appends behind anything already pending.
     pub fn queue_file(&self, path: &Path) -> Result<()> {
         if !path.exists() {
             return Err(CrabError::FileNotFound {
@@ -228,12 +224,11 @@ impl CpalEngine {
         let new = self.decode_resampled(path)?;
         let mut xf = self.xfade.lock().unwrap();
         xf.auto_len = (self.crossfade_secs * self.device_rate as f32) as usize;
-        if xf.current.as_ref().is_some_and(|c| !c.is_done()) {
-            xf.next = Some(new);
+        if xf.current.as_ref().is_some_and(|c| !c.is_done()) || !xf.next.is_empty() {
+            xf.next.push_back(new);
             tracing::info!("CpalEngine queued: {}", path.display());
         } else {
             xf.current = Some(new);
-            xf.next = None;
             xf.pos = 0;
             xf.len = 0;
         }
@@ -347,7 +342,8 @@ impl Engine for CpalEngine {
         let live = *self.state.lock().unwrap() == PlayerState::Playing
             && xf.current.as_ref().is_some_and(|c| !c.is_done());
         if live {
-            // Crossfade: blend out of the current deck into the new one.
+            // Crossfade: blend out of the current deck into the new one,
+            // replacing anything pending (immediate intent wins).
             let remaining = xf
                 .current
                 .as_ref()
@@ -356,7 +352,7 @@ impl Engine for CpalEngine {
             let want = (self.crossfade_secs * self.device_rate as f32) as usize;
             xf.len = want.min(remaining).min(new.remaining_frames()).max(1);
             xf.pos = 0;
-            xf.next = Some(new);
+            xf.next = VecDeque::from([new]);
             tracing::info!(
                 "CpalEngine crossfading ({} frames): {}",
                 xf.len,
@@ -364,7 +360,7 @@ impl Engine for CpalEngine {
             );
         } else {
             xf.current = Some(new);
-            xf.next = None;
+            xf.next.clear();
             xf.pos = 0;
             xf.len = 0;
             tracing::info!("CpalEngine playing: {}", path.display());
@@ -395,7 +391,7 @@ impl Engine for CpalEngine {
     fn stop(&self) {
         let mut xf = self.xfade.lock().unwrap();
         xf.current = None;
-        xf.next = None;
+        xf.next.clear();
         xf.pos = 0;
         xf.len = 0;
         drop(xf);
@@ -622,6 +618,7 @@ fn resample_stereo(interleaved: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
 
     fn ramp_stereo(frames: usize) -> Vec<f32> {
         let mut v = Vec::with_capacity(frames * 2);
@@ -661,10 +658,10 @@ mod tests {
                 samples: vec![1.0, 1.0, 1.0, 1.0],
                 pos_frames: 0,
             }),
-            next: Some(PlaybackCursor {
+            next: VecDeque::from([PlaybackCursor {
                 samples: vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 pos_frames: 0,
-            }),
+            }]),
             pos: 0,
             len: 2,
             auto_len: 0,
@@ -677,7 +674,7 @@ mod tests {
         let (_a, b, x) = xf.pull().unwrap();
         assert_eq!(x, 0.5);
         assert!(b.is_some());
-        assert!(xf.next.is_none(), "blend finished, deck promoted");
+        assert!(xf.next.is_empty(), "blend finished, deck promoted");
         // Continues from incoming deck at full volume.
         let (a, _, x) = xf.pull().unwrap();
         assert_eq!((a.l, x), (0.0, 0.0));
@@ -690,10 +687,10 @@ mod tests {
                 samples: vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
                 pos_frames: 0,
             }),
-            next: Some(PlaybackCursor {
+            next: VecDeque::from([PlaybackCursor {
                 samples: vec![0.0, 0.0],
                 pos_frames: 0,
-            }),
+            }]),
             pos: 0,
             len: 4,
             auto_len: 0,
@@ -701,7 +698,7 @@ mod tests {
         xf.pull().unwrap(); // consumes the single incoming frame
         let (_, b, _) = xf.pull().unwrap(); // incoming exhausted → blend ends
         assert!(b.is_none());
-        assert!(xf.next.is_none());
+        assert!(xf.next.is_empty());
         assert!(!xf.is_done(), "current deck keeps playing");
     }
 
@@ -712,10 +709,10 @@ mod tests {
                 samples: vec![1.0, 1.0, 1.0, 1.0],
                 pos_frames: 0,
             }),
-            next: Some(PlaybackCursor {
+            next: VecDeque::from([PlaybackCursor {
                 samples: vec![2.0, 2.0, 2.0, 2.0],
                 pos_frames: 0,
-            }),
+            }]),
             pos: 0,
             len: 0,
             auto_len: 0,
@@ -735,10 +732,10 @@ mod tests {
                 samples: vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
                 pos_frames: 0,
             }),
-            next: Some(PlaybackCursor {
+            next: VecDeque::from([PlaybackCursor {
                 samples: vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 pos_frames: 0,
-            }),
+            }]),
             pos: 0,
             len: 0,
             auto_len: 2,
@@ -749,7 +746,34 @@ mod tests {
         assert!(b.is_some() && x == 0.0);
         let (_, b, x) = xf.pull().unwrap();
         assert!(b.is_some() && x == 0.5);
-        assert!(xf.next.is_none(), "blend finished, queued deck promoted");
+        assert!(xf.next.is_empty(), "blend finished, queued deck promoted");
         assert!(!xf.is_done());
+    }
+
+    #[test]
+    fn pending_chain_plays_in_order() {
+        // intro → spot → outro queued behind one live frame.
+        let mut xf = XfadeState {
+            current: Some(PlaybackCursor {
+                samples: vec![1.0, 1.0],
+                pos_frames: 0,
+            }),
+            next: VecDeque::from([
+                PlaybackCursor {
+                    samples: vec![2.0, 2.0],
+                    pos_frames: 0,
+                },
+                PlaybackCursor {
+                    samples: vec![3.0, 3.0],
+                    pos_frames: 0,
+                },
+            ]),
+            pos: 0,
+            len: 0,
+            auto_len: 0,
+        };
+        let heard: Vec<f32> = (0..3).map(|_| xf.pull().unwrap().0.l).collect();
+        assert_eq!(heard, vec![1.0, 2.0, 3.0]);
+        assert!(xf.is_done());
     }
 }

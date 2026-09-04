@@ -51,7 +51,7 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [ ] Crossfader + gapless (see §1.1 — full scope below)
 - [ ] 12-band EQ + limiter (see §1.1)
 - [x] Playlist auto-generator with rotation rules (engine done: repeat/separation/priority/daypart/jingles; UI presets open)
-- [ ] Ad scheduler (blocks with start/end dates, intros/outros — see §1.3)
+- [x] Ad scheduler (dated blocks with intros/outros, chained breaks — see §1.3)
 - [ ] Icecast/Shoutcast output (see §1.5)
 - [ ] Mic/line-in input with ducking (see §1.6)
 - [x] Report generator (play logs → CSV + screen; XLS/PDF open — see §1.9)
@@ -107,8 +107,8 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [ ] Multi-playlist generation UI (several dayparts/rotations at once)
 
 ### 1.3 Ads, Scheduler & Cart depth
-- [ ] Ad blocks with start/end date ranges (not just daily HH:MM)
-- [ ] Intro/outro clips per ad block (queue primitive ready — chain intro→spot→outro)
+- [x] Ad blocks with start/end date ranges (validity window + weekday + HH:MM, full Add/Edit UI)
+- [x] Intro/outro clips per ad block (engine pending-queue chains intro→spot→outro; spot play logged)
 - [ ] Scheduler event expiration ("valid until") + warnings
 - [x] "Insert after current track" (`queue` action + `Engine::queue`: cpal blends
       at the boundary with end-of-track auto-fade; rodio degrades to immediate play)

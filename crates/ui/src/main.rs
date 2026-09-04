@@ -149,6 +149,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Ads store (same db file, separate connection)
+    let ads = Rc::new(RefCell::new(
+        crabcore::ads::AdsManager::open(&db_path).expect("Failed to open ads store"),
+    ));
+
     // Build Slint UI
     let ui = MainWindow::new().expect("Failed to create main window");
 
@@ -599,6 +604,252 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // -- Ads: push blocks to UI --
+    fn short_name(path: &str) -> String {
+        PathBuf::from(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
+
+    fn refresh_ads(ui: &MainWindow, ads: &crabcore::ads::AdsManager) {
+        use crabcore::scheduler::mask_from_days;
+        let blocks = ads.list_all().unwrap_or_default();
+        let rows: Vec<AdRow> = blocks
+            .iter()
+            .map(|b| {
+                let mask = mask_from_days(&b.days);
+                AdRow {
+                    name: b.name.clone().into(),
+                    time: b.play_time.clone().into(),
+                    dates: format!("{} → {}", b.start_date, b.end_date).into(),
+                    spot: short_name(&b.spot_path).into(),
+                    days: b.days.clone().into(),
+                    enabled: b.enabled,
+                    mon: mask & 1 != 0,
+                    tue: mask & 2 != 0,
+                    wed: mask & 4 != 0,
+                    thu: mask & 8 != 0,
+                    fri: mask & 16 != 0,
+                    sat: mask & 32 != 0,
+                    sun: mask & 64 != 0,
+                    spot_full: b.spot_path.clone().into(),
+                    intro_full: b.intro_path.clone().unwrap_or_default().into(),
+                    outro_full: b.outro_path.clone().unwrap_or_default().into(),
+                    start_full: b.start_date.to_string().into(),
+                    end_full: b.end_date.to_string().into(),
+                }
+            })
+            .collect();
+        let model = Rc::new(slint::VecModel::from(rows));
+        ui.set_ads_items(model.into());
+    }
+    ui.set_ads_show_editor(false);
+    ui.set_ads_error("".into());
+    refresh_ads(&ui, &ads.borrow());
+
+    // Shared break firing: intro now, spot + outro chained on the queue.
+    fn fire_ad_block(
+        state: &Rc<RefCell<AppState>>,
+        ui_weak: &slint::Weak<MainWindow>,
+        block: &crabcore::ads::AdBlock,
+    ) {
+        if !PathBuf::from(&block.spot_path).is_file() {
+            tracing::warn!(
+                "Ad block '{}' skipped, spot missing: {}",
+                block.name,
+                block.spot_path
+            );
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_now_playing_title(format!("Ad '{}': spot missing", block.name).into());
+            }
+            return;
+        }
+        tracing::info!("Ad break firing: {}", block.name);
+        let s = state.borrow();
+        let mut first = true;
+        for clip in block.chain() {
+            let r = if first {
+                s.player.play(&PathBuf::from(&clip))
+            } else {
+                s.player.queue(&PathBuf::from(&clip))
+            };
+            if let Err(e) = r {
+                tracing::error!("Ad clip failed ({}): {}", clip, e);
+                return;
+            }
+            first = false;
+        }
+        if let Some(t) = s.library.find_by_path(&block.spot_path).ok().flatten() {
+            let _ = s.library.record_play(&t.id, t.duration_secs);
+        }
+        drop(s);
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_is_playing(true);
+            ui.set_now_playing_title(format!("AD: {}", block.name).into());
+            ui.set_now_playing_artist("Ad break".into());
+        }
+    }
+
+    // -- Ads save (Add/Edit dialog) --
+    {
+        let ui_weak = ui.as_weak();
+        let ads = ads.clone();
+        ui.on_ads_save_block(
+            move |idx,
+                  name,
+                  spot,
+                  intro,
+                  outro,
+                  start,
+                  end,
+                  time,
+                  mon,
+                  tue,
+                  wed,
+                  thu,
+                  fri,
+                  sat,
+                  sun| {
+                use crabcore::scheduler::days_from_mask;
+                let mut mask = 0u8;
+                if mon {
+                    mask |= 1;
+                }
+                if tue {
+                    mask |= 2;
+                }
+                if wed {
+                    mask |= 4;
+                }
+                if thu {
+                    mask |= 8;
+                }
+                if fri {
+                    mask |= 16;
+                }
+                if sat {
+                    mask |= 32;
+                }
+                if sun {
+                    mask |= 64;
+                }
+                let days = days_from_mask(mask);
+                let res = if idx < 0 {
+                    ads.borrow()
+                        .create(
+                            name.trim(),
+                            spot.trim(),
+                            intro.trim(),
+                            outro.trim(),
+                            start.trim(),
+                            end.trim(),
+                            time.trim(),
+                            &days,
+                        )
+                        .map(|_| ())
+                } else {
+                    let ids: Vec<String> = ads
+                        .borrow()
+                        .list_all()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|b| b.id)
+                        .collect();
+                    match ids.get(idx as usize) {
+                        Some(id) => ads.borrow().update(
+                            id,
+                            name.trim(),
+                            spot.trim(),
+                            intro.trim(),
+                            outro.trim(),
+                            start.trim(),
+                            end.trim(),
+                            time.trim(),
+                            &days,
+                        ),
+                        None => Err(crabcore::CrabError::Scheduler("block gone".into())),
+                    }
+                };
+                match res {
+                    Ok(()) => {
+                        tracing::info!("Ad block saved: {} at {}", name, time);
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_ads_error("".into());
+                            ui.set_ads_show_editor(false);
+                            refresh_ads(&ui, &ads.borrow());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Ad block save failed: {}", e);
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_ads_error(format!("{}", e).into());
+                        }
+                    }
+                }
+            },
+        );
+    }
+
+    // -- Ads toggle / delete / run --
+    {
+        let ui_weak = ui.as_weak();
+        let ads = ads.clone();
+        ui.on_ads_toggle_block(move |idx| {
+            let ids: Vec<(String, bool)> = ads
+                .borrow()
+                .list_all()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|b| (b.id, b.enabled))
+                .collect();
+            if let Some((id, enabled)) = ids.get(idx as usize) {
+                if let Err(e) = ads.borrow().set_enabled(id, !enabled) {
+                    tracing::error!("Ad toggle failed: {}", e);
+                }
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh_ads(&ui, &ads.borrow());
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let ads = ads.clone();
+        ui.on_ads_delete_block(move |idx| {
+            let ids: Vec<String> = ads
+                .borrow()
+                .list_all()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|b| b.id)
+                .collect();
+            if let Some(id) = ids.get(idx as usize) {
+                if let Err(e) = ads.borrow().delete(id) {
+                    tracing::error!("Ad delete failed: {}", e);
+                }
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh_ads(&ui, &ads.borrow());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let ads = ads.clone();
+        ui.on_ads_run_block(move |idx| {
+            let block = ads
+                .borrow()
+                .list_all()
+                .unwrap_or_default()
+                .into_iter()
+                .nth(idx as usize);
+            let Some(block) = block else { return };
+            fire_ad_block(&state, &ui_weak, &block);
+        });
+    }
+
     // -- Scheduler auto-tick: fire due events while master is ON --
     // Runs on the UI thread (Slint Timer), so Engine/Library Rc access is safe.
     // Dedupes per (event, minute) so a 15s tick fires each event once.
@@ -606,7 +857,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         let ui_weak = ui.as_weak();
         let scheduler = scheduler.clone();
+        let ads = ads.clone();
         let fired: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
+        let fired_ads: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
         let tick = slint::Timer::default();
         tick.start(
             slint::TimerMode::Repeated,
@@ -624,9 +877,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .borrow()
                     .due_events(&hhmm, &weekday)
                     .unwrap_or_default();
-                if due.is_empty() {
-                    return;
-                }
                 let mut fired = fired.borrow_mut();
                 for event in due {
                     let already = fired
@@ -638,6 +888,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     fired.insert(event.id.clone(), minute_key.clone());
                     fire_scheduled_event(&state, &ui_weak, &event);
+                }
+                drop(fired);
+                // Ad blocks (validity window + weekday aware), same dedupe.
+                let due_ads = ads
+                    .borrow()
+                    .due_blocks(now.date_naive(), &hhmm, &weekday)
+                    .unwrap_or_default();
+                if !due_ads.is_empty() {
+                    let mut fired_ads = fired_ads.borrow_mut();
+                    for block in due_ads {
+                        let already = fired_ads
+                            .get(&block.id)
+                            .map(|m| m == &minute_key)
+                            .unwrap_or(false);
+                        if already {
+                            continue;
+                        }
+                        fired_ads.insert(block.id.clone(), minute_key.clone());
+                        fire_ad_block(&state, &ui_weak, &block);
+                    }
                 }
             },
         );

@@ -2,6 +2,7 @@
 //!
 //! Audio playback, library management, playlist scheduling, and more.
 
+pub mod ads;
 pub mod audio;
 pub mod cart;
 pub mod error;
