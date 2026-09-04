@@ -5,6 +5,7 @@
 pub mod audio;
 pub mod error;
 pub mod library;
+pub mod license;
 pub mod playlist;
 
 pub use error::{CrabError, Result};

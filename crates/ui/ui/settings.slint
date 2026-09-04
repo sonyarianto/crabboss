@@ -1,0 +1,243 @@
+import { Theme } from "common.slint";
+
+component SectionHeader inherits Rectangle {
+    in property <string> label: "";
+    height: 32px;
+
+    Text {
+        text: root.label;
+        color: Theme.text-primary;
+        font-size: 15px;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+}
+
+component SettingRow inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "";
+    callback edit;
+
+    height: 36px;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+
+        Text {
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: root.value;
+            color: Theme.text-dim;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Rectangle {
+            width: 60px;
+            height: 26px;
+            border-radius: 6px;
+            background: Theme.bg-panel;
+
+            TouchArea {
+                clicked => { root.edit(); }
+            }
+
+            Text {
+                text: "Edit";
+                color: Theme.accent;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component SettingsScreen inherits Rectangle {
+    in property <string> license-status: "Unlicensed";
+    in property <string> license-error: "";
+    in property <string> audio-device: "Default";
+    in property <string> audio-engine: "rodio";
+
+    callback activate-license(string);
+    callback clear-license;
+
+    background: Theme.bg-primary;
+
+    Flickable {
+        VerticalLayout {
+            padding: 20px;
+            spacing: 18px;
+
+            Text {
+                text: "⚙ Settings";
+                color: Theme.text-primary;
+                font-size: 20px;
+                font-weight: 800;
+            }
+
+            // --- License ---
+            Rectangle {
+                background: Theme.bg-secondary;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+
+                    SectionHeader {
+                        label: "🔑 License";
+                    }
+
+                    SettingRow {
+                        label: "Status";
+                        value: root.license-status;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 36px;
+                            border-radius: 6px;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: Theme.border;
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+
+                                key-input := TextInput {
+                                    color: Theme.text-primary;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 100px;
+                            height: 36px;
+                            border-radius: 6px;
+                            background: Theme.accent;
+
+                            TouchArea {
+                                clicked => { root.activate-license(key-input.text); }
+                            }
+
+                            Text {
+                                text: "Activate";
+                                color: white;
+                                font-size: 13px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            width: 80px;
+                            height: 36px;
+                            border-radius: 6px;
+                            background: Theme.bg-panel;
+
+                            TouchArea {
+                                clicked => { root.clear-license(); }
+                            }
+
+                            Text {
+                                text: "Clear";
+                                color: Theme.text-dim;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    if (root.license-error != "") : Text {
+                        text: root.license-error;
+                        color: Theme.accent;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            // --- Audio ---
+            Rectangle {
+                background: Theme.bg-secondary;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+
+                    SectionHeader {
+                        label: "🔊 Audio";
+                    }
+
+                    SettingRow {
+                        label: "Engine";
+                        value: root.audio-engine;
+                    }
+
+                    SettingRow {
+                        label: "Output Device";
+                        value: root.audio-device;
+                    }
+                }
+            }
+
+            // --- About ---
+            Rectangle {
+                background: Theme.bg-secondary;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+
+                    SectionHeader {
+                        label: "ℹ About";
+                    }
+
+                    Text {
+                        text: "CrabBoss v0.1.0";
+                        color: Theme.text-secondary;
+                        font-size: 13px;
+                    }
+
+                    Text {
+                        text: "Radio Automation Software — Rust + Slint";
+                        color: Theme.text-dim;
+                        font-size: 12px;
+                    }
+
+                    Text {
+                        text: "github.com/sonyarianto/crabboss";
+                        color: Theme.accent;
+                        font-size: 12px;
+                    }
+                }
+            }
+        }
+    }
+}

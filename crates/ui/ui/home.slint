@@ -1,0 +1,198 @@
+import { Theme } from "common.slint";
+
+component StatCard inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "";
+
+    background: Theme.bg-secondary;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    VerticalLayout {
+        padding: 14px;
+        spacing: 4px;
+        alignment: center;
+
+        Text {
+            text: root.value;
+            color: Theme.text-primary;
+            font-size: 22px;
+            font-weight: 800;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: root.label;
+            color: Theme.text-dim;
+            font-size: 11px;
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+component NavCard inherits Rectangle {
+    in property <string> title: "";
+    in property <string> subtitle: "";
+    in property <string> icon: "";
+
+    callback clicked;
+
+    background: Theme.bg-secondary;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding: 14px;
+        spacing: 12px;
+
+        Text {
+            text: root.icon;
+            font-size: 24px;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            spacing: 2px;
+            alignment: center;
+
+            Text {
+                text: root.title;
+                color: Theme.text-primary;
+                font-size: 14px;
+                font-weight: 700;
+            }
+
+            Text {
+                text: root.subtitle;
+                color: Theme.text-secondary;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+export component HomeScreen inherits Rectangle {
+    in property <string> station-name: "CrabBoss FM";
+    in property <string> now-playing-title: "No track loaded";
+    in property <string> now-playing-artist: "";
+    in property <bool> is-playing: false;
+    in property <int> track-count: 0;
+    in property <int> playlist-count: 0;
+    in property <int> upcoming-count: 0;
+
+    callback go-playout;
+    callback go-media;
+    callback go-scheduler;
+    callback go-cartwall;
+
+    background: Theme.bg-primary;
+
+    Flickable {
+        VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+
+            // Welcome header
+            HorizontalLayout {
+                spacing: 10px;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+
+                    Text {
+                        text: root.station-name + " 👋";
+                        color: Theme.text-primary;
+                        font-size: 20px;
+                        font-weight: 800;
+                    }
+
+                    Text {
+                        text: root.station-name + (root.is-playing ? "  •  🔴 ON AIR: " + root.now-playing-title + " — " + root.now-playing-artist : "  •  ⚪ Off air");
+                        color: Theme.text-secondary;
+                        font-size: 12px;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            // Stats row
+            HorizontalLayout {
+                spacing: 12px;
+
+                StatCard {
+                    horizontal-stretch: 1;
+                    label: "Tracks";
+                    value: root.track-count;
+                }
+
+                StatCard {
+                    horizontal-stretch: 1;
+                    label: "Playlists";
+                    value: root.playlist-count;
+                }
+
+                StatCard {
+                    horizontal-stretch: 1;
+                    label: "Scheduled";
+                    value: root.upcoming-count;
+                }
+            }
+
+            Text {
+                text: "Quick Actions";
+                color: Theme.text-primary;
+                font-size: 14px;
+                font-weight: 700;
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+
+                NavCard {
+                    horizontal-stretch: 1;
+                    icon: "🎙";
+                    title: "Open Playout";
+                    subtitle: "Player + playlist zones";
+                    clicked => { root.go-playout(); }
+                }
+
+                NavCard {
+                    horizontal-stretch: 1;
+                    icon: "📚";
+                    title: "Media Manager";
+                    subtitle: "Library, tags, import";
+                    clicked => { root.go-media(); }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+
+                NavCard {
+                    horizontal-stretch: 1;
+                    icon: "🗓";
+                    title: "Scheduler";
+                    subtitle: "Coming soon";
+                    clicked => { root.go-scheduler(); }
+                }
+
+                NavCard {
+                    horizontal-stretch: 1;
+                    icon: "🎛";
+                    title: "Cart Wall";
+                    subtitle: "Coming soon";
+                    clicked => { root.go-cartwall(); }
+                }
+            }
+        }
+    }
+}

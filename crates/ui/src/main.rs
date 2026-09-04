@@ -10,14 +10,32 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 slint::include_modules!();
 
+use crabcore::audio::Engine;
+
 /// Application state shared between UI callbacks
 struct AppState {
-    player: crabcore::audio::Player,
+    player: Box<dyn Engine>,
     library: crabcore::library::Library,
     #[allow(dead_code)]
     playlist_manager: Option<crabcore::playlist::PlaylistManager>,
     #[allow(dead_code)]
     current_track_index: usize,
+}
+
+/// `--engine rodio|cpal` (default rodio until CpalEngine reaches parity).
+fn engine_choice() -> String {
+    let mut args = std::env::args().skip(1);
+    let mut choice = std::env::var("CRABBOSS_ENGINE").unwrap_or_else(|_| "rodio".into());
+    while let Some(a) = args.next() {
+        if a == "--engine" {
+            if let Some(v) = args.next() {
+                choice = v;
+            }
+        } else if let Some(v) = a.strip_prefix("--engine=") {
+            choice = v.to_string();
+        }
+    }
+    choice.to_lowercase()
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,8 +48,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("🦀 CrabBoss starting up...");
 
-    // Initialize audio player (falls back to headless if no audio device)
-    let player = crabcore::audio::Player::new();
+    // Engine A/B: rodio default, `--engine cpal` opts into new backend.
+    let engine_name = engine_choice();
+    let player: Box<dyn Engine> = match engine_name.as_str() {
+        "cpal" => {
+            tracing::info!("Audio engine: cpal (experimental)");
+            Box::new(crabcore::audio::CpalEngine::new())
+        }
+        _ => {
+            if engine_name != "rodio" {
+                tracing::warn!("Unknown engine '{}', falling back to rodio", engine_name);
+            }
+            tracing::info!("Audio engine: rodio (stable)");
+            Box::new(crabcore::audio::Player::new())
+        }
+    };
     if !player.has_audio_device() {
         tracing::warn!("⚠ Running without audio output (headless mode)");
     }
@@ -52,6 +83,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build Slint UI
     let ui = MainWindow::new().expect("Failed to create main window");
 
+    // License store (offline key, license.json next to db)
+    let license_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join("license.json");
+    let license_store = Rc::new(RefCell::new(crabcore::license::LicenseStore::open(
+        &license_path,
+    )));
+
+    // Router initial state: Home, no login (license-key model instead).
+    ui.set_current_screen(1);
+    ui.set_station_name("CrabBoss FM".into());
+    ui.set_license_status(license_store.borrow().status().label().into());
+    ui.set_license_error("".into());
+    ui.set_audio_engine(engine_name.clone().into());
+    ui.set_audio_device("Default".into());
+    ui.set_track_count(track_count as i32);
+    ui.set_playlist_count(0);
+    ui.set_upcoming_count(0);
+
     // Shared state
     let state = Rc::new(RefCell::new(AppState {
         player,
@@ -59,6 +109,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         playlist_manager: None,
         current_track_index: 0,
     }));
+
+    // -- Navigate --
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_navigate(move |screen: i32| {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_current_screen(screen);
+            }
+        });
+    }
+
+    // -- Activate license --
+    {
+        let ui_weak = ui.as_weak();
+        let license_store = license_store.clone();
+        ui.on_activate_license(move |key| {
+            let mut store = license_store.borrow_mut();
+            match store.activate(&key, "Station") {
+                Ok(info) => {
+                    tracing::info!("License activated: {}", info.key);
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_license_status(store.status().label().into());
+                        ui.set_license_error("".into());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Invalid license '{}': {}", key, e);
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_license_error(format!("Invalid key: {}", e).into());
+                    }
+                }
+            }
+        });
+    }
+
+    // -- Clear license --
+    {
+        let ui_weak = ui.as_weak();
+        let license_store = license_store.clone();
+        ui.on_clear_license(move || {
+            let mut store = license_store.borrow_mut();
+            store.clear().ok();
+            tracing::info!("License cleared");
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_license_status(store.status().label().into());
+                ui.set_license_error("".into());
+            }
+        });
+    }
 
     // -- Play --
     {

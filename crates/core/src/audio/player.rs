@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rodio::{Decoder, OutputStream, Sink};
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 
 use crate::error::{CrabError, Result};
 
@@ -30,6 +30,7 @@ pub enum PlayerState {
 enum AudioBackend {
     Live {
         _stream: OutputStream,
+        handle: OutputStreamHandle,
         sink: Arc<Mutex<Option<Sink>>>,
     },
     Headless,
@@ -55,12 +56,13 @@ impl Player {
     /// Falls back to headless mode if no device is available.
     pub fn new() -> Self {
         let backend = match OutputStream::try_default() {
-            Ok((stream, stream_handle)) => {
-                match Sink::try_new(&stream_handle) {
+            Ok((stream, handle)) => {
+                match Sink::try_new(&handle) {
                     Ok(sink) => {
                         tracing::info!("Audio output initialized (WASAPI/ALSA)");
                         AudioBackend::Live {
                             _stream: stream,
+                            handle,
                             sink: Arc::new(Mutex::new(Some(sink))),
                         }
                     }
@@ -155,12 +157,17 @@ impl Player {
         *self.state.lock().unwrap() = PlayerState::Playing;
     }
 
-    /// Stop playback
+    /// Stop playback and recreate sink so play() works again.
     pub fn stop(&self) {
-        if let AudioBackend::Live { ref sink, .. } = self.backend {
+        if let AudioBackend::Live { ref handle, ref sink, .. } = self.backend {
             let mut guard = sink.lock().unwrap();
-            if let Some(s) = guard.take() {
-                drop(s);
+            if let Some(old) = guard.take() {
+                drop(old);
+            }
+            // Recreate a fresh sink from the stored handle.
+            match Sink::try_new(handle) {
+                Ok(new_sink) => *guard = Some(new_sink),
+                Err(e) => tracing::error!("Failed to recreate sink: {}", e),
             }
         }
 

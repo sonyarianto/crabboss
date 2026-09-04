@@ -311,6 +311,39 @@ impl Library {
             .execute("DELETE FROM tracks WHERE id = ?1", params![id])?;
         Ok(())
     }
+
+    /// Recursively scan a directory for audio files and add them to the library.
+    /// Returns the count of successfully added tracks.
+    pub fn scan_directory(&self, dir: &Path) -> Result<usize> {
+        const AUDIO_EXTENSIONS: &[&str] = &[
+            "mp3", "flac", "aac", "ogg", "wav", "aiff", "opus", "wv", "mpc", "m4a",
+        ];
+        let mut added = 0;
+        for entry in walkdir::WalkDir::new(dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if !AUDIO_EXTENSIONS.contains(&ext.as_str()) {
+                continue;
+            }
+            match self.add_track(path) {
+                Ok(_) => added += 1,
+                Err(e) => tracing::warn!("Skipping {}: {}", path.display(), e),
+            }
+        }
+        tracing::info!("Scanned {}: {} tracks added", dir.display(), added);
+        Ok(added)
+    }
 }
 
 /// Read metadata from an audio file using lofty.

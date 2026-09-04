@@ -1,13 +1,51 @@
 import { Theme } from "common.slint";
+import { HomeScreen } from "home.slint";
 import { PlayerPanel } from "player.slint";
 import { LibraryPanel } from "library.slint";
 import { PlaylistPanel } from "playlist.slint";
+import { SettingsScreen } from "settings.slint";
+
+component NavButton inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> active: false;
+    callback clicked;
+
+    height: 30px;
+    border-radius: 6px;
+    background: active ? Theme.accent : transparent;
+
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: root.label;
+        color: active ? white : Theme.text-secondary;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
 
 export component MainWindow inherits Window {
     title: "CrabBoss — Radio Automation";
     min-width: 900px;
     min-height: 600px;
     background: Theme.bg-primary;
+
+    // -- Router: 1=home, 2=playout, 3=media, 4=settings --
+    in-out property <int> current-screen: 1;
+    in-out property <string> station-name: "CrabBoss FM";
+    in-out property <string> license-status: "Unlicensed";
+    in-out property <string> license-error: "";
+    in-out property <string> audio-engine: "rodio";
+    in-out property <string> audio-device: "Default";
+
+    // -- Home stats --
+    in-out property <int> track-count: 0;
+    in-out property <int> playlist-count: 0;
+    in-out property <int> upcoming-count: 0;
 
     // -- Player state properties --
     in-out property <bool> is-playing: false;
@@ -17,6 +55,9 @@ export component MainWindow inherits Window {
     in-out property <string> total-time: "00:00";
     in-out property <float> player-volume: 0.8;
     in-out property <float> player-progress: 0.0;
+
+    // -- Nav --
+    callback navigate(int);
 
     // -- Player callbacks --
     callback play;
@@ -39,142 +80,208 @@ export component MainWindow inherits Window {
     callback playlist-new;
     callback playlist-load(string);
 
-    HorizontalLayout {
-        // Left panel — Player (narrow sidebar)
+    // -- Settings callbacks --
+    callback activate-license(string);
+    callback clear-license;
+
+    VerticalLayout {
+        // Top nav bar
         Rectangle {
-            width: 300px;
-            background: Theme.bg-primary;
+            height: 44px;
+            background: Theme.bg-secondary;
 
-            VerticalLayout {
-                // App title bar
-                Rectangle {
-                    height: 48px;
-                    background: Theme.bg-secondary;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 6px;
 
-                    HorizontalLayout {
-                        padding-left: 16px;
-                        padding-right: 16px;
+                Text {
+                    text: "🦀 CrabBoss";
+                    color: Theme.accent;
+                    font-size: 15px;
+                    font-weight: 800;
+                    vertical-alignment: center;
+                }
 
-                        Text {
-                            text: "🦀 CrabBoss";
-                            color: Theme.accent;
-                            font-size: 18px;
-                            font-weight: 800;
-                            vertical-alignment: center;
-                        }
+                Rectangle { width: 12px; }
 
-                        Rectangle { horizontal-stretch: 1; }
+                NavButton {
+                    width: 90px;
+                    label: "🏠 Home";
+                    active: root.current-screen == 1;
+                    clicked => { root.navigate(1); }
+                }
 
-                        Text {
-                            text: "v0.1";
-                            color: Theme.text-dim;
-                            font-size: 11px;
-                            vertical-alignment: center;
+                NavButton {
+                    width: 90px;
+                    label: "🎙 Playout";
+                    active: root.current-screen == 2;
+                    clicked => { root.navigate(2); }
+                }
+
+                NavButton {
+                    width: 110px;
+                    label: "📚 Media";
+                    active: root.current-screen == 3;
+                    clicked => { root.navigate(3); }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                NavButton {
+                    width: 100px;
+                    label: "⚙ Settings";
+                    active: root.current-screen == 4;
+                    clicked => { root.navigate(4); }
+                }
+            }
+        }
+
+        // -- Home --
+        if (root.current-screen == 1) : HomeScreen {
+            vertical-stretch: 1;
+            station-name: root.station-name;
+            now-playing-title: root.now-playing-title;
+            now-playing-artist: root.now-playing-artist;
+            is-playing: root.is-playing;
+            track-count: root.track-count;
+            playlist-count: root.playlist-count;
+            upcoming-count: root.upcoming-count;
+
+            go-playout => { root.navigate(2); }
+            go-media => { root.navigate(3); }
+            go-scheduler => { root.navigate(2); }
+            go-cartwall => { root.navigate(2); }
+        }
+
+        // -- Playout --
+        if (root.current-screen == 2) : HorizontalLayout {
+            vertical-stretch: 1;
+
+            Rectangle {
+                width: 300px;
+                background: Theme.bg-primary;
+
+                VerticalLayout {
+                    PlayerPanel {
+                        vertical-stretch: 1;
+                        is-playing: root.is-playing;
+                        now-playing-title: root.now-playing-title;
+                        now-playing-artist: root.now-playing-artist;
+                        current-time: root.current-time;
+                        total-time: root.total-time;
+                        volume: root.player-volume;
+                        progress: root.player-progress;
+
+                        play-pressed => { root.play(); }
+                        pause-pressed => { root.pause(); }
+                        stop-pressed => { root.stop(); }
+                        next-pressed => { root.next(); }
+                        prev-pressed => { root.prev(); }
+                        volume-changed(v) => { root.set-volume(v); }
+                    }
+
+                    Rectangle {
+                        height: 28px;
+                        background: Theme.bg-secondary;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+
+                            Text {
+                                text: "Ready";
+                                color: Theme.text-dim;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                 }
+            }
 
-                // Player controls
-                PlayerPanel {
-                    vertical-stretch: 1;
-                    is-playing: root.is-playing;
-                    now-playing-title: root.now-playing-title;
-                    now-playing-artist: root.now-playing-artist;
-                    current-time: root.current-time;
-                    total-time: root.total-time;
-                    volume: root.player-volume;
-                    progress: root.player-progress;
+            Rectangle {
+                horizontal-stretch: 1;
+                background: Theme.bg-primary;
 
-                    play-pressed => { root.play(); }
-                    pause-pressed => { root.pause(); }
-                    stop-pressed => { root.stop(); }
-                    next-pressed => { root.next(); }
-                    prev-pressed => { root.prev(); }
-                    volume-changed(v) => { root.set-volume(v); }
-                }
+                VerticalLayout {
+                    Rectangle {
+                        height: 36px;
+                        background: Theme.bg-secondary;
 
-                // Mini status bar
-                Rectangle {
-                    height: 28px;
-                    background: Theme.bg-secondary;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            spacing: 4px;
 
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        padding-right: 12px;
+                            Rectangle {
+                                width: 120px;
+                                height: 28px;
+                                border-radius: 6px;
+                                background: Theme.accent;
 
-                        Text {
-                            text: "Ready";
-                            color: Theme.text-dim;
-                            font-size: 11px;
-                            vertical-alignment: center;
+                                Text {
+                                    text: "📚 Library";
+                                    color: white;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Rectangle {
+                                width: 120px;
+                                height: 28px;
+                                border-radius: 6px;
+                                background: Theme.bg-primary;
+
+                                TouchArea {
+                                    clicked => { /* TODO: switch to playlist tab */ }
+                                }
+
+                                Text {
+                                    text: "🎵 Playlist";
+                                    color: Theme.text-secondary;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
+                    }
+
+                    LibraryPanel {
+                        vertical-stretch: 1;
+
+                        search-changed(text) => { root.library-search-changed(text); }
+                        track-selected(idx) => { root.library-track-selected(idx); }
+                        track-double-clicked(idx) => { root.library-track-double-clicked(idx); }
+                        import-files => { root.import-files(); }
                     }
                 }
             }
         }
 
-        // Right panel — Library + Playlist (tabbed area)
-        Rectangle {
-            horizontal-stretch: 1;
-            background: Theme.bg-primary;
+        // -- Media Manager --
+        if (root.current-screen == 3) : LibraryPanel {
+            vertical-stretch: 1;
 
-            VerticalLayout {
-                // Tab bar
-                Rectangle {
-                    height: 36px;
-                    background: Theme.bg-secondary;
+            search-changed(text) => { root.library-search-changed(text); }
+            track-selected(idx) => { root.library-track-selected(idx); }
+            track-double-clicked(idx) => { root.library-track-double-clicked(idx); }
+            import-files => { root.import-files(); }
+        }
 
-                    HorizontalLayout {
-                        padding-left: 8px;
-                        spacing: 4px;
+        // -- Settings --
+        if (root.current-screen == 4) : SettingsScreen {
+            vertical-stretch: 1;
+            license-status: root.license-status;
+            license-error: root.license-error;
+            audio-engine: root.audio-engine;
+            audio-device: root.audio-device;
 
-                        Rectangle {
-                            width: 120px;
-                            height: 28px;
-                            border-radius: 6px;
-                            background: Theme.accent;
-
-                            Text {
-                                text: "📚 Library";
-                                color: white;
-                                font-size: 12px;
-                                font-weight: 600;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        Rectangle {
-                            width: 120px;
-                            height: 28px;
-                            border-radius: 6px;
-                            background: Theme.bg-primary;
-
-                            TouchArea {
-                                clicked => { /* TODO: switch to playlist tab */ }
-                            }
-
-                            Text {
-                                text: "🎵 Playlist";
-                                color: Theme.text-secondary;
-                                font-size: 12px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                }
-
-                // Content area — Library (for now)
-                LibraryPanel {
-                    vertical-stretch: 1;
-
-                    search-changed(text) => { root.library-search-changed(text); }
-                    track-selected(idx) => { root.library-track-selected(idx); }
-                    track-double-clicked(idx) => { root.library-track-double-clicked(idx); }
-                    import-files => { root.import-files(); }
-                }
-            }
+            activate-license(key) => { root.activate-license(key); }
+            clear-license => { root.clear-license(); }
         }
     }
 }

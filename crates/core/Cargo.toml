@@ -14,8 +14,14 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 
-# Audio
+# Audio (legacy rodio path — to be removed after CpalEngine parity)
 rodio = { version = "0.19", features = ["symphonia"] }
+
+# Audio (new low-level path: cpal engine per ROADMAP)
+cpal = "0.15"
+symphonia = { version = "0.5", features = ["all"] }
+rubato = "0.15"
+rtrb = "0.3"
 
 # Metadata
 lofty = "0.21"
