@@ -13,6 +13,11 @@ use crate::error::Result;
 /// !Send/!Sync; UI owns the engine single-threaded (Rc/RefCell).
 pub trait Engine {
     fn play(&self, path: &Path) -> Result<()>;
+    /// Queue for end-of-track start (insert-after-current). Default degrades
+    /// to immediate `play`; `CpalEngine` blends it in at the boundary.
+    fn queue(&self, path: &Path) -> Result<()> {
+        self.play(path)
+    }
     fn pause(&self);
     fn resume(&self);
     fn stop(&self);

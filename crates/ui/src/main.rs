@@ -372,7 +372,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
-            // load / play <path>: play file directly if it exists
+            // queue <path>: insert after current track (blends at boundary;
+            // rodio backend degrades to immediate play). Not logged until heard.
+            "queue" => {
+                let path = PathBuf::from(&event.target);
+                if path.is_file() {
+                    match s.player.queue(&path) {
+                        Ok(()) => {
+                            drop(s);
+                            if let Some(ui) = ui_weak.upgrade() {
+                                ui.set_now_playing_title(
+                                    format!("Queued after current: {}", event.target).into(),
+                                );
+                            }
+                        }
+                        Err(e) => tracing::error!("Scheduler queue failed: {}", e),
+                    }
+                } else {
+                    tracing::warn!("Scheduler target not found on disk: {}", event.target);
+                    drop(s);
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_now_playing_title(
+                            format!("Scheduled: {} (file missing)", event.target).into(),
+                        );
+                    }
+                }
+            }
             "load" | "play" => {
                 let path = PathBuf::from(&event.target);
                 if path.is_file() {
@@ -440,6 +465,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     0 => "play",
                     1 => "load",
                     2 => "generate",
+                    4 => "queue",
                     _ => "command",
                 };
                 let mut mask = 0u8;

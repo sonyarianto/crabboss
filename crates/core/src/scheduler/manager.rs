@@ -14,7 +14,7 @@ use crate::error::Result;
 pub struct ScheduledEvent {
     pub id: String,
     pub name: String,
-    /// `play` | `load` | `generate` | `command`
+    /// `play` | `load` | `generate` | `queue` | `command`
     pub action_type: String,
     /// Playlist name / file path / preset name / raw command.
     pub target: String,

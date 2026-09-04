@@ -323,6 +323,8 @@ export component SchedulerScreen inherits Rectangle {
                                 root.edit-action-idx = 1;
                             } else if (ev.action == "generate") {
                                 root.edit-action-idx = 2;
+                            } else if (ev.action == "queue") {
+                                root.edit-action-idx = 4;
                             } else {
                                 root.edit-action-idx = 3;
                             }
@@ -352,7 +354,7 @@ export component SchedulerScreen inherits Rectangle {
                 alignment: center;
                 Rectangle {
                     width: 440px;
-                    height: 480px;
+                    height: 520px;
                     border-radius: 10px;
                     background: Theme.bg-secondary;
                     border-width: 1px;
@@ -395,6 +397,15 @@ export component SchedulerScreen inherits Rectangle {
                                 label: "Generate";
                                 highlighted: root.edit-action-idx == 2;
                                 clicked => { root.edit-action-idx = 2; }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            SmallBtn {
+                                horizontal-stretch: 1;
+                                label: "Queue next";
+                                highlighted: root.edit-action-idx == 4;
+                                clicked => { root.edit-action-idx = 4; }
                             }
                             SmallBtn {
                                 horizontal-stretch: 1;

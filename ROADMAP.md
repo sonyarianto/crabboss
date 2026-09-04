@@ -108,9 +108,10 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 
 ### 1.3 Ads, Scheduler & Cart depth
 - [ ] Ad blocks with start/end date ranges (not just daily HH:MM)
-- [ ] Intro/outro clips per ad block
+- [ ] Intro/outro clips per ad block (queue primitive ready — chain intro→spot→outro)
 - [ ] Scheduler event expiration ("valid until") + warnings
-- [ ] "Insert after current track" as distinct scheduler action from "play now"
+- [x] "Insert after current track" (`queue` action + `Engine::queue`: cpal blends
+      at the boundary with end-of-track auto-fade; rodio degrades to immediate play)
 - [ ] Cart hotkeys, drag-drop from library, per-pad progress bar
 
 ### 1.4 Voice Tracking & Teasers

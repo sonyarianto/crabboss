@@ -48,6 +48,8 @@ struct XfadeState {
     /// Frames elapsed in the active blend; `len == 0` means no blend.
     pos: usize,
     len: usize,
+    /// End-of-track auto-blend length for queued decks (`0` = hard takeover).
+    auto_len: usize,
 }
 
 impl XfadeState {
@@ -83,6 +85,20 @@ impl XfadeState {
             }
         };
         let a = Frame { l, r };
+        // Queued deck waiting and current nearly done: ease into the blend.
+        if self.len == 0 && self.auto_len > 0 {
+            if let (Some(cur), Some(nxt)) = (self.current.as_ref(), self.next.as_ref()) {
+                let remaining = cur.remaining_frames();
+                if remaining > 0 && remaining <= self.auto_len && nxt.remaining_frames() > 0 {
+                    self.len = self
+                        .auto_len
+                        .min(remaining)
+                        .min(nxt.remaining_frames())
+                        .max(1);
+                    self.pos = 0;
+                }
+            }
+        }
         if self.len > 0 {
             if let Some(nxt) = self.next.as_mut() {
                 match nxt.next_stereo() {
@@ -139,6 +155,7 @@ impl CpalEngine {
             next: None,
             pos: 0,
             len: 0,
+            auto_len: 0,
         }));
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
         let current_track = Arc::new(Mutex::new(None));
@@ -184,6 +201,52 @@ impl CpalEngine {
     /// Blend length used when `play()` fires while something is playing.
     pub fn set_crossfade_secs(&mut self, secs: f32) {
         self.crossfade_secs = secs.clamp(0.0, 30.0);
+    }
+
+    fn decode_resampled(&self, path: &Path) -> Result<PlaybackCursor> {
+        let (samples, file_rate) = decode_to_stereo(path)?;
+        let samples = if file_rate != self.device_rate {
+            tracing::info!("Resampling {} Hz → {} Hz", file_rate, self.device_rate);
+            resample_stereo(samples, file_rate, self.device_rate)?
+        } else {
+            samples
+        };
+        Ok(PlaybackCursor {
+            samples,
+            pos_frames: 0,
+        })
+    }
+
+    /// Queue a file to start at the current deck's end (insert-after).
+    /// Latest call wins if one is already pending.
+    pub fn queue_file(&self, path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Err(CrabError::FileNotFound {
+                path: path.to_path_buf(),
+            });
+        }
+        let new = self.decode_resampled(path)?;
+        let mut xf = self.xfade.lock().unwrap();
+        xf.auto_len = (self.crossfade_secs * self.device_rate as f32) as usize;
+        if xf.current.as_ref().is_some_and(|c| !c.is_done()) {
+            xf.next = Some(new);
+            tracing::info!("CpalEngine queued: {}", path.display());
+        } else {
+            xf.current = Some(new);
+            xf.next = None;
+            xf.pos = 0;
+            xf.len = 0;
+        }
+        drop(xf);
+        self.silence.lock().unwrap().reset();
+        *self.state.lock().unwrap() = PlayerState::Playing;
+        *self.current_track.lock().unwrap() = Some(TrackInfo {
+            path: path.to_path_buf(),
+            title: None,
+            artist: None,
+            duration_secs: self.read_duration(path),
+        });
+        Ok(())
     }
 
     /// List output devices (for Settings screen later).
@@ -278,18 +341,9 @@ impl Engine for CpalEngine {
             });
         }
         let duration = self.read_duration(path);
-        let (samples, file_rate) = decode_to_stereo(path)?;
-        let samples = if file_rate != self.device_rate {
-            tracing::info!("Resampling {} Hz → {} Hz", file_rate, self.device_rate);
-            resample_stereo(samples, file_rate, self.device_rate)?
-        } else {
-            samples
-        };
-        let new = PlaybackCursor {
-            samples,
-            pos_frames: 0,
-        };
+        let new = self.decode_resampled(path)?;
         let mut xf = self.xfade.lock().unwrap();
+        xf.auto_len = (self.crossfade_secs * self.device_rate as f32) as usize;
         let live = *self.state.lock().unwrap() == PlayerState::Playing
             && xf.current.as_ref().is_some_and(|c| !c.is_done());
         if live {
@@ -385,6 +439,10 @@ impl Engine for CpalEngine {
             PlayerState::Stopped => true,
             _ => self.xfade.lock().unwrap().is_done(),
         }
+    }
+
+    fn queue(&self, path: &Path) -> Result<()> {
+        self.queue_file(path)
     }
 
     fn silence_alarm(&self) -> bool {
@@ -609,6 +667,7 @@ mod tests {
             }),
             pos: 0,
             len: 2,
+            auto_len: 0,
         };
         // Frame 0: full current.
         let (a, b, x) = xf.pull().unwrap();
@@ -637,11 +696,60 @@ mod tests {
             }),
             pos: 0,
             len: 4,
+            auto_len: 0,
         };
         xf.pull().unwrap(); // consumes the single incoming frame
         let (_, b, _) = xf.pull().unwrap(); // incoming exhausted → blend ends
         assert!(b.is_none());
         assert!(xf.next.is_none());
         assert!(!xf.is_done(), "current deck keeps playing");
+    }
+
+    #[test]
+    fn queued_deck_promotes_at_eof_without_blend() {
+        let mut xf = XfadeState {
+            current: Some(PlaybackCursor {
+                samples: vec![1.0, 1.0, 1.0, 1.0],
+                pos_frames: 0,
+            }),
+            next: Some(PlaybackCursor {
+                samples: vec![2.0, 2.0, 2.0, 2.0],
+                pos_frames: 0,
+            }),
+            pos: 0,
+            len: 0,
+            auto_len: 0,
+        };
+        assert_eq!(xf.pull().unwrap().0.l, 1.0);
+        assert_eq!(xf.pull().unwrap().0.l, 1.0);
+        // Current exhausted → queued deck takes over at full volume, no blend.
+        let (a, b, x) = xf.pull().unwrap();
+        assert_eq!((a.l, x), (2.0, 0.0));
+        assert!(b.is_none());
+    }
+
+    #[test]
+    fn queued_deck_auto_blends_at_track_end() {
+        let mut xf = XfadeState {
+            current: Some(PlaybackCursor {
+                samples: vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                pos_frames: 0,
+            }),
+            next: Some(PlaybackCursor {
+                samples: vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                pos_frames: 0,
+            }),
+            pos: 0,
+            len: 0,
+            auto_len: 2,
+        };
+        // remaining 3 → full current; remaining 2 → blend x=0, then x=0.5 + promote.
+        assert_eq!(xf.pull().unwrap().2, 0.0);
+        let (_, b, x) = xf.pull().unwrap();
+        assert!(b.is_some() && x == 0.0);
+        let (_, b, x) = xf.pull().unwrap();
+        assert!(b.is_some() && x == 0.5);
+        assert!(xf.next.is_none(), "blend finished, queued deck promoted");
+        assert!(!xf.is_done());
     }
 }
