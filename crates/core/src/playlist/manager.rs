@@ -45,6 +45,11 @@ impl PlaylistManager {
         mgr
     }
 
+    /// Open (or create) the playlist store at the given SQLite file.
+    pub fn open(path: &std::path::Path) -> Result<Self> {
+        Ok(Self::new(Connection::open(path)?))
+    }
+
     fn init_tables(&self) {
         self.conn
             .borrow()
@@ -230,5 +235,51 @@ impl PlaylistManager {
             .borrow()
             .execute("DELETE FROM playlists WHERE id = ?1", params![playlist_id])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem_manager() -> PlaylistManager {
+        // In-memory DB has no tracks table; create a minimal one for FK-less inserts.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tracks (id TEXT PRIMARY KEY, file_path TEXT NOT NULL UNIQUE);",
+        )
+        .unwrap();
+        PlaylistManager::new(conn)
+    }
+
+    #[test]
+    fn create_and_list() {
+        let m = mem_manager();
+        m.create("Morning", Some("AM show")).unwrap();
+        m.create("Night", None).unwrap();
+        let all = m.list_all().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].name, "Morning");
+    }
+
+    #[test]
+    fn add_remove_and_delete() {
+        let m = mem_manager();
+        let p = m.create("Test", None).unwrap();
+        m.add_track(&p.id, "track-1", false, false).unwrap_err();
+        // Seed referenced tracks (FK), then exercise items.
+        m.conn.borrow().execute_batch(
+            "INSERT INTO tracks (id, file_path) VALUES ('track-1', '/a.mp3'), ('track-2', '/b.mp3');",
+        ).unwrap();
+        m.add_track(&p.id, "track-1", false, false).unwrap();
+        m.add_track(&p.id, "track-2", true, false).unwrap();
+        let full = m.get_with_items(&p.id).unwrap().unwrap();
+        assert_eq!(full.items.len(), 2);
+        assert!(full.items[1].is_jingle);
+        assert_eq!(full.items[1].position, 1);
+        m.remove_at(&p.id, 0).unwrap();
+        assert_eq!(m.get_with_items(&p.id).unwrap().unwrap().items.len(), 1);
+        m.delete(&p.id).unwrap();
+        assert!(m.list_all().unwrap().is_empty());
     }
 }

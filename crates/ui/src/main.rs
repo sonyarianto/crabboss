@@ -19,9 +19,22 @@ struct AppState {
     player: Box<dyn Engine>,
     library: crabcore::library::Library,
     #[allow(dead_code)]
-    playlist_manager: Option<crabcore::playlist::PlaylistManager>,
+    playlist_manager: crabcore::playlist::PlaylistManager,
     #[allow(dead_code)]
     current_track_index: usize,
+}
+
+fn fmt_dur(d: Option<f64>) -> String {
+    let total = d.unwrap_or(0.0).max(0.0) as u64;
+    format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+fn kind_label(k: TrackKind) -> &'static str {
+    match k {
+        TrackKind::Jingle => "Jingle",
+        TrackKind::Ad => "Ad",
+        TrackKind::Music => "Music",
+    }
 }
 
 /// `--engine rodio|cpal` (default rodio until CpalEngine reaches parity).
@@ -111,6 +124,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let track_count = library.get_all_tracks().unwrap_or_default().len();
     tracing::info!("Library contains {} tracks", track_count);
 
+    // Playlist store (same db file, separate connection)
+    let playlist_manager =
+        crabcore::playlist::PlaylistManager::open(&db_path).expect("Failed to open playlists");
+    let playlist_count = playlist_manager.list_all().unwrap_or_default().len();
+
     // Cart Wall store (same db file, separate connection)
     let carts = Rc::new(RefCell::new(
         crabcore::cart::CartManager::open(&db_path).expect("Failed to open cart store"),
@@ -151,16 +169,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_audio_engine(engine_name.clone().into());
     ui.set_audio_device("Default".into());
     ui.set_track_count(track_count as i32);
-    ui.set_playlist_count(0);
+    ui.set_playlist_count(playlist_count as i32);
     ui.set_upcoming_count(0);
 
     // Shared state
     let state = Rc::new(RefCell::new(AppState {
         player,
         library,
-        playlist_manager: None,
+        playlist_manager,
         current_track_index: 0,
     }));
+
+    // Tracks currently shown in the library list (all or search-filtered);
+    // row indices from Slint resolve against this.
+    let last_shown: Rc<RefCell<Vec<crabcore::library::Track>>> =
+        Rc::new(RefCell::new(Vec::new()));
+
+    // -- Library: push tracks to UI --
+    fn refresh_library(
+        ui: &MainWindow,
+        tracks: Vec<crabcore::library::Track>,
+        last_shown: &Rc<RefCell<Vec<crabcore::library::Track>>>,
+    ) {
+        let rows: Vec<LibTrack> = tracks
+            .iter()
+            .map(|t| LibTrack {
+                title: t.title.clone().unwrap_or_else(|| t.file_name.clone()).into(),
+                artist: t.artist.clone().unwrap_or_default().into(),
+                duration: fmt_dur(t.duration_secs).into(),
+                kind: kind_label(t.kind).into(),
+            })
+            .collect();
+        *last_shown.borrow_mut() = tracks;
+        let model = Rc::new(slint::VecModel::from(rows));
+        ui.set_library_tracks(model.into());
+    }
+    refresh_library(
+        &ui,
+        state.borrow().library.get_all_tracks().unwrap_or_default(),
+        &last_shown,
+    );
+    ui.set_library_status("".into());
 
     // -- Scheduler: push events to UI --
     fn refresh_scheduler(ui: &MainWindow, scheduler: &crabcore::scheduler::SchedulerManager) {
@@ -732,35 +781,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // -- Import Files --
+    // -- Import Files (native dialog, multi-select audio) --
     {
-        let _state = state.clone();
+        let state = state.clone();
         let ui_weak = ui.as_weak();
+        let last_shown = last_shown.clone();
         ui.on_import_files(move || {
-            // For now, import from a specific directory or prompt
-            // In a full app, this would use a file dialog
-            tracing::info!("Import files requested");
-
+            let files = rfd::FileDialog::new()
+                .set_title("Import audio files")
+                .add_filter(
+                    "Audio",
+                    &["mp3", "flac", "wav", "ogg", "oga", "aac", "m4a", "opus", "aiff", "wv"],
+                )
+                .pick_files();
+            let Some(files) = files else { return };
+            let s = state.borrow();
+            let mut added = 0;
+            let mut skipped = 0;
+            for f in &files {
+                match s.library.add_track(f) {
+                    Ok(t) => {
+                        tracing::info!("Imported {} as {:?}", f.display(), t.kind);
+                        added += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Skipping {}: {}", f.display(), e);
+                        skipped += 1;
+                    }
+                }
+            }
+            let tracks = s.library.get_all_tracks().unwrap_or_default();
+            drop(s);
             if let Some(ui) = ui_weak.upgrade() {
-                ui.set_now_playing_title("Import: Use file dialog (coming soon)".into());
+                ui.set_track_count(tracks.len() as i32);
+                ui.set_library_status(
+                    if skipped > 0 {
+                        format!("Imported {}, skipped {}", added, skipped)
+                    } else {
+                        format!("Imported {}", added)
+                    }
+                    .into(),
+                );
+                refresh_library(&ui, tracks, &last_shown);
             }
         });
     }
 
-    // -- Library Search --
+    // -- Library Search (live filter) --
     {
         let state = state.clone();
+        let last_shown = last_shown.clone();
+        let ui_weak = ui.as_weak();
         ui.on_library_search_changed(move |query| {
             let s = state.borrow();
-            let results = s
-                .library
-                .search(&query)
-                .unwrap_or_default();
-            tracing::debug!(
-                "Search '{}': {} results",
-                query,
-                results.len()
-            );
+            let tracks = if query.trim().is_empty() {
+                s.library.get_all_tracks().unwrap_or_default()
+            } else {
+                s.library.search(query.trim()).unwrap_or_default()
+            };
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh_library(&ui, tracks, &last_shown);
+            }
         });
     }
 
@@ -768,40 +850,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let state = state.clone();
         let ui_weak = ui.as_weak();
+        let last_shown = last_shown.clone();
         ui.on_library_track_double_clicked(move |index: i32| {
+            let shown = last_shown.borrow();
+            let track = shown.get(index as usize).cloned();
+            drop(shown);
+            let Some(track) = track else { return };
             let s = state.borrow();
-            let tracks = s.library.get_all_tracks().unwrap_or_default();
+            let path = PathBuf::from(&track.file_path);
+            tracing::info!("Playing track: {:?}", path);
 
-            if let Some(track) = tracks.get(index as usize) {
-                let path = PathBuf::from(&track.file_path);
-                tracing::info!("Playing track: {:?}", path);
+            match s.player.play(&path) {
+                Ok(()) => {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        let title = track
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| track.file_name.clone());
+                        let artist = track.artist.clone().unwrap_or_default();
+                        let dur = fmt_dur(track.duration_secs);
 
-                match s.player.play(&path) {
-                    Ok(()) => {
-                        if let Some(ui) = ui_weak.upgrade() {
-                            let title = track
-                                .title
-                                .clone()
-                                .unwrap_or_else(|| track.file_name.clone());
-                            let artist = track.artist.clone().unwrap_or_default();
-                            let dur = track
-                                .duration_secs
-                                .map(|d| {
-                                    let mins = (d as u64) / 60;
-                                    let secs = (d as u64) % 60;
-                                    format!("{:02}:{:02}", mins, secs)
-                                })
-                                .unwrap_or_default();
-
-                            ui.set_is_playing(true);
-                            ui.set_now_playing_title(title.into());
-                            ui.set_now_playing_artist(artist.into());
-                            ui.set_total_time(dur.into());
-                        }
+                        ui.set_is_playing(true);
+                        ui.set_now_playing_title(title.into());
+                        ui.set_now_playing_artist(artist.into());
+                        ui.set_total_time(dur.into());
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to play: {}", e);
-                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to play: {}", e);
                 }
             }
         });

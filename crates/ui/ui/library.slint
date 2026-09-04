@@ -1,9 +1,17 @@
 import { Theme } from "common.slint";
 
+export struct LibTrack {
+    title: string,
+    artist: string,
+    duration: string,
+    kind: string,
+}
+
 component TrackRow inherits Rectangle {
     in property <string> title: "";
     in property <string> artist: "";
     in property <string> duration: "";
+    in property <string> kind: "Music";
     in property <bool> is-even: false;
     in property <bool> is-selected: false;
 
@@ -22,6 +30,23 @@ component TrackRow inherits Rectangle {
         padding-left: 12px;
         padding-right: 12px;
         spacing: 8px;
+
+        // kind badge: Music / Jingle / Ad
+        Rectangle {
+            width: 52px;
+            height: 18px;
+            border-radius: 4px;
+            background: root.kind == "Jingle" ? Theme.accent : (root.kind == "Ad" ? Theme.warning : Theme.bg-panel);
+            y: (parent.height - self.height) / 2;
+            Text {
+                text: root.kind;
+                color: root.kind == "Music" ? Theme.text-dim : white;
+                font-size: 9px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
 
         Text {
             text: root.title;
@@ -94,6 +119,15 @@ component ListHeader inherits Rectangle {
         spacing: 8px;
 
         Text {
+            text: "Kind";
+            color: Theme.text-dim;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+            width: 52px;
+        }
+
+        Text {
             text: "Title";
             color: Theme.text-dim;
             font-size: 11px;
@@ -124,6 +158,9 @@ component ListHeader inherits Rectangle {
 
 export component LibraryPanel inherits Rectangle {
     in property <string> track-count: "0 tracks";
+    in-out property <[LibTrack]> tracks;
+    in-out property <string> status: "";
+    in-out property <int> selected-index: -1;
 
     callback search-changed(string);
     callback track-selected(int);
@@ -172,21 +209,42 @@ export component LibraryPanel inherits Rectangle {
             search-changed(text) => { root.search-changed(text); }
         }
 
+        if (root.status != "") : Text {
+            text: root.status;
+            color: Theme.text-dim;
+            font-size: 11px;
+        }
+
         ListHeader {}
 
         Rectangle {
             vertical-stretch: 1;
             clip: true;
 
+            if (root.tracks.length == 0) : Text {
+                text: "Import audio files to get started";
+                color: Theme.text-dim;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
             Flickable {
                 VerticalLayout {
                     spacing: 0px;
 
-                    TrackRow {
-                        title: "Import audio files to get started";
-                        artist: "";
-                        duration: "";
-                        is-even: true;
+                    for t[i] in root.tracks : TrackRow {
+                        title: t.title;
+                        artist: t.artist;
+                        duration: t.duration;
+                        kind: t.kind;
+                        is-even: mod(i, 2) == 0;
+                        is-selected: i == root.selected-index;
+                        clicked => {
+                            root.selected-index = i;
+                            root.track-selected(i);
+                            root.track-double-clicked(i);
+                        }
                     }
                 }
             }

@@ -1,7 +1,7 @@
 import { Theme } from "common.slint";
 import { HomeScreen } from "home.slint";
 import { PlayerPanel } from "player.slint";
-import { LibraryPanel } from "library.slint";
+import { LibraryPanel, LibTrack } from "library.slint";
 import { PlaylistPanel } from "playlist.slint";
 import { SettingsScreen } from "settings.slint";
 import { SchedulerScreen, SchedRow } from "scheduler.slint";
@@ -67,6 +67,10 @@ export component MainWindow inherits Window {
     // -- Cart Wall state --
     in-out property <[CartRow]> cart-items;
     in-out property <string> cart-status: "";
+
+    // -- Library state (live model; both Playout tab and Media screen bind here) --
+    in-out property <[LibTrack]> library-tracks;
+    in-out property <string> library-status: "";
 
     // -- Nav --
     callback navigate(int);
@@ -290,6 +294,8 @@ export component MainWindow inherits Window {
 
                     LibraryPanel {
                         vertical-stretch: 1;
+                        tracks: root.library-tracks;
+                        status <=> root.library-status;
 
                         search-changed(text) => { root.library-search-changed(text); }
                         track-selected(idx) => { root.library-track-selected(idx); }
@@ -303,6 +309,8 @@ export component MainWindow inherits Window {
         // -- Media Manager --
         if (root.current-screen == 3) : LibraryPanel {
             vertical-stretch: 1;
+            tracks: root.library-tracks;
+            status <=> root.library-status;
 
             search-changed(text) => { root.library-search-changed(text); }
             track-selected(idx) => { root.library-track-selected(idx); }

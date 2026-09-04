@@ -43,7 +43,8 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [x] `CpalEngine` MVP (play/pause/volume parity) — rubato resample TODO
 - [x] Router: Home / Playout / Media Manager / Scheduler / Cart Wall screens
 - [x] License key activation (offline, `CB-XXXX-XXXX-XXXX`)
-- [x] Library: `scan_directory()` via `walkdir`
+- [x] Library: `scan_directory()` via `walkdir`, live list + search model, `rfd` import dialog, tap-to-play
+- [x] Playlist store wired (`PlaylistManager::open`, Home counts) + unit tests
 - [x] Scheduler MVP: event list, Add/Edit dialog (time/action/days), auto-tick firing `generate`/`load`/`play`
 - [x] Track kinds (music/jingle/ad): auto-classify on import, `set_kind`, pre-kind DB migration
 - [x] Cart Wall MVP: 8 pads, instant play, jingle-first seeding/loading with kind badges
@@ -54,7 +55,7 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [ ] Icecast/Shoutcast output (see §1.5)
 - [ ] Mic/line-in input with ducking (see §1.6)
 - [ ] Report generator (play logs → XLS/PDF — see §1.9)
-- [ ] File dialog (`rfd`), progress timer in UI (see §1.9)
+- [ ] File dialog (`rfd`), progress timer in UI (see §1.9) — `rfd` import done, progress timer still open
 - [ ] Settings screen (audio device, streaming, license details — see §1.9)
 - [ ] Quality: `cargo fmt/clippy`, unit tests (`library`, `playlist`), CI (see §1.10)
 
@@ -95,7 +96,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [ ] `rubato` resampling to device rate (currently wrong speed on mismatch)
 - [ ] 12-band EQ insert (biquad chain) + limiter tuning
 - [ ] Loudness normalization (ReplayGain-style)
-- [ ] Wire `library.search()` results into the Slint model (currently a no-op)
+- [ ] Wire `library.search()` results into the Slint model (currently a no-op) — ✅ done (live list + search filter + tap-to-play)
 
 ### 1.2 Playlist Generator (real scope, not a checkbox)
 - [ ] No-repeat rules: artist, title, album — configurable lookback window
@@ -143,7 +144,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [ ] `rfd` native file dialog for import
 
 ### 1.10 Quality gates
-- [ ] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar)
+- [ ] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — `playlist` done, `library` partial (kind tests only)
 - [ ] `cargo fmt` + `clippy` in CI
 - [ ] Basic CI pipeline (build + test on push)
 
