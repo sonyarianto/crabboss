@@ -133,8 +133,9 @@ impl XfadeState {
 pub struct CpalEngine {
     _stream: Option<cpal::Stream>,
     device_rate: u32,
+    device_name: String,
     xfade: Arc<Mutex<XfadeState>>,
-    crossfade_secs: f32,
+    crossfade_secs: Arc<Mutex<f32>>,
     silence: Arc<Mutex<SilenceMonitor>>,
     state: Arc<Mutex<PlayerState>>,
     current_track: Arc<Mutex<Option<TrackInfo>>>,
@@ -146,6 +147,16 @@ impl CpalEngine {
     /// Open default output. Never panics — falls back to headless
     /// (`_stream: None`, still tracks state) when no device exists.
     pub fn new() -> Self {
+        Self::with_device(None)
+    }
+
+    /// Open a named output device (falls back to default with a warning
+    /// when unplugged/missing, so a stale setting never kills audio).
+    pub fn open_named(name: &str) -> Self {
+        Self::with_device(Some(name.to_string()))
+    }
+
+    fn with_device(want: Option<String>) -> Self {
         let xfade: Arc<Mutex<XfadeState>> = Arc::new(Mutex::new(XfadeState {
             current: None,
             next: VecDeque::new(),
@@ -159,29 +170,31 @@ impl CpalEngine {
         let mixer = Arc::new(Mutex::new(Mixer::default()));
         let silence = Arc::new(Mutex::new(SilenceMonitor::new(48000, 10.0)));
 
-        let (stream, device_rate) = match Self::open_silent_stream(
+        let (stream, device_rate, device_name) = match Self::open_silent_stream(
             xfade.clone(),
             state.clone(),
             volume.clone(),
             mixer.clone(),
             silence.clone(),
+            want,
         ) {
-            Ok((s, rate)) => {
-                tracing::info!("CpalEngine: output opened @ {} Hz", rate);
+            Ok((s, rate, name)) => {
+                tracing::info!("CpalEngine: output '{}' @ {} Hz", name, rate);
                 *silence.lock().unwrap() = SilenceMonitor::new(rate, 10.0);
-                (Some(s), rate)
+                (Some(s), rate, name)
             }
             Err(e) => {
                 tracing::warn!("CpalEngine: no audio device ({}). Headless.", e);
-                (None, 48000)
+                (None, 48000, "None (headless)".to_string())
             }
         };
 
         Self {
             _stream: stream,
             device_rate,
+            device_name,
             xfade,
-            crossfade_secs: 3.0,
+            crossfade_secs: Arc::new(Mutex::new(3.0)),
             silence,
             state,
             current_track,
@@ -194,9 +207,13 @@ impl CpalEngine {
         self.device_rate
     }
 
-    /// Blend length used when `play()` fires while something is playing.
-    pub fn set_crossfade_secs(&mut self, secs: f32) {
-        self.crossfade_secs = secs.clamp(0.0, 30.0);
+    /// The device actually opened (may differ from the request on fallback).
+    pub fn device_name(&self) -> String {
+        self.device_name.clone()
+    }
+
+    fn xfade_secs(&self) -> f32 {
+        *self.crossfade_secs.lock().unwrap()
     }
 
     fn decode_resampled(&self, path: &Path) -> Result<PlaybackCursor> {
@@ -223,7 +240,7 @@ impl CpalEngine {
         }
         let new = self.decode_resampled(path)?;
         let mut xf = self.xfade.lock().unwrap();
-        xf.auto_len = (self.crossfade_secs * self.device_rate as f32) as usize;
+        xf.auto_len = (self.xfade_secs() * self.device_rate as f32) as usize;
         if xf.current.as_ref().is_some_and(|c| !c.is_done()) || !xf.next.is_empty() {
             xf.next.push_back(new);
             tracing::info!("CpalEngine queued: {}", path.display());
@@ -258,11 +275,24 @@ impl CpalEngine {
         volume: Arc<Mutex<f32>>,
         mixer: Arc<Mutex<Mixer>>,
         silence: Arc<Mutex<SilenceMonitor>>,
-    ) -> std::result::Result<(cpal::Stream, u32), String> {
+        want: Option<String>,
+    ) -> std::result::Result<(cpal::Stream, u32, String), String> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| "no default output device".to_string())?;
+        let named = want.as_deref().and_then(|n| {
+            host.output_devices()
+                .ok()
+                .and_then(|mut devs| devs.find(|d| d.name().is_ok_and(|dn| dn == n)))
+        });
+        if want.is_some() && named.is_none() {
+            tracing::warn!(
+                "Output device '{}' not found, falling back to default",
+                want.as_deref().unwrap_or_default()
+            );
+        }
+        let device = named
+            .or_else(|| host.default_output_device())
+            .ok_or_else(|| "no output device".to_string())?;
+        let name = device.name().unwrap_or_else(|_| "Default".to_string());
         let config = device.default_output_config().map_err(|e| e.to_string())?;
         let sample_rate = config.sample_rate().0;
         let channels = config.channels() as usize;
@@ -311,7 +341,7 @@ impl CpalEngine {
             )
             .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
-        Ok((stream, sample_rate))
+        Ok((stream, sample_rate, name))
     }
 
     fn read_duration(&self, path: &Path) -> Option<f64> {
@@ -338,7 +368,7 @@ impl Engine for CpalEngine {
         let duration = self.read_duration(path);
         let new = self.decode_resampled(path)?;
         let mut xf = self.xfade.lock().unwrap();
-        xf.auto_len = (self.crossfade_secs * self.device_rate as f32) as usize;
+        xf.auto_len = (self.xfade_secs() * self.device_rate as f32) as usize;
         let live = *self.state.lock().unwrap() == PlayerState::Playing
             && xf.current.as_ref().is_some_and(|c| !c.is_done());
         if live {
@@ -349,7 +379,7 @@ impl Engine for CpalEngine {
                 .as_ref()
                 .map(|c| c.remaining_frames())
                 .unwrap_or(0);
-            let want = (self.crossfade_secs * self.device_rate as f32) as usize;
+            let want = (self.xfade_secs() * self.device_rate as f32) as usize;
             xf.len = want.min(remaining).min(new.remaining_frames()).max(1);
             xf.pos = 0;
             xf.next = VecDeque::from([new]);
@@ -430,6 +460,10 @@ impl Engine for CpalEngine {
         self._stream.is_some()
     }
 
+    fn device_name(&self) -> String {
+        self.device_name()
+    }
+
     fn is_finished(&self) -> bool {
         match *self.state.lock().unwrap() {
             PlayerState::Stopped => true,
@@ -447,6 +481,10 @@ impl Engine for CpalEngine {
 
     fn set_silence_threshold_secs(&self, secs: f32) {
         self.silence.lock().unwrap().set_threshold_secs(secs);
+    }
+
+    fn set_crossfade_secs(&self, secs: f32) {
+        *self.crossfade_secs.lock().unwrap() = secs.clamp(0.0, 30.0);
     }
 }
 

@@ -62,14 +62,99 @@ component SettingRow inherits Rectangle {
     }
 }
 
+component Stepper inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "";
+    in property <string> hint: "";
+    callback inc;
+    callback dec;
+
+    height: 52px;
+
+    VerticalLayout {
+        spacing: 2px;
+
+        HorizontalLayout {
+            spacing: 10px;
+
+            Text {
+                text: root.label;
+                color: Theme.text-secondary;
+                font-size: 13px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            Rectangle {
+                width: 30px;
+                height: 26px;
+                border-radius: 6px;
+                background: Theme.bg-panel;
+                TouchArea { clicked => { root.dec(); } }
+                Text {
+                    text: "−";
+                    color: Theme.accent;
+                    font-size: 14px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            Text {
+                text: root.value;
+                color: Theme.text-primary;
+                font-size: 13px;
+                font-weight: 700;
+                vertical-alignment: center;
+                min-width: 64px;
+                horizontal-alignment: center;
+            }
+
+            Rectangle {
+                width: 30px;
+                height: 26px;
+                border-radius: 6px;
+                background: Theme.bg-panel;
+                TouchArea { clicked => { root.inc(); } }
+                Text {
+                    text: "+";
+                    color: Theme.accent;
+                    font-size: 14px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        if (root.hint != "") : Text {
+            text: root.hint;
+            color: Theme.text-dim;
+            font-size: 10px;
+        }
+    }
+}
+
 export component SettingsScreen inherits Rectangle {
     in property <string> license-status: "Unlicensed";
     in property <string> license-error: "";
     in property <string> audio-device: "Default";
     in property <string> audio-engine: "rodio";
+    in-out property <[string]> devices;
+    in-out property <string> selected-device: "";
+    in-out property <string> device-note: "";
+    in-out property <string> xfade-label: "3.0 s";
+    in-out property <string> silence-label: "10 s";
 
     callback activate-license(string);
     callback clear-license;
+    callback select-device(string);
+    callback refresh-devices;
+    callback xfade-inc;
+    callback xfade-dec;
+    callback silence-inc;
+    callback silence-dec;
 
     background: Theme.bg-primary;
 
@@ -194,12 +279,93 @@ export component SettingsScreen inherits Rectangle {
 
                     SettingRow {
                         label: "Engine";
-                        value: root.audio-engine;
+                        value: root.audio-engine + " (restart flag --engine to switch)";
                     }
 
                     SettingRow {
-                        label: "Output Device";
+                        label: "Active output";
                         value: root.audio-device;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: space-between;
+
+                        Text {
+                            text: "Output devices — tap to select";
+                            color: Theme.text-secondary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            width: 80px;
+                            height: 26px;
+                            border-radius: 6px;
+                            background: Theme.bg-panel;
+                            TouchArea { clicked => { root.refresh-devices(); } }
+                            Text {
+                                text: "Refresh";
+                                color: Theme.accent;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        for d in root.devices : Rectangle {
+                            height: 30px;
+                            border-radius: 6px;
+                            background: d == root.selected-device ? Theme.bg-panel : transparent;
+                            border-width: 1px;
+                            border-color: d == root.selected-device ? Theme.accent : transparent;
+                            TouchArea { clicked => { root.select-device(d); } }
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 8px;
+                                Text {
+                                    text: d == root.selected-device ? "●" : "○";
+                                    color: d == root.selected-device ? Theme.accent : Theme.text-dim;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: d;
+                                    color: d == root.selected-device ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+
+                    if (root.device-note != "") : Text {
+                        text: root.device-note;
+                        color: Theme.warning;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
+
+                    Stepper {
+                        label: "Crossfade";
+                        value: root.xfade-label;
+                        hint: "Blend length for play-while-playing and queued takeovers";
+                        inc => { root.xfade-inc(); }
+                        dec => { root.xfade-dec(); }
+                    }
+
+                    Stepper {
+                        label: "Silence alarm";
+                        value: root.silence-label;
+                        hint: "Dead-air seconds before auto-recovery (cpal engine only)";
+                        inc => { root.silence-inc(); }
+                        dec => { root.silence-dec(); }
                     }
                 }
             }

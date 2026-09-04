@@ -84,6 +84,13 @@ export component MainWindow inherits Window {
     in-out property <bool> ads-show-editor: false;
     in-out property <string> ads-error: "";
 
+    // -- Settings state --
+    in-out property <[string]> settings-devices;
+    in-out property <string> settings-device: "";
+    in-out property <string> settings-device-note: "";
+    in-out property <string> settings-xfade: "3.0 s";
+    in-out property <string> settings-silence: "10 s";
+
     // -- Nav --
     callback navigate(int);
 
@@ -112,6 +119,12 @@ export component MainWindow inherits Window {
     // -- Settings callbacks --
     callback activate-license(string);
     callback clear-license;
+    callback settings-select-device(string);
+    callback settings-refresh-devices;
+    callback settings-xfade-inc;
+    callback settings-xfade-dec;
+    callback settings-silence-inc;
+    callback settings-silence-dec;
 
     // -- Scheduler callbacks --
     callback scheduler-toggled(bool);
@@ -364,9 +377,20 @@ export component MainWindow inherits Window {
             license-error: root.license-error;
             audio-engine: root.audio-engine;
             audio-device: root.audio-device;
+            devices: root.settings-devices;
+            selected-device <=> root.settings-device;
+            device-note <=> root.settings-device-note;
+            xfade-label <=> root.settings-xfade;
+            silence-label <=> root.settings-silence;
 
             activate-license(key) => { root.activate-license(key); }
             clear-license => { root.clear-license(); }
+            select-device(name) => { root.settings-select-device(name); }
+            refresh-devices => { root.settings-refresh-devices(); }
+            xfade-inc => { root.settings-xfade-inc(); }
+            xfade-dec => { root.settings-xfade-dec(); }
+            silence-inc => { root.settings-silence-inc(); }
+            silence-dec => { root.settings-silence-dec(); }
         }
 
         // -- Scheduler --

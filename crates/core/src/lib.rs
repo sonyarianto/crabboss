@@ -11,5 +11,6 @@ pub mod license;
 pub mod playlist;
 pub mod report;
 pub mod scheduler;
+pub mod settings;
 
 pub use error::{CrabError, Result};

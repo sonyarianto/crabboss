@@ -56,7 +56,7 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [ ] Mic/line-in input with ducking (see §1.6)
 - [x] Report generator (play logs → CSV + screen; XLS/PDF open — see §1.9)
 - [ ] File dialog (`rfd`), progress timer in UI (see §1.9) — `rfd` import done, progress timer still open
-- [ ] Settings screen (audio device, streaming, license details — see §1.9)
+- [x] Settings screen (device picker, live DSP prefs, license — streaming config still open, see §1.9)
 - [ ] Quality: `cargo fmt/clippy`, unit tests (`library`, `playlist`), CI (see §1.10)
 
 ## Gap Matrix vs RadioBOSS 7.x (2026)
@@ -148,7 +148,9 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] Play logging on every play path (library tap, cart fire, scheduler run, silence filler)
 - [x] Play-log reports: range presets (Today/7d/30d/All), jingle+ad exclusion, newest-100 list, CSV export
 - [ ] XLS/PDF export (CSV done — spreadsheets/royalty bodies accept it; native XLS/PDF later)
-- [ ] Settings screen: audio device picker, streaming config, license details
+- [x] Settings screen: output device picker (persisted, applies on restart, with
+      unplugged-device fallback), engine display, crossfade + silence-alarm
+      steppers (persisted, applied live), license section
 - [x] `rfd` native file dialog for import (+ report export)
 
 ### 1.10 Quality gates

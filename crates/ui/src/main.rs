@@ -63,12 +63,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("🦀 CrabBoss starting up...");
 
+    // Persisted prefs (settings.json next to the db).
+    let settings_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join("settings.json");
+    let settings = Rc::new(RefCell::new(crabcore::settings::AppSettings::load(
+        &settings_path,
+    )));
+
     // Engine A/B: rodio default, `--engine cpal` opts into new backend.
     let engine_name = engine_choice();
     let player: Box<dyn Engine> = match engine_name.as_str() {
         "cpal" => {
-            tracing::info!("Audio engine: cpal (experimental)");
-            Box::new(crabcore::audio::CpalEngine::new())
+            tracing::info!("Audio engine: cpal");
+            match settings.borrow().output_device.clone() {
+                Some(dev) => Box::new(crabcore::audio::CpalEngine::open_named(&dev)),
+                None => Box::new(crabcore::audio::CpalEngine::new()),
+            }
         }
         _ => {
             if engine_name != "rodio" {
@@ -81,6 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !player.has_audio_device() {
         tracing::warn!("⚠ Running without audio output (headless mode)");
     }
+    // Apply persisted DSP prefs live (no-ops on backends without support).
+    player.set_crossfade_secs(settings.borrow().crossfade_secs);
+    player.set_silence_threshold_secs(settings.borrow().silence_threshold_secs);
 
     // Initialize library (create db in current dir)
     let db_path = std::env::current_dir()
@@ -171,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_license_status(license_store.borrow().status().label().into());
     ui.set_license_error("".into());
     ui.set_audio_engine(engine_name.clone().into());
-    ui.set_audio_device("Default".into());
+    ui.set_audio_device(player.device_name().into());
     ui.set_track_count(track_count as i32);
     ui.set_playlist_count(playlist_count as i32);
     ui.set_upcoming_count(0);
@@ -1172,6 +1186,123 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_license_status(store.status().label().into());
                 ui.set_license_error("".into());
+            }
+        });
+    }
+
+    // -- Settings: device list, selection, live DSP prefs --
+    fn push_devices(ui: &MainWindow) {
+        let devs = crabcore::audio::CpalEngine::list_output_devices();
+        let model = Rc::new(slint::VecModel::from(
+            devs.into_iter()
+                .map(|d| d.into())
+                .collect::<Vec<slint::SharedString>>(),
+        ));
+        ui.set_settings_devices(model.into());
+    }
+    fn settings_labels(ui: &MainWindow, settings: &crabcore::settings::AppSettings) {
+        ui.set_settings_xfade(format!("{:.1} s", settings.crossfade_secs).into());
+        ui.set_settings_silence(format!("{:.0} s", settings.silence_threshold_secs).into());
+    }
+    push_devices(&ui);
+    ui.set_settings_device(
+        settings
+            .borrow()
+            .output_device
+            .clone()
+            .unwrap_or_default()
+            .into(),
+    );
+    ui.set_settings_device_note("".into());
+    settings_labels(&ui, &settings.borrow());
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_settings_refresh_devices(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                push_devices(&ui);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_select_device(move |name| {
+            let name = name.to_string();
+            settings.borrow_mut().output_device = Some(name.clone());
+            if settings.borrow().save(&settings_path).is_ok() {
+                tracing::info!("Output device set to '{}' (restart to apply)", name);
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_settings_device(name.into());
+                ui.set_settings_device_note("Restart CrabBoss to apply the new device".into());
+            }
+        });
+    }
+    // Stepper helper: adjust, clamp, persist, apply live, relabel.
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_xfade_inc(move || {
+            let mut s = settings.borrow_mut();
+            s.crossfade_secs = (s.crossfade_secs + 0.5).clamp(0.0, 30.0);
+            let _ = s.save(&settings_path);
+            state.borrow().player.set_crossfade_secs(s.crossfade_secs);
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &s);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_xfade_dec(move || {
+            let mut s = settings.borrow_mut();
+            s.crossfade_secs = (s.crossfade_secs - 0.5).clamp(0.0, 30.0);
+            let _ = s.save(&settings_path);
+            state.borrow().player.set_crossfade_secs(s.crossfade_secs);
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &s);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_silence_inc(move || {
+            let mut s = settings.borrow_mut();
+            s.silence_threshold_secs = (s.silence_threshold_secs + 1.0).clamp(1.0, 120.0);
+            let _ = s.save(&settings_path);
+            state
+                .borrow()
+                .player
+                .set_silence_threshold_secs(s.silence_threshold_secs);
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &s);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_silence_dec(move || {
+            let mut s = settings.borrow_mut();
+            s.silence_threshold_secs = (s.silence_threshold_secs - 1.0).clamp(1.0, 120.0);
+            let _ = s.save(&settings_path);
+            state
+                .borrow()
+                .player
+                .set_silence_threshold_secs(s.silence_threshold_secs);
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &s);
             }
         });
     }
