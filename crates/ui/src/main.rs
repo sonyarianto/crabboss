@@ -261,31 +261,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let s = state.borrow();
         match event.action_type.as_str() {
-            // generate <preset>: music rotation with jingle slots (1 per 3 music)
+            // generate <preset>: real rotation (rules + daypart + jingles),
+            // persisted as a playlist for the playout queue.
             "generate" => {
-                let tracks = s.library.get_all_tracks().unwrap_or_default();
-                let n_music = tracks
+                let now = chrono::Local::now();
+                let cfg = crabcore::playlist::GenConfig {
+                    target_tracks: 10,
+                    hour: now.format("%H").to_string().parse().unwrap_or(12),
+                    weekday: now.format("%a").to_string(),
+                    ..Default::default()
+                };
+                let rotation = crabcore::playlist::generate(&s.library, &cfg).unwrap_or_default();
+                let n_music = rotation
                     .iter()
                     .filter(|t| t.kind == TrackKind::Music)
-                    .count()
-                    .min(10);
-                let n_jingles_avail = tracks
+                    .count();
+                let n_jingles = rotation
                     .iter()
                     .filter(|t| t.kind == TrackKind::Jingle)
                     .count();
-                let n_jingles = if n_jingles_avail == 0 {
-                    0
-                } else {
-                    (n_music / 3).min(n_jingles_avail).min(3)
-                };
-                tracing::info!(
-                    "Generated playlist '{}' ({} music + {} jingles)",
-                    event.target,
-                    n_music,
-                    n_jingles
-                );
+                let pl_name = format!("{} {}", event.target, now.format("%H:%M"));
+                match s
+                    .playlist_manager
+                    .create(&pl_name, Some("Auto-generated rotation"))
+                {
+                    Ok(pl) => {
+                        for t in &rotation {
+                            let _ = s.playlist_manager.add_track(
+                                &pl.id,
+                                &t.id,
+                                t.kind == TrackKind::Jingle,
+                                t.kind == TrackKind::Ad,
+                            );
+                        }
+                        tracing::info!(
+                            "Generated playlist '{}' ({} music + {} jingles)",
+                            pl_name,
+                            n_music,
+                            n_jingles
+                        );
+                    }
+                    Err(e) => tracing::error!("Failed to persist rotation: {}", e),
+                }
                 drop(s);
                 if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_playlist_count(
+                        state
+                            .borrow()
+                            .playlist_manager
+                            .list_all()
+                            .unwrap_or_default()
+                            .len() as i32,
+                    );
                     ui.set_now_playing_title(
                         format!(
                             "Generated '{}': {} music + {} jingles",

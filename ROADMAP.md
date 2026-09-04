@@ -50,7 +50,7 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [x] Cart Wall MVP: 8 pads, instant play, jingle-first seeding/loading with kind badges
 - [ ] Crossfader + gapless (see §1.1 — full scope below)
 - [ ] 12-band EQ + limiter (see §1.1)
-- [ ] Playlist auto-generator with rotation rules (see §1.2)
+- [x] Playlist auto-generator with rotation rules (engine done: repeat/separation/priority/daypart/jingles; UI presets open)
 - [ ] Ad scheduler (blocks with start/end dates, intros/outros — see §1.3)
 - [ ] Icecast/Shoutcast output (see §1.5)
 - [ ] Mic/line-in input with ducking (see §1.6)
@@ -99,10 +99,11 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [ ] Wire `library.search()` results into the Slint model (currently a no-op) — ✅ done (live list + search filter + tap-to-play)
 
 ### 1.2 Playlist Generator (real scope, not a checkbox)
-- [ ] No-repeat rules: artist, title, album — configurable lookback window
-- [ ] Separation rules (e.g. same genre not within N tracks)
-- [ ] Playcount-priority weighting (MIN/MAX/AVG-style, surface under-played tracks)
-- [ ] Dayparting: track eligibility by hour-of-day / day-of-week (RadioBOSS 7.2 headline — don't skip)
+- [x] No-repeat rules: artist, title, album — configurable lookback window
+- [x] Separation rules (same genre gap)
+- [x] Playcount-priority weighting (LeastPlayed MIN-style / MostPlayed MAX-style)
+- [x] Dayparting: per-track hours + days, wrap-past-midnight aware (`set_daypart`, honored by generator)
+- [x] Scheduler `generate` builds a real rotation and persists it as a playlist
 - [ ] Multi-playlist generation UI (several dayparts/rotations at once)
 
 ### 1.3 Ads, Scheduler & Cart depth

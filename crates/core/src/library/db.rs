@@ -101,6 +101,30 @@ impl TrackKind {
 /// Unique identifier for a track in the library.
 pub type TrackId = String;
 
+impl Track {
+    /// Daypart eligibility for `(hour 0-23, weekday Mon..Sun)`.
+    pub fn eligible_at(&self, hour: u8, weekday: &str) -> bool {
+        if !self.daypart_days.eq_ignore_ascii_case("daily")
+            && !self
+                .daypart_days
+                .split(',')
+                .any(|d| d.trim().eq_ignore_ascii_case(weekday))
+        {
+            return false;
+        }
+        match (self.daypart_start, self.daypart_end) {
+            (Some(s), Some(e)) => {
+                if s <= e {
+                    hour >= s && hour < e
+                } else {
+                    hour >= s || hour < e
+                }
+            }
+            _ => true,
+        }
+    }
+}
+
 /// Represents a single audio track in the library.
 #[derive(Debug, Clone)]
 pub struct Track {
@@ -120,6 +144,12 @@ pub struct Track {
     pub channels: Option<i32>,
     /// Station role: music vs jingle/bumper vs ad. Same audio, different rules.
     pub kind: TrackKind,
+    /// Dayparting: eligible start hour (0-23) or `None` = any time.
+    pub daypart_start: Option<u8>,
+    /// Dayparting: eligible end hour (exclusive, may wrap past midnight) or `None`.
+    pub daypart_end: Option<u8>,
+    /// Dayparting: `Daily` or comma list like `Mon,Tue`.
+    pub daypart_days: String,
     pub tags: Vec<String>,
     pub added_at: DateTime<Utc>,
     pub last_played_at: Option<DateTime<Utc>>,
@@ -138,6 +168,11 @@ impl Library {
         let lib = Self { conn };
         lib.init_tables()?;
         Ok(lib)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
     }
 
     /// Initialize the database schema.
@@ -184,20 +219,23 @@ impl Library {
             );
             ",
         )?;
-        // Migrate pre-kind databases: add the column if missing.
-        let has_kind: bool = self
+        // Migrate older databases: add any missing columns.
+        let cols: Vec<String> = self
             .conn
             .prepare("PRAGMA table_info(tracks)")?
             .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .iter()
-            .any(|c| c == "kind");
-        if !has_kind {
-            self.conn.execute(
-                "ALTER TABLE tracks ADD COLUMN kind TEXT NOT NULL DEFAULT 'music'",
-                [],
-            )?;
-        }
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let add_col = |name: &str, ddl: &str| -> Result<()> {
+            if !cols.iter().any(|c| c == name) {
+                self.conn
+                    .execute(&format!("ALTER TABLE tracks ADD COLUMN {}", ddl), [])?;
+            }
+            Ok(())
+        };
+        add_col("kind", "kind TEXT NOT NULL DEFAULT 'music'")?;
+        add_col("daypart_start", "daypart_start INTEGER")?;
+        add_col("daypart_end", "daypart_end INTEGER")?;
+        add_col("daypart_days", "daypart_days TEXT NOT NULL DEFAULT 'Daily'")?;
         Ok(())
     }
 
@@ -259,6 +297,9 @@ impl Library {
             sample_rate,
             channels,
             kind,
+            daypart_start: None,
+            daypart_end: None,
+            daypart_days: "Daily".to_string(),
             tags: Vec::new(),
             added_at,
             last_played_at: None,
@@ -275,12 +316,30 @@ impl Library {
         Ok(())
     }
 
+    /// Override daypart eligibility (`start`/`end` hours, `days` like `Daily`
+    /// or `Mon,Tue`). `None` hours mean any time.
+    pub fn set_daypart(
+        &self,
+        id: &str,
+        start: Option<u8>,
+        end: Option<u8>,
+        days: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tracks SET daypart_start = ?1, daypart_end = ?2, daypart_days = ?3
+             WHERE id = ?4",
+            params![start.map(|v| v as i64), end.map(|v| v as i64), days, id],
+        )?;
+        Ok(())
+    }
+
     /// All tracks of one kind (used by carts, generator jingle slots, filters).
     pub fn list_by_kind(&self, kind: TrackKind) -> Result<Vec<Track>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_path, file_name, title, artist, album, genre, year,
                     track_number, duration_secs, file_size, sample_rate, channels,
-                    kind, added_at, last_played_at, play_count
+                    kind, added_at, last_played_at, play_count,
+                    daypart_start, daypart_end, daypart_days
              FROM tracks WHERE kind = ?1 ORDER BY file_name",
         )?;
         let tracks = stmt
@@ -306,6 +365,19 @@ impl Library {
             sample_rate: row.get(11)?,
             channels: row.get(12)?,
             kind: TrackKind::parse(&row.get::<_, String>(13).unwrap_or_default()),
+            daypart_start: row
+                .get::<_, Option<i64>>(17)
+                .ok()
+                .flatten()
+                .map(|v| v as u8),
+            daypart_end: row
+                .get::<_, Option<i64>>(18)
+                .ok()
+                .flatten()
+                .map(|v| v as u8),
+            daypart_days: row
+                .get::<_, String>(19)
+                .unwrap_or_else(|_| "Daily".to_string()),
             tags: Vec::new(),
             added_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(14)?)
                 .map(|dt| dt.with_timezone(&Utc))
@@ -323,7 +395,8 @@ impl Library {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_path, file_name, title, artist, album, genre, year,
                     track_number, duration_secs, file_size, sample_rate, channels,
-                    kind, added_at, last_played_at, play_count
+                    kind, added_at, last_played_at, play_count,
+                    daypart_start, daypart_end, daypart_days
              FROM tracks ORDER BY artist, album, title",
         )?;
 
@@ -339,7 +412,8 @@ impl Library {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_path, file_name, title, artist, album, genre, year,
                     track_number, duration_secs, file_size, sample_rate, channels,
-                    kind, added_at, last_played_at, play_count
+                    kind, added_at, last_played_at, play_count,
+                    daypart_start, daypart_end, daypart_days
              FROM tracks WHERE id = ?1",
         )?;
 
@@ -354,7 +428,8 @@ impl Library {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_path, file_name, title, artist, album, genre, year,
                     track_number, duration_secs, file_size, sample_rate, channels,
-                    kind, added_at, last_played_at, play_count
+                    kind, added_at, last_played_at, play_count,
+                    daypart_start, daypart_end, daypart_days
              FROM tracks
              WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1
                     OR file_name LIKE ?1 OR genre LIKE ?1
