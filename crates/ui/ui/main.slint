@@ -4,6 +4,8 @@ import { PlayerPanel } from "player.slint";
 import { LibraryPanel } from "library.slint";
 import { PlaylistPanel } from "playlist.slint";
 import { SettingsScreen } from "settings.slint";
+import { SchedulerScreen, SchedRow } from "scheduler.slint";
+import { CartScreen, CartRow } from "cart.slint";
 
 component NavButton inherits Rectangle {
     in property <string> label: "";
@@ -34,7 +36,7 @@ export component MainWindow inherits Window {
     min-height: 600px;
     background: Theme.bg-primary;
 
-    // -- Router: 1=home, 2=playout, 3=media, 4=settings --
+    // -- Router: 1=home, 2=playout, 3=media, 4=settings, 5=scheduler, 6=cartwall --
     in-out property <int> current-screen: 1;
     in-out property <string> station-name: "CrabBoss FM";
     in-out property <string> license-status: "Unlicensed";
@@ -55,6 +57,16 @@ export component MainWindow inherits Window {
     in-out property <string> total-time: "00:00";
     in-out property <float> player-volume: 0.8;
     in-out property <float> player-progress: 0.0;
+
+    // -- Scheduler state --
+    in-out property <bool> scheduler-enabled: true;
+    in-out property <[SchedRow]> scheduler-events;
+    in-out property <bool> scheduler-show-editor: false;
+    in-out property <string> scheduler-error: "";
+
+    // -- Cart Wall state --
+    in-out property <[CartRow]> cart-items;
+    in-out property <string> cart-status: "";
 
     // -- Nav --
     callback navigate(int);
@@ -83,6 +95,18 @@ export component MainWindow inherits Window {
     // -- Settings callbacks --
     callback activate-license(string);
     callback clear-license;
+
+    // -- Scheduler callbacks --
+    callback scheduler-toggled(bool);
+    callback scheduler-toggle-event(int);
+    callback scheduler-delete-event(int);
+    callback scheduler-run-event(int);
+    callback scheduler-save-event(int, string, string, int, string, bool, bool, bool, bool, bool, bool, bool);
+
+    // -- Cart Wall callbacks --
+    callback cart-play(int);
+    callback cart-delete(int);
+    callback cart-add;
 
     VerticalLayout {
         // Top nav bar
@@ -126,6 +150,20 @@ export component MainWindow inherits Window {
                     clicked => { root.navigate(3); }
                 }
 
+                NavButton {
+                    width: 110px;
+                    label: "🗓 Scheduler";
+                    active: root.current-screen == 5;
+                    clicked => { root.navigate(5); }
+                }
+
+                NavButton {
+                    width: 100px;
+                    label: "🎛 Carts";
+                    active: root.current-screen == 6;
+                    clicked => { root.navigate(6); }
+                }
+
                 Rectangle { horizontal-stretch: 1; }
 
                 NavButton {
@@ -150,8 +188,8 @@ export component MainWindow inherits Window {
 
             go-playout => { root.navigate(2); }
             go-media => { root.navigate(3); }
-            go-scheduler => { root.navigate(2); }
-            go-cartwall => { root.navigate(2); }
+            go-scheduler => { root.navigate(5); }
+            go-cartwall => { root.navigate(6); }
         }
 
         // -- Playout --
@@ -282,6 +320,34 @@ export component MainWindow inherits Window {
 
             activate-license(key) => { root.activate-license(key); }
             clear-license => { root.clear-license(); }
+        }
+
+        // -- Scheduler --
+        if (root.current-screen == 5) : SchedulerScreen {
+            vertical-stretch: 1;
+            scheduler-enabled <=> root.scheduler-enabled;
+            events: root.scheduler-events;
+            show-editor <=> root.scheduler-show-editor;
+            editor-error <=> root.scheduler-error;
+
+            scheduler-toggled(en) => { root.scheduler-toggled(en); }
+            toggle-event(idx) => { root.scheduler-toggle-event(idx); }
+            delete-event(idx) => { root.scheduler-delete-event(idx); }
+            run-event(idx) => { root.scheduler-run-event(idx); }
+            save-event(idx, name, time, action-idx, target, mon, tue, wed, thu, fri, sat, sun) => {
+                root.scheduler-save-event(idx, name, time, action-idx, target, mon, tue, wed, thu, fri, sat, sun);
+            }
+        }
+
+        // -- Cart Wall --
+        if (root.current-screen == 6) : CartScreen {
+            vertical-stretch: 1;
+            carts: root.cart-items;
+            status: root.cart-status;
+
+            play-cart(idx) => { root.cart-play(idx); }
+            delete-cart(idx) => { root.cart-delete(idx); }
+            add-cart => { root.cart-add(); }
         }
     }
 }

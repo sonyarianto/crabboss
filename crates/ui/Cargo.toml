@@ -6,6 +6,7 @@ description = "CrabBoss desktop UI built with Slint"
 
 [dependencies]
 crabcore = { path = "../core" }
+chrono = { workspace = true }
 slint = "1.11"
 tokio = { workspace = true }
 tracing = { workspace = true }

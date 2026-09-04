@@ -1039,6 +1039,7 @@ dependencies = [
 name = "crabui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "crabcore",
  "slint",
  "slint-build",

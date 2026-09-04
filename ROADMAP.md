@@ -47,7 +47,10 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [ ] Crossfader + gapless
 - [ ] 12-band EQ + limiter
 - [ ] Playlist auto-generator with rotation rules
-- [ ] Ad scheduler + cart wall
+- [x] Scheduler MVP: event list, Add/Edit dialog (time/action/days), auto-tick firing `generate`/`load`/`play`
+- [x] Track kinds (music/jingle/ad): auto-classify on import, `set_kind`, pre-kind DB migration
+- [x] Cart Wall MVP: 8 pads, instant play, jingle-first seeding/loading with kind badges
+- [ ] Ad scheduler (blocks with start/end dates, intros/outros)
 - [ ] Icecast/Shoutcast output
 - [ ] Mic/line-in input with ducking
 - [ ] Report generator (play logs → XLS/PDF)

@@ -1,0 +1,498 @@
+import { Theme } from "common.slint";
+
+export struct SchedRow {
+    name: string,
+    time: string,
+    action: string,
+    target: string,
+    days: string,
+    enabled: bool,
+    mon: bool,
+    tue: bool,
+    wed: bool,
+    thu: bool,
+    fri: bool,
+    sat: bool,
+    sun: bool,
+}
+
+component SmallBtn inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> highlighted: false;
+    in property <bool> danger: false;
+    callback clicked;
+
+    height: 24px;
+    border-radius: 4px;
+    background: highlighted ? Theme.success : (danger ? Theme.bg-panel : Theme.bg-panel);
+
+    TouchArea { clicked => { root.clicked(); } }
+
+    Text {
+        text: root.label;
+        color: highlighted ? white : (danger ? Theme.text-dim : Theme.accent);
+        font-size: 10px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component EventRow inherits Rectangle {
+    in property <string> ev-name: "";
+    in property <string> ev-time: "";
+    in property <string> ev-action: "";
+    in property <string> ev-target: "";
+    in property <string> ev-days: "";
+    in property <bool> ev-enabled: false;
+    in property <int> ev-index: 0;
+    in property <bool> is-even: false;
+
+    callback toggle-requested(int);
+    callback delete-requested(int);
+    callback run-requested(int);
+    callback edit-requested(int);
+
+    height: 40px;
+    background: is-even ? Theme.bg-primary : Theme.bg-secondary;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+
+        // enabled dot
+        Rectangle {
+            width: 10px;
+            height: 10px;
+            border-radius: 5px;
+            background: root.ev-enabled ? Theme.success : Theme.text-dim;
+            y: (parent.height - self.height) / 2;
+        }
+
+        Text {
+            text: root.ev-time;
+            color: Theme.text-primary;
+            font-size: 12px;
+            font-weight: 700;
+            vertical-alignment: center;
+            width: 46px;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Text {
+                text: root.ev-name + "  •  " + root.ev-days;
+                color: Theme.text-primary;
+                font-size: 12px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.ev-action + " • " + root.ev-target;
+                color: Theme.text-dim;
+                font-size: 10px;
+                overflow: elide;
+            }
+        }
+
+        SmallBtn {
+            width: 44px;
+            label: "Run";
+            clicked => { root.run-requested(root.ev-index); }
+        }
+
+        SmallBtn {
+            width: 34px;
+            label: "Edit";
+            clicked => { root.edit-requested(root.ev-index); }
+        }
+
+        SmallBtn {
+            width: 40px;
+            label: root.ev-enabled ? "On" : "Off";
+            highlighted: root.ev-enabled;
+            clicked => { root.toggle-requested(root.ev-index); }
+        }
+
+        SmallBtn {
+            width: 26px;
+            label: "✕";
+            danger: true;
+            clicked => { root.delete-requested(root.ev-index); }
+        }
+    }
+}
+
+component Field inherits Rectangle {
+    in-out property <string> value: "";
+    in property <string> hint: "";
+
+    height: 30px;
+    border-radius: 6px;
+    background: Theme.bg-input;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        TextInput {
+            text <=> root.value;
+            color: Theme.text-primary;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+component DayToggle inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> on: false;
+    callback toggled;
+
+    width: 36px;
+    height: 26px;
+    border-radius: 6px;
+    background: root.on ? Theme.accent : Theme.bg-panel;
+
+    TouchArea { clicked => { root.toggled(); } }
+
+    Text {
+        text: root.label;
+        color: root.on ? white : Theme.text-secondary;
+        font-size: 10px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component SchedulerScreen inherits Rectangle {
+    in-out property <bool> scheduler-enabled: true;
+    in-out property <[SchedRow]> events;
+    in-out property <bool> show-editor: false;
+    in-out property <string> editor-error: "";
+
+    // editor-local state
+    in-out property <int> editing-index: -1;
+    in-out property <string> edit-name: "";
+    in-out property <string> edit-time: "08:00";
+    in-out property <string> edit-target: "";
+    in-out property <int> edit-action-idx: 2;
+    in-out property <bool> edit-mon: true;
+    in-out property <bool> edit-tue: true;
+    in-out property <bool> edit-wed: true;
+    in-out property <bool> edit-thu: true;
+    in-out property <bool> edit-fri: true;
+    in-out property <bool> edit-sat: true;
+    in-out property <bool> edit-sun: true;
+
+    callback scheduler-toggled(bool);
+    callback toggle-event(int);
+    callback delete-event(int);
+    callback run-event(int);
+    callback save-event(int, string, string, int, string, bool, bool, bool, bool, bool, bool, bool);
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            height: 34px;
+            spacing: 8px;
+            alignment: space-between;
+
+            Text {
+                text: "🗓 Scheduler — " + (root.scheduler-enabled ? "ON" : "OFF");
+                color: Theme.text-primary;
+                font-size: 14px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+
+                // master on/off
+                Rectangle {
+                    width: 64px;
+                    height: 28px;
+                    border-radius: 6px;
+                    background: root.scheduler-enabled ? Theme.success : Theme.bg-panel;
+                    TouchArea {
+                        clicked => {
+                            root.scheduler-enabled = !root.scheduler-enabled;
+                            root.scheduler-toggled(root.scheduler-enabled);
+                        }
+                    }
+                    Text {
+                        text: root.scheduler-enabled ? "ON" : "OFF";
+                        color: white;
+                        font-size: 12px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // add: open blank editor (no Rust round-trip)
+                Rectangle {
+                    width: 90px;
+                    height: 28px;
+                    border-radius: 6px;
+                    background: Theme.accent;
+                    TouchArea {
+                        clicked => {
+                            root.editing-index = -1;
+                            root.edit-name = "";
+                            root.edit-time = "08:00";
+                            root.edit-target = "Day";
+                            root.edit-action-idx = 2;
+                            root.edit-mon = true;
+                            root.edit-tue = true;
+                            root.edit-wed = true;
+                            root.edit-thu = true;
+                            root.edit-fri = true;
+                            root.edit-sat = true;
+                            root.edit-sun = true;
+                            root.editor-error = "";
+                            root.show-editor = true;
+                        }
+                    }
+                    Text {
+                        text: "+ Add";
+                        color: white;
+                        font-size: 12px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: "Time  •  Event  •  Run to fire generate/load now";
+            color: Theme.text-dim;
+            font-size: 11px;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            if (root.events.length == 0) : Text {
+                text: "No events — click + Add to schedule e.g. 00:00 generate Day";
+                color: Theme.text-dim;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            Flickable {
+                VerticalLayout {
+                    spacing: 0px;
+                    for ev[i] in root.events : EventRow {
+                        ev-name: ev.name;
+                        ev-time: ev.time;
+                        ev-action: ev.action;
+                        ev-target: ev.target;
+                        ev-days: ev.days;
+                        ev-enabled: ev.enabled;
+                        ev-index: i;
+                        is-even: mod(i, 2) == 0;
+                        toggle-requested(idx) => { root.toggle-event(idx); }
+                        delete-requested(idx) => { root.delete-event(idx); }
+                        run-requested(idx) => { root.run-event(idx); }
+                        edit-requested(idx) => {
+                            root.editing-index = idx;
+                            root.edit-name = ev.name;
+                            root.edit-time = ev.time;
+                            root.edit-target = ev.target;
+                            if (ev.action == "play") {
+                                root.edit-action-idx = 0;
+                            } else if (ev.action == "load") {
+                                root.edit-action-idx = 1;
+                            } else if (ev.action == "generate") {
+                                root.edit-action-idx = 2;
+                            } else {
+                                root.edit-action-idx = 3;
+                            }
+                            root.edit-mon = ev.mon;
+                            root.edit-tue = ev.tue;
+                            root.edit-wed = ev.wed;
+                            root.edit-thu = ev.thu;
+                            root.edit-fri = ev.fri;
+                            root.edit-sat = ev.sat;
+                            root.edit-sun = ev.sun;
+                            root.editor-error = "";
+                            root.show-editor = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Add/Edit dialog overlay ----
+    if (root.show-editor) : Rectangle {
+        background: #00000099;
+
+        HorizontalLayout {
+            alignment: center;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 440px;
+                    height: 480px;
+                    border-radius: 10px;
+                    background: Theme.bg-secondary;
+                    border-width: 1px;
+                    border-color: Theme.border;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+
+                        Text {
+                            text: root.editing-index < 0 ? "Add event" : "Edit event";
+                            color: Theme.text-primary;
+                            font-size: 15px;
+                            font-weight: 800;
+                        }
+
+                        Text { text: "Name"; color: Theme.text-dim; font-size: 11px; }
+                        Field { value <=> root.edit-name; }
+
+                        Text { text: "Start time (HH:MM, 24h)"; color: Theme.text-dim; font-size: 11px; }
+                        Field { value <=> root.edit-time; }
+
+                        Text { text: "Action"; color: Theme.text-dim; font-size: 11px; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            SmallBtn {
+                                horizontal-stretch: 1;
+                                label: "Play";
+                                highlighted: root.edit-action-idx == 0;
+                                clicked => { root.edit-action-idx = 0; }
+                            }
+                            SmallBtn {
+                                horizontal-stretch: 1;
+                                label: "Load";
+                                highlighted: root.edit-action-idx == 1;
+                                clicked => { root.edit-action-idx = 1; }
+                            }
+                            SmallBtn {
+                                horizontal-stretch: 1;
+                                label: "Generate";
+                                highlighted: root.edit-action-idx == 2;
+                                clicked => { root.edit-action-idx = 2; }
+                            }
+                            SmallBtn {
+                                horizontal-stretch: 1;
+                                label: "Command";
+                                highlighted: root.edit-action-idx == 3;
+                                clicked => { root.edit-action-idx = 3; }
+                            }
+                        }
+
+                        Text {
+                            text: root.edit-action-idx == 2 ? "Preset name" : (root.edit-action-idx == 3 ? "Command" : "File / playlist path");
+                            color: Theme.text-dim;
+                            font-size: 11px;
+                        }
+                        Field { value <=> root.edit-target; }
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: space-between;
+                            Text { text: "Repeat days"; color: Theme.text-dim; font-size: 11px; vertical-alignment: center; }
+                            SmallBtn {
+                                width: 60px;
+                                label: "Daily";
+                                clicked => {
+                                    root.edit-mon = true;
+                                    root.edit-tue = true;
+                                    root.edit-wed = true;
+                                    root.edit-thu = true;
+                                    root.edit-fri = true;
+                                    root.edit-sat = true;
+                                    root.edit-sun = true;
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 4px;
+                            DayToggle { label: "Mon"; on: root.edit-mon; toggled => { root.edit-mon = !root.edit-mon; } }
+                            DayToggle { label: "Tue"; on: root.edit-tue; toggled => { root.edit-tue = !root.edit-tue; } }
+                            DayToggle { label: "Wed"; on: root.edit-wed; toggled => { root.edit-wed = !root.edit-wed; } }
+                            DayToggle { label: "Thu"; on: root.edit-thu; toggled => { root.edit-thu = !root.edit-thu; } }
+                            DayToggle { label: "Fri"; on: root.edit-fri; toggled => { root.edit-fri = !root.edit-fri; } }
+                            DayToggle { label: "Sat"; on: root.edit-sat; toggled => { root.edit-sat = !root.edit-sat; } }
+                            DayToggle { label: "Sun"; on: root.edit-sun; toggled => { root.edit-sun = !root.edit-sun; } }
+                        }
+
+                        if (root.editor-error != "") : Text {
+                            text: root.editor-error;
+                            color: Theme.accent;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: end;
+                            Rectangle {
+                                width: 90px;
+                                height: 30px;
+                                border-radius: 6px;
+                                background: Theme.bg-panel;
+                                TouchArea {
+                                    clicked => {
+                                        root.show-editor = false;
+                                        root.editor-error = "";
+                                    }
+                                }
+                                Text {
+                                    text: "Cancel";
+                                    color: Theme.text-secondary;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Rectangle {
+                                width: 90px;
+                                height: 30px;
+                                border-radius: 6px;
+                                background: Theme.accent;
+                                TouchArea {
+                                    clicked => {
+                                        root.save-event(root.editing-index, root.edit-name, root.edit-time, root.edit-action-idx, root.edit-target, root.edit-mon, root.edit-tue, root.edit-wed, root.edit-thu, root.edit-fri, root.edit-sat, root.edit-sun);
+                                    }
+                                }
+                                Text {
+                                    text: "Save";
+                                    color: white;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

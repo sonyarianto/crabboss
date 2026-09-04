@@ -24,6 +24,9 @@ pub enum CrabError {
     #[error("Playlist error: {0}")]
     Playlist(String),
 
+    #[error("Scheduler error: {0}")]
+    Scheduler(String),
+
     #[error("Library error: {0}")]
     Library(String),
 }

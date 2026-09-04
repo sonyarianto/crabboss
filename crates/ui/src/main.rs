@@ -3,6 +3,7 @@
 //! Desktop UI entry point using Slint.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -11,6 +12,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 slint::include_modules!();
 
 use crabcore::audio::Engine;
+use crabcore::library::TrackKind;
 
 /// Application state shared between UI callbacks
 struct AppState {
@@ -76,9 +78,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Library loaded from: {}", db_path.display());
 
+    // Scheduler store (shares the same crabboss.db file, separate connection)
+    let scheduler = Rc::new(RefCell::new(
+        crabcore::scheduler::SchedulerManager::open(&db_path)
+            .expect("Failed to open scheduler store"),
+    ));
+
+    // Seed a starter flow for a new station (only when empty)
+    if scheduler.borrow().list_all().map(|v| v.is_empty()).unwrap_or(false) {
+        let _ = scheduler.borrow().create(
+            "Midnight generate",
+            "generate",
+            "Day",
+            "00:00",
+            "Daily",
+        );
+        let _ = scheduler.borrow().create(
+            "Morning show",
+            "load",
+            "Morning.m3u",
+            "08:00",
+            "Daily",
+        );
+        let _ =
+            scheduler
+                .borrow()
+                .create("Top-of-hour jingle", "play", "toth.mp3", "09:00", "Daily");
+        tracing::info!("Seeded starter scheduler events");
+    }
+
     // Count existing tracks
     let track_count = library.get_all_tracks().unwrap_or_default().len();
     tracing::info!("Library contains {} tracks", track_count);
+
+    // Cart Wall store (same db file, separate connection)
+    let carts = Rc::new(RefCell::new(
+        crabcore::cart::CartManager::open(&db_path).expect("Failed to open cart store"),
+    ));
+
+    // Seed carts from jingles first, then music (only when empty)
+    if carts.borrow().list_all().map(|v| v.is_empty()).unwrap_or(false) {
+        let jingles = library.list_by_kind(TrackKind::Jingle).unwrap_or_default();
+        let music = library.list_by_kind(TrackKind::Music).unwrap_or_default();
+        for t in jingles.iter().chain(music.iter()).take(4) {
+            let label = t
+                .title
+                .clone()
+                .unwrap_or_else(|| t.file_name.clone());
+            let _ = carts.borrow().create(&label, &t.file_path);
+        }
+        if track_count > 0 {
+            tracing::info!("Seeded cart wall from library");
+        }
+    }
 
     // Build Slint UI
     let ui = MainWindow::new().expect("Failed to create main window");
@@ -110,12 +162,472 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         current_track_index: 0,
     }));
 
+    // -- Scheduler: push events to UI --
+    fn refresh_scheduler(ui: &MainWindow, scheduler: &crabcore::scheduler::SchedulerManager) {
+        use crabcore::scheduler::mask_from_days;
+        let events = scheduler.list_all().unwrap_or_default();
+        let rows: Vec<SchedRow> = events
+            .iter()
+            .map(|e| {
+                let mask = mask_from_days(&e.days);
+                SchedRow {
+                    name: e.name.clone().into(),
+                    time: e.start_time.clone().into(),
+                    action: e.action_type.clone().into(),
+                    target: e.target.clone().into(),
+                    days: e.days.clone().into(),
+                    enabled: e.enabled,
+                    mon: mask & 1 != 0,
+                    tue: mask & 2 != 0,
+                    wed: mask & 4 != 0,
+                    thu: mask & 8 != 0,
+                    fri: mask & 16 != 0,
+                    sat: mask & 32 != 0,
+                    sun: mask & 64 != 0,
+                }
+            })
+            .collect();
+        let model = Rc::new(slint::VecModel::from(rows));
+        ui.set_scheduler_events(model.into());
+        ui.set_upcoming_count(events.iter().filter(|e| e.enabled).count() as i32);
+    }
+    ui.set_scheduler_enabled(true);
+    ui.set_scheduler_show_editor(false);
+    ui.set_scheduler_error("".into());
+    refresh_scheduler(&ui, &scheduler.borrow());
+
+    // Shared firing logic: used by manual Run and the auto-tick timer.
+    fn fire_scheduled_event(
+        state: &Rc<RefCell<AppState>>,
+        ui_weak: &slint::Weak<MainWindow>,
+        event: &crabcore::scheduler::ScheduledEvent,
+    ) {
+        tracing::info!(
+            "Scheduler firing: {} [{} {}]",
+            event.name,
+            event.action_type,
+            event.target
+        );
+        let s = state.borrow();
+        match event.action_type.as_str() {
+            // generate <preset>: music rotation with jingle slots (1 per 3 music)
+            "generate" => {
+                let tracks = s.library.get_all_tracks().unwrap_or_default();
+                let n_music = tracks
+                    .iter()
+                    .filter(|t| t.kind == TrackKind::Music)
+                    .count()
+                    .min(10);
+                let n_jingles_avail = tracks
+                    .iter()
+                    .filter(|t| t.kind == TrackKind::Jingle)
+                    .count();
+                let n_jingles = if n_jingles_avail == 0 {
+                    0
+                } else {
+                    (n_music / 3).min(n_jingles_avail).min(3)
+                };
+                tracing::info!(
+                    "Generated playlist '{}' ({} music + {} jingles)",
+                    event.target,
+                    n_music,
+                    n_jingles
+                );
+                drop(s);
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_now_playing_title(
+                        format!(
+                            "Generated '{}': {} music + {} jingles",
+                            event.target, n_music, n_jingles
+                        )
+                        .into(),
+                    );
+                }
+            }
+            // load / play <path>: play file directly if it exists
+            "load" | "play" => {
+                let path = PathBuf::from(&event.target);
+                if path.is_file() {
+                    match s.player.play(&path) {
+                        Ok(()) => {
+                            drop(s);
+                            if let Some(ui) = ui_weak.upgrade() {
+                                ui.set_is_playing(true);
+                                ui.set_now_playing_title(event.target.clone().into());
+                                ui.set_now_playing_artist("Scheduler".into());
+                            }
+                        }
+                        Err(e) => tracing::error!("Scheduler play failed: {}", e),
+                    }
+                } else {
+                    tracing::warn!("Scheduler target not found on disk: {}", event.target);
+                    drop(s);
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_now_playing_title(
+                            format!("Scheduled: {} (file missing)", event.target).into(),
+                        );
+                    }
+                }
+            }
+            other => {
+                tracing::info!("Scheduler command '{}' (no-op in MVP)", other);
+            }
+        }
+    }
+
     // -- Navigate --
     {
         let ui_weak = ui.as_weak();
         ui.on_navigate(move |screen: i32| {
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_current_screen(screen);
+            }
+        });
+    }
+
+    // -- Scheduler toggled (master on/off) --
+    {
+        ui.on_scheduler_toggled(move |enabled| {
+            tracing::info!("Scheduler master {}", if enabled { "ON" } else { "OFF" });
+        });
+    }
+
+    // -- Scheduler save (Add/Edit dialog) --
+    {
+        let ui_weak = ui.as_weak();
+        let scheduler = scheduler.clone();
+        ui.on_scheduler_save_event(
+            move |idx, name, time, action_idx, target, mon, tue, wed, thu, fri, sat, sun| {
+                use crabcore::scheduler::days_from_mask;
+                let action = match action_idx {
+                    0 => "play",
+                    1 => "load",
+                    2 => "generate",
+                    _ => "command",
+                };
+                let mut mask = 0u8;
+                if mon {
+                    mask |= 1;
+                }
+                if tue {
+                    mask |= 2;
+                }
+                if wed {
+                    mask |= 4;
+                }
+                if thu {
+                    mask |= 8;
+                }
+                if fri {
+                    mask |= 16;
+                }
+                if sat {
+                    mask |= 32;
+                }
+                if sun {
+                    mask |= 64;
+                }
+                let days = days_from_mask(mask);
+                let res = if idx < 0 {
+                    scheduler
+                        .borrow()
+                        .create(name.trim(), action, target.trim(), time.trim(), &days)
+                        .map(|_| ())
+                } else {
+                    let ids: Vec<String> = scheduler
+                        .borrow()
+                        .list_all()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|e| e.id)
+                        .collect();
+                    match ids.get(idx as usize) {
+                        Some(id) => scheduler.borrow().update(
+                            id,
+                            name.trim(),
+                            action,
+                            target.trim(),
+                            time.trim(),
+                            &days,
+                        ),
+                        None => Err(crabcore::CrabError::Scheduler("event gone".into())),
+                    }
+                };
+                match res {
+                    Ok(()) => {
+                        tracing::info!("Scheduler saved: {} at {}", name, time);
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_scheduler_error("".into());
+                            ui.set_scheduler_show_editor(false);
+                            refresh_scheduler(&ui, &scheduler.borrow());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Scheduler save failed: {}", e);
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_scheduler_error(format!("{}", e).into());
+                        }
+                    }
+                }
+            },
+        );
+    }
+
+    // -- Scheduler toggle event --
+    {
+        let ui_weak = ui.as_weak();
+        let scheduler = scheduler.clone();
+        ui.on_scheduler_toggle_event(move |idx| {
+            let ids: Vec<(String, bool)> = scheduler
+                .borrow()
+                .list_all()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| (e.id, e.enabled))
+                .collect();
+            if let Some((id, enabled)) = ids.get(idx as usize) {
+                if let Err(e) = scheduler.borrow().set_enabled(id, !enabled) {
+                    tracing::error!("Scheduler toggle failed: {}", e);
+                }
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh_scheduler(&ui, &scheduler.borrow());
+            }
+        });
+    }
+
+    // -- Scheduler delete event --
+    {
+        let ui_weak = ui.as_weak();
+        let scheduler = scheduler.clone();
+        ui.on_scheduler_delete_event(move |idx| {
+            let ids: Vec<String> = scheduler
+                .borrow()
+                .list_all()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| e.id)
+                .collect();
+            if let Some(id) = ids.get(idx as usize) {
+                if let Err(e) = scheduler.borrow().delete(id) {
+                    tracing::error!("Scheduler delete failed: {}", e);
+                }
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh_scheduler(&ui, &scheduler.borrow());
+            }
+        });
+    }
+
+    // -- Scheduler run event (wire generate / load to engine) --
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let scheduler = scheduler.clone();
+        ui.on_scheduler_run_event(move |idx| {
+            let event = scheduler
+                .borrow()
+                .list_all()
+                .unwrap_or_default()
+                .into_iter()
+                .nth(idx as usize);
+            let Some(event) = event else { return };
+            fire_scheduled_event(&state, &ui_weak, &event);
+        });
+    }
+
+    // -- Scheduler auto-tick: fire due events while master is ON --
+    // Runs on the UI thread (Slint Timer), so Engine/Library Rc access is safe.
+    // Dedupes per (event, minute) so a 15s tick fires each event once.
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let scheduler = scheduler.clone();
+        let fired: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
+        let tick = slint::Timer::default();
+        tick.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(15),
+            move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                if !ui.get_scheduler_enabled() {
+                    return;
+                }
+                let now = chrono::Local::now();
+                let hhmm = now.format("%H:%M").to_string();
+                let weekday = now.format("%a").to_string();
+                let minute_key = now.format("%Y-%m-%d %H:%M").to_string();
+                let due = scheduler
+                    .borrow()
+                    .due_events(&hhmm, &weekday)
+                    .unwrap_or_default();
+                if due.is_empty() {
+                    return;
+                }
+                let mut fired = fired.borrow_mut();
+                for event in due {
+                    let already = fired
+                        .get(&event.id)
+                        .map(|m| m == &minute_key)
+                        .unwrap_or(false);
+                    if already {
+                        continue;
+                    }
+                    fired.insert(event.id.clone(), minute_key.clone());
+                    fire_scheduled_event(&state, &ui_weak, &event);
+                }
+            },
+        );
+        // App-lifetime timer: intentionally never stopped.
+        std::mem::forget(tick);
+    }
+
+    // -- Cart Wall: push pads to UI --
+    fn refresh_carts(
+        ui: &MainWindow,
+        carts: &crabcore::cart::CartManager,
+        library: &crabcore::library::Library,
+    ) {
+        let kinds: HashMap<String, TrackKind> = library
+            .get_all_tracks()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| (t.file_path, t.kind))
+            .collect();
+        let all = carts.list_all().unwrap_or_default();
+        let rows: Vec<CartRow> = all
+            .iter()
+            .map(|c| {
+                let file_name = PathBuf::from(&c.file_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let kind_label = match kinds.get(&c.file_path) {
+                    Some(TrackKind::Jingle) => "Jingle",
+                    Some(TrackKind::Ad) => "Ad",
+                    _ => "Music",
+                };
+                CartRow {
+                    label: c.label.clone().into(),
+                    sub: format!("{} • {}", kind_label, file_name).into(),
+                    has_file: PathBuf::from(&c.file_path).is_file(),
+                }
+            })
+            .collect();
+        let model = Rc::new(slint::VecModel::from(rows));
+        ui.set_cart_items(model.into());
+    }
+    ui.set_cart_status("".into());
+    refresh_carts(&ui, &carts.borrow(), &state.borrow().library);
+
+    // -- Cart play (instant) --
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let carts = carts.clone();
+        ui.on_cart_play(move |idx| {
+            let cart = carts
+                .borrow()
+                .list_all()
+                .unwrap_or_default()
+                .into_iter()
+                .nth(idx as usize);
+            let Some(cart) = cart else { return };
+            let path = PathBuf::from(&cart.file_path);
+            if !path.is_file() {
+                tracing::warn!("Cart '{}' file missing: {}", cart.label, cart.file_path);
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_cart_status(format!("⚠ '{}' file missing", cart.label).into());
+                }
+                return;
+            }
+            let s = state.borrow();
+            match s.player.play(&path) {
+                Ok(()) => {
+                    tracing::info!("Cart fired: {}", cart.label);
+                    drop(s);
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_is_playing(true);
+                        ui.set_now_playing_title(cart.label.clone().into());
+                        ui.set_now_playing_artist("Cart".into());
+                        ui.set_cart_status(format!("▶ {}", cart.label).into());
+                    }
+                }
+                Err(e) => tracing::error!("Cart play failed: {}", e),
+            }
+        });
+    }
+
+    // -- Cart delete --
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let carts = carts.clone();
+        ui.on_cart_delete(move |idx| {
+            let ids: Vec<String> = carts
+                .borrow()
+                .list_all()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| c.id)
+                .collect();
+            if let Some(id) = ids.get(idx as usize) {
+                if let Err(e) = carts.borrow().delete(id) {
+                    tracing::error!("Cart delete failed: {}", e);
+                }
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                let s = state.borrow();
+                refresh_carts(&ui, &carts.borrow(), &s.library);
+            }
+        });
+    }
+
+    // -- Cart add: next jingle first, then any track not on a pad (max 8) --
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let carts = carts.clone();
+        ui.on_cart_add(move || {
+            let existing: Vec<String> = carts
+                .borrow()
+                .list_all()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| c.file_path)
+                .collect();
+            if existing.len() >= 8 {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_cart_status("Cart wall is full (8)".into());
+                }
+                return;
+            }
+            let s = state.borrow();
+            let tracks = s.library.get_all_tracks().unwrap_or_default();
+            let next = tracks
+                .iter()
+                .find(|t| t.kind == TrackKind::Jingle && !existing.contains(&t.file_path))
+                .or_else(|| {
+                    tracks
+                        .iter()
+                        .find(|t| !existing.contains(&t.file_path))
+                });
+            match next {
+                Some(t) => {
+                    let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
+                    if let Err(e) = carts.borrow().create(&label, &t.file_path) {
+                        tracing::error!("Cart add failed: {}", e);
+                    }
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_cart_status(format!("Loaded '{}'", label).into());
+                        refresh_carts(&ui, &carts.borrow(), &s.library);
+                    }
+                }
+                None => {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_cart_status("Import tracks first".into());
+                    }
+                }
             }
         });
     }

@@ -1,0 +1,186 @@
+import { Theme } from "common.slint";
+
+export struct CartRow {
+    label: string,
+    sub: string,
+    has-file: bool,
+}
+
+component CartCell inherits Rectangle {
+    in property <int> slot: 0;
+    in property <string> cart-label: "";
+    in property <string> cart-sub: "";
+    in property <bool> filled: false;
+    in property <bool> has-file: false;
+
+    callback play(int);
+    callback remove(int);
+    callback add;
+
+    height: 110px;
+    horizontal-stretch: 1;
+    border-radius: 8px;
+    background: Theme.bg-secondary;
+    border-width: 1px;
+    border-color: filled ? Theme.border : Theme.text-dim;
+
+    VerticalLayout {
+        // color strip by slot
+        Rectangle {
+            height: 6px;
+            border-radius: 4px;
+            background: mod(root.slot, 4) == 0 ? Theme.accent : (mod(root.slot, 4) == 1 ? Theme.success : (mod(root.slot, 4) == 2 ? Theme.warning : Theme.bg-panel));
+        }
+
+        VerticalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
+            padding-top: 6px;
+            padding-bottom: 8px;
+            spacing: 2px;
+            vertical-stretch: 1;
+
+            HorizontalLayout {
+                spacing: 4px;
+                alignment: space-between;
+
+                Text {
+                    text: root.filled ? root.cart-label : "Empty";
+                    color: root.filled ? Theme.text-primary : Theme.text-dim;
+                    font-size: 13px;
+                    font-weight: 800;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                if (root.filled) : Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 4px;
+                    background: Theme.bg-panel;
+                    TouchArea { clicked => { root.remove(root.slot); } }
+                    Text {
+                        text: "✕";
+                        color: Theme.text-dim;
+                        font-size: 9px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Text {
+                text: root.filled ? root.cart-sub : "Click to load from library";
+                color: Theme.text-dim;
+                font-size: 10px;
+                overflow: elide;
+                vertical-stretch: 1;
+            }
+
+            Text {
+                text: root.filled ? (root.has-file ? "▶ TAP TO PLAY" : "⚠ file missing") : "＋ TAP TO LOAD";
+                color: root.filled ? Theme.accent : Theme.text-dim;
+                font-size: 10px;
+                font-weight: 700;
+            }
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            if (root.filled) {
+                root.play(root.slot);
+            } else {
+                root.add();
+            }
+        }
+    }
+}
+
+export component CartScreen inherits Rectangle {
+    in-out property <[CartRow]> carts;
+    in-out property <string> status: "";
+
+    callback play-cart(int);
+    callback delete-cart(int);
+    callback add-cart;
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            height: 34px;
+            spacing: 8px;
+            alignment: space-between;
+
+            Text {
+                text: "🎛 Cart Wall";
+                color: Theme.text-primary;
+                font-size: 14px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                width: 150px;
+                height: 28px;
+                border-radius: 6px;
+                background: Theme.accent;
+                TouchArea { clicked => { root.add-cart(); } }
+                Text {
+                    text: "+ Load next track";
+                    color: white;
+                    font-size: 12px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        Text {
+            text: root.status == "" ? "Tap a pad for instant playback" : root.status;
+            color: Theme.text-dim;
+            font-size: 11px;
+        }
+
+        Flickable {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    for i in 4 : CartCell {
+                        slot: i;
+                        filled: i < root.carts.length;
+                        cart-label: i < root.carts.length ? root.carts[i].label : "";
+                        cart-sub: i < root.carts.length ? root.carts[i].sub : "";
+                        has-file: i < root.carts.length ? root.carts[i].has-file : false;
+                        play(idx) => { root.play-cart(idx); }
+                        remove(idx) => { root.delete-cart(idx); }
+                        add => { root.add-cart(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    for i in 4 : CartCell {
+                        slot: i + 4;
+                        filled: i + 4 < root.carts.length;
+                        cart-label: i + 4 < root.carts.length ? root.carts[i + 4].label : "";
+                        cart-sub: i + 4 < root.carts.length ? root.carts[i + 4].sub : "";
+                        has-file: i + 4 < root.carts.length ? root.carts[i + 4].has-file : false;
+                        play(idx) => { root.play-cart(idx); }
+                        remove(idx) => { root.delete-cart(idx); }
+                        add => { root.add-cart(); }
+                    }
+                }
+            }
+        }
+    }
+}

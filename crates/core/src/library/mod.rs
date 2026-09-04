@@ -4,4 +4,4 @@
 
 mod db;
 
-pub use db::{Library, Track, TrackId};
+pub use db::{Library, Track, TrackId, TrackKind};
