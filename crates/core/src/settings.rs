@@ -10,11 +10,14 @@ use serde::{Deserialize, Serialize};
 /// Persisted preferences. Device applies on next launch (stream rebuild);
 /// crossfade + silence threshold also apply live.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     /// Output device name (`None` = system default).
     pub output_device: Option<String>,
     pub crossfade_secs: f32,
     pub silence_threshold_secs: f32,
+    /// Auto-DJ continuity: keep the music going without a DJ.
+    pub autodj: bool,
 }
 
 impl Default for AppSettings {
@@ -23,6 +26,7 @@ impl Default for AppSettings {
             output_device: None,
             crossfade_secs: 3.0,
             silence_threshold_secs: 10.0,
+            autodj: true,
         }
     }
 }
@@ -55,6 +59,7 @@ mod tests {
             output_device: Some("Speakers".into()),
             crossfade_secs: 5.5,
             silence_threshold_secs: 8.0,
+            autodj: false,
         };
         s.save(&path).unwrap();
         let back = AppSettings::load(&path);
@@ -63,6 +68,7 @@ mod tests {
             (back.crossfade_secs, back.silence_threshold_secs),
             (5.5, 8.0)
         );
+        assert!(!back.autodj);
         std::fs::remove_file(&path).ok();
     }
 

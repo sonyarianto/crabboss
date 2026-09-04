@@ -51,6 +51,8 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [ ] Crossfader + gapless (see §1.1 — full scope below)
 - [ ] 12-band EQ + limiter (see §1.1)
 - [x] Playlist auto-generator with rotation rules (engine done: repeat/separation/priority/daypart/jingles; UI presets open)
+- [x] Auto-DJ continuity: 1 s tick with live progress, prefetch handoff
+      (cpal, 8 s horizon), EOF restart, Next/Prev, persisted ON/OFF + Up-next
 - [x] Ad scheduler (dated blocks with intros/outros, chained breaks — see §1.3)
 - [ ] Icecast/Shoutcast output (see §1.5)
 - [ ] Mic/line-in input with ducking (see §1.6)

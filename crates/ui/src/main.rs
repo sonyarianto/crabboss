@@ -202,6 +202,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // row indices from Slint resolve against this.
     let last_shown: Rc<RefCell<Vec<crabcore::library::Track>>> = Rc::new(RefCell::new(Vec::new()));
 
+    // Auto-DJ continuity: true while the program feed owns playback
+    // (any program play sets it; manual Stop clears it; EOF restarts on it).
+    let auto_continue: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+    ui.set_autodj_enabled(settings.borrow().autodj);
+    ui.set_up_next_title("".into());
+
+    // One-track rotation pick for the current daypart (Auto-DJ / Next).
+    fn autodj_pick(library: &crabcore::library::Library) -> Option<crabcore::library::Track> {
+        let now = chrono::Local::now();
+        let cfg = crabcore::playlist::GenConfig {
+            target_tracks: 1,
+            hour: now.format("%H").to_string().parse().unwrap_or(12),
+            weekday: now.format("%a").to_string(),
+            ..Default::default()
+        };
+        crabcore::playlist::generate(library, &cfg)
+            .ok()
+            .and_then(|mut v| v.pop())
+    }
+
+    fn track_label(t: &crabcore::library::Track) -> String {
+        t.title.clone().unwrap_or_else(|| t.file_name.clone())
+    }
+
     // -- Library: push tracks to UI (missing files get a ⚠ prefix) --
     fn refresh_library(
         ui: &MainWindow,
@@ -321,6 +345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state: &Rc<RefCell<AppState>>,
         ui_weak: &slint::Weak<MainWindow>,
         event: &crabcore::scheduler::ScheduledEvent,
+        auto_continue: &Rc<RefCell<bool>>,
     ) {
         tracing::info!(
             "Scheduler firing: {} [{} {}]",
@@ -398,6 +423,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if path.is_file() {
                     match s.player.queue(&path) {
                         Ok(()) => {
+                            *auto_continue.borrow_mut() = true;
                             drop(s);
                             if let Some(ui) = ui_weak.upgrade() {
                                 ui.set_now_playing_title(
@@ -431,6 +457,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some((id, dur)) = logged {
                                 let _ = s.library.record_play(&id, dur);
                             }
+                            *auto_continue.borrow_mut() = true;
                             drop(s);
                             if let Some(ui) = ui_weak.upgrade() {
                                 ui.set_is_playing(true);
@@ -606,6 +633,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         let ui_weak = ui.as_weak();
         let scheduler = scheduler.clone();
+        let auto_continue = auto_continue.clone();
         ui.on_scheduler_run_event(move |idx| {
             let event = scheduler
                 .borrow()
@@ -614,7 +642,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into_iter()
                 .nth(idx as usize);
             let Some(event) = event else { return };
-            fire_scheduled_event(&state, &ui_weak, &event);
+            fire_scheduled_event(&state, &ui_weak, &event, &auto_continue);
         });
     }
 
@@ -667,6 +695,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state: &Rc<RefCell<AppState>>,
         ui_weak: &slint::Weak<MainWindow>,
         block: &crabcore::ads::AdBlock,
+        auto_continue: &Rc<RefCell<bool>>,
     ) {
         if !PathBuf::from(&block.spot_path).is_file() {
             tracing::warn!(
@@ -697,6 +726,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(t) = s.library.find_by_path(&block.spot_path).ok().flatten() {
             let _ = s.library.record_play(&t.id, t.duration_secs);
         }
+        *auto_continue.borrow_mut() = true;
         drop(s);
         if let Some(ui) = ui_weak.upgrade() {
             ui.set_is_playing(true);
@@ -852,6 +882,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         let ui_weak = ui.as_weak();
         let ads = ads.clone();
+        let auto_continue = auto_continue.clone();
         ui.on_ads_run_block(move |idx| {
             let block = ads
                 .borrow()
@@ -860,7 +891,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into_iter()
                 .nth(idx as usize);
             let Some(block) = block else { return };
-            fire_ad_block(&state, &ui_weak, &block);
+            fire_ad_block(&state, &ui_weak, &block, &auto_continue);
         });
     }
 
@@ -872,6 +903,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui_weak = ui.as_weak();
         let scheduler = scheduler.clone();
         let ads = ads.clone();
+        let auto_continue = auto_continue.clone();
         let fired: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
         let fired_ads: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
         let tick = slint::Timer::default();
@@ -901,7 +933,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     fired.insert(event.id.clone(), minute_key.clone());
-                    fire_scheduled_event(&state, &ui_weak, &event);
+                    fire_scheduled_event(&state, &ui_weak, &event, &auto_continue);
                 }
                 drop(fired);
                 // Ad blocks (validity window + weekday aware), same dedupe.
@@ -920,7 +952,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
                         fired_ads.insert(block.id.clone(), minute_key.clone());
-                        fire_ad_block(&state, &ui_weak, &block);
+                        fire_ad_block(&state, &ui_weak, &block, &auto_continue);
                     }
                 }
             },
@@ -935,6 +967,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let state = state.clone();
         let ui_weak = ui.as_weak();
+        let auto_continue = auto_continue.clone();
         let last_recovery: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let tick = slint::Timer::default();
         tick.start(
@@ -971,6 +1004,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match s.player.play(&path) {
                             Ok(()) => {
                                 let _ = s.library.record_play(&t.id, t.duration_secs);
+                                *auto_continue.borrow_mut() = true;
                                 drop(s);
                                 if let Some(ui) = ui_weak.upgrade() {
                                     ui.set_is_playing(true);
@@ -1039,6 +1073,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         let ui_weak = ui.as_weak();
         let carts = carts.clone();
+        let auto_continue = auto_continue.clone();
         ui.on_cart_play(move |idx| {
             let cart = carts
                 .borrow()
@@ -1068,6 +1103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some((id, dur)) = logged {
                         let _ = s.library.record_play(&id, dur);
                     }
+                    *auto_continue.borrow_mut() = true;
                     drop(s);
                     if let Some(ui) = ui_weak.upgrade() {
                         ui.set_is_playing(true);
@@ -1343,10 +1379,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let state = state.clone();
         let ui_weak = ui.as_weak();
+        let auto_continue = auto_continue.clone();
         ui.on_stop(move || {
             let s = state.borrow();
             s.player.stop();
             drop(s);
+            *auto_continue.borrow_mut() = false;
 
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_is_playing(false);
@@ -1366,6 +1404,173 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let s = state.borrow();
             s.player.set_volume(vol);
         });
+    }
+
+    // -- Next: skip to a fresh rotation pick now --
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let auto_continue = auto_continue.clone();
+        ui.on_next(move || {
+            *auto_continue.borrow_mut() = true;
+            if let Some(ui) = ui_weak.upgrade() {
+                autodj_play_now(&state, &ui);
+            }
+        });
+    }
+
+    // -- Prev: replay the current track from the top --
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let auto_continue = auto_continue.clone();
+        ui.on_prev(move || {
+            let s = state.borrow();
+            let cur = s.player.current_track().map(|t| t.path);
+            let Some(path) = cur else { return };
+            match s.player.play(&path) {
+                Ok(()) => {
+                    *auto_continue.borrow_mut() = true;
+                    drop(s);
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_is_playing(true);
+                        ui.set_current_time("00:00".into());
+                        ui.set_player_progress(0.0);
+                    }
+                }
+                Err(e) => tracing::error!("Prev failed: {}", e),
+            }
+        });
+    }
+
+    // -- Auto-DJ toggle (persisted; value already flipped via binding) --
+    {
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_autodj_toggled(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let en = ui.get_autodj_enabled();
+                settings.borrow_mut().autodj = en;
+                let _ = settings.borrow().save(&settings_path);
+                tracing::info!("Auto-DJ {}", if en { "ON" } else { "OFF" });
+                if !en {
+                    ui.set_up_next_title("".into());
+                }
+            }
+        });
+    }
+
+    // Play one rotation pick now (Auto-DJ / Next / EOF recovery).
+    fn autodj_play_now(state: &Rc<RefCell<AppState>>, ui: &MainWindow) {
+        let s = state.borrow();
+        let pick = autodj_pick(&s.library);
+        let Some(pick) = pick else {
+            tracing::warn!("Auto-DJ: library is empty");
+            return;
+        };
+        let path = PathBuf::from(&pick.file_path);
+        if !path.is_file() {
+            tracing::warn!("Auto-DJ: file missing: {}", pick.file_path);
+            return;
+        }
+        match s.player.play(&path) {
+            Ok(()) => {
+                let _ = s.library.record_play(&pick.id, pick.duration_secs);
+                let label = track_label(&pick);
+                let total = fmt_dur(pick.duration_secs);
+                tracing::info!("Auto-DJ playing: {}", label);
+                drop(s);
+                ui.set_is_playing(true);
+                ui.set_now_playing_title(label.into());
+                ui.set_now_playing_artist("Auto-DJ".into());
+                ui.set_total_time(total.into());
+                ui.set_up_next_title("".into());
+            }
+            Err(e) => tracing::error!("Auto-DJ play failed: {}", e),
+        }
+    }
+
+    // -- 1s tick: live progress + Auto-DJ feed --
+    // Progress labels move on both engines; the feed prefetches ahead on
+    // queue-capable engines and restarts natural EOFs while Auto-DJ owns feed.
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let auto_continue = auto_continue.clone();
+        let tick = slint::Timer::default();
+        tick.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(1),
+            move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let s = state.borrow();
+                let pos = s.player.position_secs();
+                let (dur, has_dur) = match s.player.current_track() {
+                    Some(t) => (
+                        t.duration_secs.unwrap_or(0.0),
+                        t.duration_secs.unwrap_or(0.0) > 0.0,
+                    ),
+                    None => (0.0, false),
+                };
+                let playing = s.player.state() == crabcore::audio::PlayerState::Playing;
+                let finished = s.player.is_finished();
+                drop(s);
+                ui.set_current_time(fmt_dur(Some(pos)).into());
+                ui.set_total_time(if has_dur {
+                    fmt_dur(Some(dur)).into()
+                } else {
+                    "00:00".into()
+                });
+                ui.set_player_progress(if has_dur {
+                    (pos / dur).clamp(0.0, 1.0) as f32
+                } else {
+                    0.0
+                });
+                if !ui.get_autodj_enabled() || !*auto_continue.borrow() {
+                    return;
+                }
+                let s = state.borrow();
+                // Natural EOF in any state (manual Stop clears the flag):
+                // keep the feed going without a gap.
+                if finished {
+                    drop(s);
+                    autodj_play_now(&state, &ui);
+                    return;
+                }
+                if !playing {
+                    return;
+                }
+                // Prefetch the handoff before the current track runs out.
+                let pending = s.player.pending_count();
+                let has_queue = s.player.has_queue();
+                let dur_opt = if has_dur { Some(dur) } else { None };
+                let due = crabcore::audio::needs_prefetch(pos, dur_opt, pending, has_queue, 8.0);
+                if !due {
+                    return;
+                }
+                let pick = autodj_pick(&s.library);
+                match pick {
+                    Some(pick) => {
+                        let path = PathBuf::from(&pick.file_path);
+                        if !path.is_file() {
+                            return;
+                        }
+                        match s.player.queue(&path) {
+                            Ok(()) => {
+                                let label = track_label(&pick);
+                                tracing::info!("Auto-DJ queued: {}", label);
+                                drop(s);
+                                ui.set_up_next_title(label.into());
+                            }
+                            Err(e) => tracing::warn!("Auto-DJ queue failed: {}", e),
+                        }
+                    }
+                    None => drop(s),
+                }
+            },
+        );
+        std::mem::forget(tick);
     }
 
     // -- Import Files (native dialog, multi-select audio) --
@@ -1440,6 +1645,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         let ui_weak = ui.as_weak();
         let last_shown = last_shown.clone();
+        let auto_continue = auto_continue.clone();
         ui.on_library_track_double_clicked(move |index: i32| {
             let shown = last_shown.borrow();
             let track = shown.get(index as usize).cloned();
@@ -1452,6 +1658,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match s.player.play(&path) {
                 Ok(()) => {
                     let _ = s.library.record_play(&track.id, track.duration_secs);
+                    *auto_continue.borrow_mut() = true;
                     if let Some(ui) = ui_weak.upgrade() {
                         let title = track
                             .title

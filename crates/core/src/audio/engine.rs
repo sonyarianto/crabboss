@@ -42,6 +42,37 @@ pub trait Engine {
     fn set_silence_threshold_secs(&self, _secs: f32) {}
     /// Blend length for crossfades / queued takeovers.
     fn set_crossfade_secs(&self, _secs: f32) {}
+    /// Seconds into the current track (`0.0` when nothing is playing).
+    fn position_secs(&self) -> f64 {
+        0.0
+    }
+    /// Queued-but-unheard decks (auto-DJ prefetch bookkeeping).
+    fn pending_count(&self) -> usize {
+        0
+    }
+    /// True when `queue()` really defers to end-of-track (cpal).
+    /// Prefetch must only run here — elsewhere it would cut tracks short.
+    fn has_queue(&self) -> bool {
+        false
+    }
+}
+
+/// Prefetch policy for Auto-DJ: queue the next pick while the current track
+/// still has `horizon_secs` left, and only when nothing is already pending.
+pub fn needs_prefetch(
+    position_secs: f64,
+    duration_secs: Option<f64>,
+    pending: usize,
+    has_queue: bool,
+    horizon_secs: f64,
+) -> bool {
+    if !has_queue || pending > 0 {
+        return false;
+    }
+    match duration_secs {
+        Some(d) if d > 0.0 => d - position_secs <= horizon_secs,
+        _ => false,
+    }
 }
 
 // Legacy rodio Player already satisfies the interface.
@@ -78,5 +109,22 @@ impl Engine for crate::audio::player::Player {
     }
     fn is_finished(&self) -> bool {
         crate::audio::player::Player::is_finished(self)
+    }
+    fn position_secs(&self) -> f64 {
+        crate::audio::player::Player::position_secs(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefetch_only_when_useful() {
+        assert!(needs_prefetch(50.0, Some(55.0), 0, true, 8.0));
+        assert!(!needs_prefetch(10.0, Some(55.0), 0, true, 8.0));
+        assert!(!needs_prefetch(50.0, Some(55.0), 1, true, 8.0));
+        assert!(!needs_prefetch(50.0, Some(55.0), 0, false, 8.0));
+        assert!(!needs_prefetch(0.0, None, 0, true, 8.0));
     }
 }

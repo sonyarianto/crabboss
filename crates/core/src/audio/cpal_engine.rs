@@ -475,6 +475,22 @@ impl Engine for CpalEngine {
         self.queue_file(path)
     }
 
+    fn position_secs(&self) -> f64 {
+        let xf = self.xfade.lock().unwrap();
+        xf.current
+            .as_ref()
+            .map(|c| c.pos_frames as f64 / self.device_rate.max(1) as f64)
+            .unwrap_or(0.0)
+    }
+
+    fn pending_count(&self) -> usize {
+        self.xfade.lock().unwrap().next.len()
+    }
+
+    fn has_queue(&self) -> bool {
+        true
+    }
+
     fn silence_alarm(&self) -> bool {
         *self.state.lock().unwrap() == PlayerState::Playing && self.silence.lock().unwrap().alarm()
     }

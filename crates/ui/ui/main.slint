@@ -59,6 +59,8 @@ export component MainWindow inherits Window {
     in-out property <string> total-time: "00:00";
     in-out property <float> player-volume: 0.8;
     in-out property <float> player-progress: 0.0;
+    in-out property <bool> autodj-enabled: true;
+    in-out property <string> up-next-title: "";
 
     // -- Scheduler state --
     in-out property <bool> scheduler-enabled: true;
@@ -100,6 +102,7 @@ export component MainWindow inherits Window {
     callback stop;
     callback next;
     callback prev;
+    callback autodj-toggled;
     callback set-volume(float);
 
     // -- Library callbacks --
@@ -264,6 +267,8 @@ export component MainWindow inherits Window {
                         total-time: root.total-time;
                         volume: root.player-volume;
                         progress: root.player-progress;
+                        autodj-enabled <=> root.autodj-enabled;
+                        up-next: root.up-next-title;
 
                         play-pressed => { root.play(); }
                         pause-pressed => { root.pause(); }
@@ -271,6 +276,7 @@ export component MainWindow inherits Window {
                         next-pressed => { root.next(); }
                         prev-pressed => { root.prev(); }
                         volume-changed(v) => { root.set-volume(v); }
+                        autodj-toggled => { root.autodj-toggled(); }
                     }
 
                     Rectangle {

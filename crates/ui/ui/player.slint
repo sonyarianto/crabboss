@@ -113,6 +113,8 @@ export component PlayerPanel inherits Rectangle {
     in property <string> total-time: "00:00";
     in property <float> volume: 0.8;
     in property <float> progress: 0.0;
+    in-out property <bool> autodj-enabled: true;
+    in property <string> up-next: "";
 
     callback play-pressed;
     callback pause-pressed;
@@ -120,6 +122,7 @@ export component PlayerPanel inherits Rectangle {
     callback next-pressed;
     callback prev-pressed;
     callback volume-changed(float);
+    callback autodj-toggled;
 
     background: Theme.bg-primary;
 
@@ -146,6 +149,41 @@ export component PlayerPanel inherits Rectangle {
                 border-radius: parent.border-radius;
                 background: Theme.accent;
                 width: parent.width * max(0, min(root.progress, 1));
+            }
+        }
+
+        // Auto-DJ + up next
+        HorizontalLayout {
+            spacing: 8px;
+
+            Rectangle {
+                width: 92px;
+                height: 26px;
+                border-radius: 6px;
+                background: root.autodj-enabled ? Theme.success : Theme.bg-panel;
+                TouchArea {
+                    clicked => {
+                        root.autodj-enabled = !root.autodj-enabled;
+                        root.autodj-toggled();
+                    }
+                }
+                Text {
+                    text: root.autodj-enabled ? "AUTO-DJ ON" : "AUTO-DJ OFF";
+                    color: white;
+                    font-size: 10px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            Text {
+                text: root.up-next == "" ? "" : "Up next: " + root.up-next;
+                color: Theme.text-dim;
+                font-size: 11px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
             }
         }
 

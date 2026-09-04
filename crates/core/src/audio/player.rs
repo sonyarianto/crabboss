@@ -47,6 +47,10 @@ pub struct Player {
     volume: Arc<Mutex<f32>>,
     progress_secs: Arc<Mutex<f64>>,
     running: Arc<AtomicBool>,
+    /// Wall-clock position tracking (rodio sinks expose no position).
+    started_at: Arc<Mutex<Option<std::time::Instant>>>,
+    paused_accum: Arc<Mutex<f64>>,
+    pause_mark: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl Default for Player {
@@ -92,6 +96,9 @@ impl Player {
             volume: Arc::new(Mutex::new(1.0)),
             progress_secs: Arc::new(Mutex::new(0.0)),
             running: Arc::new(AtomicBool::new(true)),
+            started_at: Arc::new(Mutex::new(None)),
+            paused_accum: Arc::new(Mutex::new(0.0)),
+            pause_mark: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -144,6 +151,9 @@ impl Player {
             duration_secs: total_duration,
         });
         *self.progress_secs.lock().unwrap() = 0.0;
+        *self.started_at.lock().unwrap() = Some(std::time::Instant::now());
+        *self.paused_accum.lock().unwrap() = 0.0;
+        *self.pause_mark.lock().unwrap() = None;
 
         tracing::info!("Playing: {}", path.display());
         Ok(())
@@ -151,12 +161,18 @@ impl Player {
 
     /// Pause playback
     pub fn pause(&self) {
+        if *self.state.lock().unwrap() == PlayerState::Playing {
+            *self.pause_mark.lock().unwrap() = Some(std::time::Instant::now());
+        }
         self.with_sink(|s| s.pause());
         *self.state.lock().unwrap() = PlayerState::Paused;
     }
 
     /// Resume playback
     pub fn resume(&self) {
+        if let Some(mark) = self.pause_mark.lock().unwrap().take() {
+            *self.paused_accum.lock().unwrap() += mark.elapsed().as_secs_f64();
+        }
         self.with_sink(|s| s.play());
         *self.state.lock().unwrap() = PlayerState::Playing;
     }
@@ -183,6 +199,9 @@ impl Player {
         *self.state.lock().unwrap() = PlayerState::Stopped;
         *self.current_track.lock().unwrap() = None;
         *self.progress_secs.lock().unwrap() = 0.0;
+        *self.started_at.lock().unwrap() = None;
+        *self.paused_accum.lock().unwrap() = 0.0;
+        *self.pause_mark.lock().unwrap() = None;
     }
 
     /// Toggle play/pause
@@ -225,6 +244,29 @@ impl Player {
             }
         }
         true
+    }
+
+    /// Wall-clock position estimate (pauses excluded).
+    pub fn position_secs(&self) -> f64 {
+        match *self.state.lock().unwrap() {
+            PlayerState::Stopped => 0.0,
+            PlayerState::Playing => {
+                let started = *self.started_at.lock().unwrap();
+                let accum = *self.paused_accum.lock().unwrap();
+                started
+                    .map(|t| (t.elapsed().as_secs_f64() - accum).max(0.0))
+                    .unwrap_or(0.0)
+            }
+            PlayerState::Paused => {
+                let started = *self.started_at.lock().unwrap();
+                let accum = *self.paused_accum.lock().unwrap();
+                match (started, *self.pause_mark.lock().unwrap()) {
+                    (Some(s), Some(m)) => (m.duration_since(s).as_secs_f64() - accum).max(0.0),
+                    (Some(s), None) => (s.elapsed().as_secs_f64() - accum).max(0.0),
+                    _ => 0.0,
+                }
+            }
+        }
     }
 
     /// Read duration from file metadata
