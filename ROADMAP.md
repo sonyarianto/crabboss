@@ -41,19 +41,138 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 
 - [x] Fix `Player::stop()` sink recreation bug
 - [x] `CpalEngine` MVP (play/pause/volume parity) — rubato resample TODO
-- [x] Router: Home / Playout / Media Manager screens
+- [x] Router: Home / Playout / Media Manager / Scheduler / Cart Wall screens
 - [x] License key activation (offline, `CB-XXXX-XXXX-XXXX`)
 - [x] Library: `scan_directory()` via `walkdir`
-- [ ] Crossfader + gapless
-- [ ] 12-band EQ + limiter
-- [ ] Playlist auto-generator with rotation rules
 - [x] Scheduler MVP: event list, Add/Edit dialog (time/action/days), auto-tick firing `generate`/`load`/`play`
 - [x] Track kinds (music/jingle/ad): auto-classify on import, `set_kind`, pre-kind DB migration
 - [x] Cart Wall MVP: 8 pads, instant play, jingle-first seeding/loading with kind badges
-- [ ] Ad scheduler (blocks with start/end dates, intros/outros)
-- [ ] Icecast/Shoutcast output
-- [ ] Mic/line-in input with ducking
-- [ ] Report generator (play logs → XLS/PDF)
-- [ ] File dialog (`rfd`), progress timer in UI
-- [ ] Settings screen (audio device, streaming, license details)
-- [ ] Quality: `cargo fmt/clippy`, unit tests (`library`, `playlist`), CI
+- [ ] Crossfader + gapless (see §1.1 — full scope below)
+- [ ] 12-band EQ + limiter (see §1.1)
+- [ ] Playlist auto-generator with rotation rules (see §1.2)
+- [ ] Ad scheduler (blocks with start/end dates, intros/outros — see §1.3)
+- [ ] Icecast/Shoutcast output (see §1.5)
+- [ ] Mic/line-in input with ducking (see §1.6)
+- [ ] Report generator (play logs → XLS/PDF — see §1.9)
+- [ ] File dialog (`rfd`), progress timer in UI (see §1.9)
+- [ ] Settings screen (audio device, streaming, license details — see §1.9)
+- [ ] Quality: `cargo fmt/clippy`, unit tests (`library`, `playlist`), CI (see §1.10)
+
+## Gap Matrix vs RadioBOSS 7.x (2026)
+
+Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previously in ROADMAP
+
+| Area | RadioBOSS has | CrabBoss today | Status |
+|---|---|---|---|
+| Playback engine | Gapless, sample-accurate crossfade, curve choice | `Mixer` DSP exists, not wired to two cursors; mono-only `CpalEngine` | 🟡 |
+| EQ / dynamics | Full EQ, limiter, loudness normalization | Unchecked | ❌ |
+| Playlist generator | Rotation, no-repeat, separation, playcount priority, dayparting, multi-playlist UI | Checkbox only (+ kind-aware counting) | ❌ |
+| Ad scheduler | Dated blocks, intros/outros, color-coded list | Unchecked | ❌ |
+| Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP done | ✅ + depth TODO (§1.3) |
+| Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, instant play, kind badges | ✅ + depth TODO (§1.3) |
+| Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
+| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Unchecked | ❌ |
+| Mic / line-in | Mixed input, sidechain ducking, bed music | Unchecked | ❌ |
+| Silence detector | Dead-air auto-recovery | — | — |
+| Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — | — |
+| Reporting | Play logs → XLS/PDF, royalty reports | Unchecked | ❌ |
+| Library depth | Mass tag editor, BPM scan, dupe detection, scheduled sync, health scan | `scan_directory()` only | 🟡 |
+| Track health | Proactive missing/corrupt detection | Lazy `is_file()` at play time | 🟡 |
+| UI niceties | Hotkeys, screen-reader a11y, drag-drop, waveform | — | — |
+| Stream archive | Scheduled output recording | — | — |
+| License | Offline key, holder, tier | MVP done (checksum → ed25519 TODO) | ✅ |
+| File import UX | File dialog | `rfd` unchecked | ❌ |
+| Quality gates | — | Tests in scheduler/cart/mixer/license; none for library/playlist; no CI | 🟡 |
+
+Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardware, see §2).
+
+## 1. Parity Work (ordered by priority)
+
+### 1.1 Finish the audio core (blocks everything downstream)
+- [ ] `CpalEngine`: stereo passthrough (stop downmixing to mono)
+- [ ] `CpalEngine`: dual-cursor playback so `Mixer::process(a, b)` can actually crossfade
+- [ ] Configurable crossfade curve (linear / equal-power / parabolic)
+- [ ] `rubato` resampling to device rate (currently wrong speed on mismatch)
+- [ ] 12-band EQ insert (biquad chain) + limiter tuning
+- [ ] Loudness normalization (ReplayGain-style)
+- [ ] Wire `library.search()` results into the Slint model (currently a no-op)
+
+### 1.2 Playlist Generator (real scope, not a checkbox)
+- [ ] No-repeat rules: artist, title, album — configurable lookback window
+- [ ] Separation rules (e.g. same genre not within N tracks)
+- [ ] Playcount-priority weighting (MIN/MAX/AVG-style, surface under-played tracks)
+- [ ] Dayparting: track eligibility by hour-of-day / day-of-week (RadioBOSS 7.2 headline — don't skip)
+- [ ] Multi-playlist generation UI (several dayparts/rotations at once)
+
+### 1.3 Ads, Scheduler & Cart depth
+- [ ] Ad blocks with start/end date ranges (not just daily HH:MM)
+- [ ] Intro/outro clips per ad block
+- [ ] Scheduler event expiration ("valid until") + warnings
+- [ ] "Insert after current track" as distinct scheduler action from "play now"
+- [ ] Cart hotkeys, drag-drop from library, per-pad progress bar
+
+### 1.4 Voice Tracking & Teasers
+- [ ] Record a voice track that auto-ducks/overlaps between two library tracks
+- [ ] Auto-intro: voice over outgoing song's tail, timed to end as next vocals start
+- [ ] Teaser/promo clips scheduled between songs
+
+### 1.5 Streaming Output
+- [ ] Icecast source client (encode + push)
+- [ ] Shoutcast v1/v2 source client
+- [ ] Listener/connection stats in UI
+- [ ] Artwork metadata forwarding to encoders
+
+### 1.6 Mic / Live Assist
+- [ ] Mic input via `cpal` input stream, mixed into program bus
+- [ ] Sidechain ducking: auto-lower music bed when mic is active (voice-activated)
+- [ ] Mic "bed" music under live breaks
+
+### 1.7 Reliability
+- [ ] Silence detector: quiet output for N seconds → skip / play filler cart
+- [ ] Background library health scan: verify `file_path`s resolve, flag missing in UI
+
+### 1.8 Library depth
+- [ ] Mass tag editor (multi-select batch edit)
+- [ ] BPM detection/scan
+- [ ] Duplicate track detection
+- [ ] Scheduled folder auto-sync (timer re-scan, not just manual import)
+
+### 1.9 Reporting & Ops
+- [ ] Play-log reports (CSV/XLS/PDF) — royalty reporting is a broadcaster requirement
+- [ ] Settings screen: audio device picker, streaming config, license details
+- [ ] `rfd` native file dialog for import
+
+### 1.10 Quality gates
+- [ ] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar)
+- [ ] `cargo fmt` + `clippy` in CI
+- [ ] Basic CI pipeline (build + test on push)
+
+## 2. Beyond Parity — Where CrabBoss Wins
+
+RadioBOSS weaknesses: Windows-only, legacy Delphi UI, no ready remote UI,
+closed codebase. Our stack (Rust + Slint, cross-platform, headless-ready)
+beats it on these axes instead of just chasing feature count:
+
+- [ ] **Headless/server mode as first-class target** — `crabboss --headless
+      --config station.toml` on a cheap Linux VPS, no display, no Windows
+      license. RadioBOSS cannot do this.
+- [ ] **Web remote-control UI** — embedded HTTP server (now-playing,
+      scheduler, carts, library search) for a DJ's phone browser. RadioBOSS
+      has a raw command protocol, not a ready UI.
+- [ ] **Config-as-code** — station config, scheduler events, rotation rules
+      as version-controllable TOML/JSON instead of GUI-only config.
+- [ ] **Open plugin points** in `Engine`/manager traits (custom scheduler
+      actions, streaming targets, import sources) without forking.
+- [ ] **Fair licensing** — genuine free tier + transparent paid tier vs
+      flat $149.95, aimed at hobbyist/community radio.
+
+## 3. Phase Sequencing
+
+1. **Phase 1 (parity foundation):** §1.1 audio core — nothing else matters
+   until crossfade/stereo/EQ work.
+2. **Phase 2 (operational parity):** §1.2–1.4 (playlist rules, ads, voice
+   tracking) — separates "plays files" from "radio automation."
+3. **Phase 3 (broadcast parity):** §1.5–1.7 (streaming, mic, reliability) —
+   required before real on-air use.
+4. **Phase 4 (polish/ops):** §1.8–1.10 (library depth, reporting, CI).
+5. **Phase 5 (differentiation):** §2 — wins users away instead of matching.
