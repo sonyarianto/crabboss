@@ -71,6 +71,10 @@ export component MainWindow inherits Window {
     // -- Cart Wall state --
     in-out property <[CartRow]> cart-items;
     in-out property <string> cart-status: "";
+    in-out property <bool> cart-assign-mode: false;
+    in-out property <bool> cart-armed: false;
+    in-out property <string> cart-armed-label: "";
+    in-out property <bool> cart-had-progress: false;
 
     // -- Library state (live model; both Playout tab and Media screen bind here) --
     in-out property <[LibTrack]> library-tracks;
@@ -100,6 +104,8 @@ export component MainWindow inherits Window {
 
     // -- Nav --
     callback navigate(int);
+    // Cart Wall reads the armed library row here (assign flow).
+    in-out property <int> library-selected-index: -1;
 
     // -- Player callbacks --
     callback play;
@@ -152,6 +158,8 @@ export component MainWindow inherits Window {
     callback cart-play(int);
     callback cart-delete(int);
     callback cart-add;
+    callback cart-place(int);
+    callback cart-toggle-assign;
 
     // -- Report callbacks --
     callback report-range-changed(int);
@@ -364,6 +372,7 @@ export component MainWindow inherits Window {
                         vertical-stretch: 1;
                         tracks: root.library-tracks;
                         status <=> root.library-status;
+                        selected-index <=> root.library-selected-index;
 
                         search-changed(text) => { root.library-search-changed(text); }
                         track-selected(idx) => { root.library-track-selected(idx); }
@@ -381,6 +390,7 @@ export component MainWindow inherits Window {
             vertical-stretch: 1;
             tracks: root.library-tracks;
             status <=> root.library-status;
+            selected-index <=> root.library-selected-index;
 
             search-changed(text) => { root.library-search-changed(text); }
             track-selected(idx) => { root.library-track-selected(idx); }
@@ -446,10 +456,15 @@ export component MainWindow inherits Window {
             vertical-stretch: 1;
             carts: root.cart-items;
             status: root.cart-status;
+            assign-mode <=> root.cart-assign-mode;
+            armed <=> root.cart-armed;
+            armed-label: root.cart-armed-label;
 
             play-cart(idx) => { root.cart-play(idx); }
             delete-cart(idx) => { root.cart-delete(idx); }
             add-cart => { root.cart-add(); }
+            place-cart(idx) => { root.cart-place(idx); }
+            toggle-assign => { root.cart-toggle-assign(); }
         }
 
         // -- Reports --

@@ -2,4 +2,4 @@
 
 mod manager;
 
-pub use manager::{Cart, CartManager};
+pub use manager::{Cart, CartManager, WALL_SIZE};

@@ -72,7 +72,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Playlist generator | Rotation, no-repeat, separation, playcount priority, dayparting, multi-playlist UI | Checkbox only (+ kind-aware counting) | ❌ |
 | Ad scheduler | Dated blocks, intros/outros, color-coded list | Unchecked | ❌ |
 | Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP done | ✅ + depth TODO (§1.3) |
-| Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, instant play, kind badges | ✅ + depth TODO (§1.3) |
+| Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
 | Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Unchecked | ❌ |
 | Mic / line-in | Mixed input, sidechain ducking, bed music | Unchecked | ❌ |
@@ -121,7 +121,10 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [ ] Scheduler event expiration ("valid until") + warnings
 - [x] "Insert after current track" (`queue` action + `Engine::queue`: cpal blends
       at the boundary with end-of-track auto-fade; rodio degrades to immediate play)
-- [ ] Cart hotkeys, drag-drop from library, per-pad progress bar
+- [x] Cart hotkeys (keys 1–8 via FocusScope), per-pad progress bar +
+      playing highlight, and assign flow (🎯 Assign → arm a library track →
+      tap a pad; Slint 1.11 has no cross-widget drag events) with pad-place
+      API (`assign_at` replace-in-slot, fixed 8-pad wall)
 
 ### 1.4 Voice Tracking & Teasers
 - [ ] Record a voice track that auto-ducks/overlaps between two library tracks

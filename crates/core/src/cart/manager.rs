@@ -9,6 +9,9 @@ use uuid::Uuid;
 
 use crate::error::Result;
 
+/// Cart wall size (RadioBOSS-style fixed pad grid).
+pub const WALL_SIZE: usize = 8;
+
 /// One cart pad.
 #[derive(Debug, Clone)]
 pub struct Cart {
@@ -112,6 +115,39 @@ impl CartManager {
             .execute("DELETE FROM carts WHERE id = ?1", params![id])?;
         Ok(())
     }
+
+    /// Assign a track to a pad slot (0-based). Replaces whatever was there
+    /// (carts are pads, not an ordered list). No-op when `position` is
+    /// beyond the configured wall size.
+    pub fn assign_at(&self, position: i32, label: &str, file_path: &str) -> Result<()> {
+        if !(0..WALL_SIZE as i32).contains(&position) {
+            return Ok(());
+        }
+        let conn = self.conn.borrow();
+        if let Ok(existing) = conn.query_row(
+            "SELECT id FROM carts WHERE position = ?1",
+            params![position],
+            |r| r.get::<_, String>(0),
+        ) {
+            conn.execute("DELETE FROM carts WHERE id = ?1", params![existing])?;
+        }
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO carts (id, label, file_path, position, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, label, file_path, position, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Overwrite label/path of the pad at `position` (no-op when empty).
+    pub fn update(&self, position: i32, label: &str, file_path: &str) -> Result<()> {
+        self.conn.borrow().execute(
+            "UPDATE carts SET label = ?1, file_path = ?2 WHERE position = ?3",
+            params![label, file_path, position],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -128,5 +164,35 @@ mod tests {
         assert_eq!(all[0].label, "Jingle 1");
         m.delete(&all[0].id).unwrap();
         assert_eq!(m.list_all().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn assign_at_replaces_and_respects_bounds() {
+        let m = CartManager::new(Connection::open_in_memory().unwrap());
+        m.create("Old", "/tmp/old.mp3").unwrap(); // takes position 0
+        m.assign_at(0, "New", "/tmp/new.mp3").unwrap();
+        let all = m.list_all().unwrap();
+        assert_eq!(all.len(), 1, "replace, not append");
+        assert_eq!(all[0].position, 0);
+        assert_eq!(all[0].label, "New");
+        // Out-of-range slots are ignored (fixed 8-pad wall).
+        m.assign_at(8, "Ghost", "/tmp/x.mp3").unwrap();
+        m.assign_at(-1, "Ghost", "/tmp/x.mp3").unwrap();
+        assert_eq!(m.list_all().unwrap().len(), 1);
+        // Any free slot can be targeted directly.
+        m.assign_at(5, "Slot5", "/tmp/s5.mp3").unwrap();
+        let all = m.list_all().unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|c| c.label == "Slot5" && c.position == 5));
+        // update() overwrites in place; empty slot is a no-op.
+        m.update(5, "Slot5b", "/tmp/s5b.mp3").unwrap();
+        m.update(7, "Noop", "/tmp/nope.mp3").unwrap();
+        let all = m.list_all().unwrap();
+        let s5 = all.iter().find(|c| c.position == 5).unwrap();
+        assert_eq!(
+            (s5.label.as_str(), s5.file_path.as_str()),
+            ("Slot5b", "/tmp/s5b.mp3")
+        );
+        assert!(!all.iter().any(|c| c.position == 7));
     }
 }

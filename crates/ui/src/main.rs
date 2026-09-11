@@ -1139,11 +1139,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::mem::forget(tick);
     }
 
-    // -- Cart Wall: push pads to UI --
+    // -- Cart Wall: push pads to UI (with live per-pad progress) --
     fn refresh_carts(
         ui: &MainWindow,
         carts: &crabcore::cart::CartManager,
         library: &crabcore::library::Library,
+        live: Option<(String, f32)>, // (path, 0..1 progress) of the playing pad
     ) {
         let kinds: HashMap<String, TrackKind> = library
             .get_all_tracks()
@@ -1164,10 +1165,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(TrackKind::Ad) => "Ad",
                     _ => "Music",
                 };
+                let progress = live
+                    .as_ref()
+                    .filter(|(p, _)| p == &c.file_path)
+                    .map(|(_, x)| *x)
+                    .unwrap_or(0.0);
                 CartRow {
                     label: c.label.clone().into(),
                     sub: format!("{} • {}", kind_label, file_name).into(),
                     has_file: PathBuf::from(&c.file_path).is_file(),
+                    progress,
+                    playing: live
+                        .as_ref()
+                        .map(|(p, _)| p == &c.file_path)
+                        .unwrap_or(false),
                 }
             })
             .collect();
@@ -1175,7 +1186,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.set_cart_items(model.into());
     }
     ui.set_cart_status("".into());
-    refresh_carts(&ui, &carts.borrow(), &state.borrow().library);
+    ui.set_cart_assign_mode(false);
+    ui.set_cart_armed(false);
+    ui.set_cart_armed_label("".into());
+    refresh_carts(&ui, &carts.borrow(), &state.borrow().library, None);
 
     // -- Cart play (instant) --
     {
@@ -1246,7 +1260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(ui) = ui_weak.upgrade() {
                 let s = state.borrow();
-                refresh_carts(&ui, &carts.borrow(), &s.library);
+                refresh_carts(&ui, &carts.borrow(), &s.library, None);
             }
         });
     }
@@ -1284,7 +1298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if let Some(ui) = ui_weak.upgrade() {
                         ui.set_cart_status(format!("Loaded '{}'", label).into());
-                        refresh_carts(&ui, &carts.borrow(), &s.library);
+                        refresh_carts(&ui, &carts.borrow(), &s.library, None);
                     }
                 }
                 None => {
@@ -1292,6 +1306,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_cart_status("Import tracks first".into());
                     }
                 }
+            }
+        });
+    }
+
+    // -- Cart place: put the armed library track on a specific pad --
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let carts = carts.clone();
+        let last_shown = last_shown.clone();
+        ui.on_cart_place(move |slot| {
+            let slot: i32 = slot;
+            let armed_idx = ui_weak
+                .upgrade()
+                .map(|ui| ui.get_library_selected_index())
+                .unwrap_or(-1);
+            let track = (armed_idx >= 0)
+                .then(|| last_shown.borrow().get(armed_idx as usize).cloned())
+                .flatten();
+            let Some(track) = track else {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_cart_status("No library track armed — tap one first".into());
+                }
+                return;
+            };
+            let label = track
+                .title
+                .clone()
+                .unwrap_or_else(|| track.file_name.clone());
+            if let Err(e) = carts.borrow().assign_at(slot, &label, &track.file_path) {
+                tracing::error!("Cart place failed: {}", e);
+                return;
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                let s = state.borrow();
+                ui.set_cart_assign_mode(false);
+                ui.set_cart_armed(false);
+                ui.set_cart_status(format!("🎯 '{}' → pad {}", label, slot + 1).into());
+                refresh_carts(&ui, &carts.borrow(), &s.library, None);
+            }
+        });
+    }
+
+    // -- Cart assign mode toggle --
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_cart_toggle_assign(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let on = !ui.get_cart_assign_mode();
+                ui.set_cart_assign_mode(on);
+                ui.set_cart_armed(on && ui.get_library_selected_index() >= 0);
+                ui.set_cart_status(if on {
+                    "Assign: tap a track in the Library, then tap a pad".into()
+                } else {
+                    "".into()
+                });
             }
         });
     }
@@ -1770,6 +1840,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     0.0
                 });
+                // Live per-pad cart progress: highlight the pad whose file is
+                // the current track; clear all bars when nothing plays.
+                {
+                    let carts = carts.borrow();
+                    let s = state.borrow();
+                    let live = match s.player.current_track() {
+                        Some(t) if playing && t.duration_secs.unwrap_or(0.0) > 0.0 => {
+                            let frac =
+                                ((pos / t.duration_secs.unwrap_or(1.0)) as f32).clamp(0.0, 1.0);
+                            Some((t.path.to_string_lossy().to_string(), frac))
+                        }
+                        _ => None,
+                    };
+                    let prior: Vec<String> = carts
+                        .list_all()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|c| c.file_path.clone())
+                        .collect();
+                    let has_progress = live.is_some()
+                        && prior
+                            .iter()
+                            .any(|p| live.as_ref().map(|(lp, _)| lp == p).unwrap_or(false));
+                    if has_progress || ui.get_cart_had_progress() {
+                        refresh_carts(&ui, &carts, &s.library, live);
+                        ui.set_cart_had_progress(has_progress);
+                    }
+                }
                 if !ui.get_autodj_enabled() || !*auto_continue.borrow() {
                     return;
                 }
