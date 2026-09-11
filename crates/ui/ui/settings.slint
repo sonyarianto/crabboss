@@ -206,6 +206,7 @@ export component SettingsScreen inherits Rectangle {
     in-out property <bool> eq-on: false;
     in-out property <[string]> eq-gains;
     in-out property <string> limiter-label: "-0.1 dBFS";
+    in-out property <bool> loudness-on: false;
 
     callback activate-license(string);
     callback clear-license;
@@ -221,6 +222,7 @@ export component SettingsScreen inherits Rectangle {
     callback eq-reset;
     callback limiter-inc;
     callback limiter-dec;
+    callback loudness-toggle;
 
     background: Theme.bg-primary;
 
@@ -520,6 +522,39 @@ export component SettingsScreen inherits Rectangle {
                         hint: "Program-bus brickwall (cpal engine); lower = more protection";
                         inc => { root.limiter-inc(); }
                         dec => { root.limiter-dec(); }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: "Loudness normalization";
+                            color: Theme.text-secondary;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Rectangle {
+                            width: 110px;
+                            height: 26px;
+                            border-radius: 6px;
+                            background: root.loudness-on ? Theme.accent : Theme.bg-panel;
+                            TouchArea { clicked => { root.loudness-toggle(); } }
+                            Text {
+                                text: root.loudness-on ? "ON (R128)" : "OFF";
+                                color: root.loudness-on ? white : Theme.text-dim;
+                                font-size: 11px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "Per-track gain toward −23 LUFS (EBU R128) from the library 🔊 scan — analyze tracks from Media Manager first";
+                        color: Theme.text-dim;
+                        font-size: 10px;
+                        wrap: word-wrap;
                     }
                 }
             }

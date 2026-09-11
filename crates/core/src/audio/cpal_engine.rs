@@ -15,6 +15,7 @@ use crate::audio::engine::Engine;
 use crate::audio::mixer::{Frame, Mixer, EQ_BAND_COUNT};
 use crate::audio::player::{PlayerState, TrackInfo};
 use crate::audio::silence::SilenceMonitor;
+use crate::audio::MAX_GAIN_DB;
 use crate::error::{CrabError, Result};
 
 /// Decoded track: stereo-interleaved f32 at device rate.
@@ -142,6 +143,9 @@ pub struct CpalEngine {
     current_track: Arc<Mutex<Option<TrackInfo>>>,
     volume: Arc<Mutex<f32>>,
     mixer: Arc<Mutex<Mixer>>,
+    /// Loudness normalization: enabled flag + per-path gain lookup (dB).
+    loudness_lookup: Option<crate::audio::engine::LoudnessLookup>,
+    loudness_enabled: std::cell::Cell<bool>,
 }
 
 impl CpalEngine {
@@ -203,6 +207,8 @@ impl CpalEngine {
             current_track,
             volume,
             mixer,
+            loudness_lookup: None,
+            loudness_enabled: std::cell::Cell::new(false),
         }
     }
 
@@ -220,7 +226,25 @@ impl CpalEngine {
     }
 
     fn decode_resampled(&self, path: &Path) -> Result<PlaybackCursor> {
-        let (samples, file_rate) = decode_to_stereo(path)?;
+        let (mut samples, file_rate) = decode_to_stereo(path)?;
+        // Loudness normalization: per-deck gain from the library analysis
+        // (ReplayGain-style toward the R128 target). Missing analysis → 0 dB.
+        let gain_db = self
+            .loudness_lookup
+            .as_ref()
+            .and_then(|f| f(path))
+            .unwrap_or(0.0)
+            .clamp(-MAX_GAIN_DB, MAX_GAIN_DB);
+        if gain_db != 0.0 {
+            let g = 10f32.powf(gain_db / 20.0);
+            for s in samples.iter_mut() {
+                *s *= g;
+            }
+            tracing::debug!(
+                "Loudness gain {gain_db:+.1} dB applied to {}",
+                path.display()
+            );
+        }
         let samples = if file_rate != self.device_rate {
             tracing::info!("Resampling {} Hz → {} Hz", file_rate, self.device_rate);
             resample_stereo(samples, file_rate, self.device_rate)?
@@ -533,11 +557,23 @@ impl Engine for CpalEngine {
     fn limiter_reduction_db(&self) -> f32 {
         self.mixer.lock().unwrap().limiter_reduction_db()
     }
+
+    fn set_loudness_lookup(&mut self, lookup: Option<crate::audio::engine::LoudnessLookup>) {
+        self.loudness_lookup = lookup;
+    }
+
+    fn set_loudness_enabled(&self, on: bool) {
+        self.loudness_enabled.set(on);
+    }
+
+    fn loudness_enabled(&self) -> bool {
+        self.loudness_enabled.get()
+    }
 }
 
 /// Decode any symphonia-supported file to stereo-interleaved f32.
 /// Returns `(samples, source_sample_rate)`. Mono is duplicated to both ears.
-fn decode_to_stereo(path: &Path) -> Result<(Vec<f32>, u32)> {
+pub(crate) fn decode_to_stereo(path: &Path) -> Result<(Vec<f32>, u32)> {
     use symphonia::core::audio::{AudioBufferRef, Signal};
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;

@@ -75,6 +75,7 @@ export component MainWindow inherits Window {
     // -- Library state (live model; both Playout tab and Media screen bind here) --
     in-out property <[LibTrack]> library-tracks;
     in-out property <string> library-status: "";
+    callback loudness-scan;
 
     // -- Report state --
     in-out property <[ReportRow]> report-entries;
@@ -95,6 +96,7 @@ export component MainWindow inherits Window {
     in-out property <bool> settings-eq-on: false;
     in-out property <[string]> settings-eq-gains;
     in-out property <string> settings-limiter: "-0.1 dBFS";
+    in-out property <bool> settings-loudness-on: false;
 
     // -- Nav --
     callback navigate(int);
@@ -137,6 +139,7 @@ export component MainWindow inherits Window {
     callback settings-eq-reset;
     callback settings-limiter-inc;
     callback settings-limiter-dec;
+    callback settings-loudness-toggle;
 
     // -- Scheduler callbacks --
     callback scheduler-toggled(bool);
@@ -367,6 +370,7 @@ export component MainWindow inherits Window {
                         track-double-clicked(idx) => { root.library-track-double-clicked(idx); }
                         import-files => { root.import-files(); }
                         health-check => { root.library-health-check(); }
+                        loudness-scan => { root.loudness-scan(); }
                     }
                 }
             }
@@ -383,6 +387,7 @@ export component MainWindow inherits Window {
             track-double-clicked(idx) => { root.library-track-double-clicked(idx); }
             import-files => { root.import-files(); }
             health-check => { root.library-health-check(); }
+            loudness-scan => { root.loudness-scan(); }
         }
 
         // -- Settings --
@@ -409,12 +414,14 @@ export component MainWindow inherits Window {
             eq-on <=> root.settings-eq-on;
             eq-gains: root.settings-eq-gains;
             limiter-label <=> root.settings-limiter;
+            loudness-on <=> root.settings-loudness-on;
             eq-toggle => { root.settings-eq-toggle(); }
             eq-inc(i) => { root.settings-eq-inc(i); }
             eq-dec(i) => { root.settings-eq-dec(i); }
             eq-reset => { root.settings-eq-reset(); }
             limiter-inc => { root.settings-limiter-inc(); }
             limiter-dec => { root.settings-limiter-dec(); }
+            loudness-toggle => { root.settings-loudness-toggle(); }
         }
 
         // -- Scheduler --

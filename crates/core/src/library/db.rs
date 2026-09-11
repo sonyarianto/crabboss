@@ -150,6 +150,10 @@ pub struct Track {
     pub daypart_end: Option<u8>,
     /// Dayparting: `Daily` or comma list like `Mon,Tue`.
     pub daypart_days: String,
+    /// Measured integrated loudness in LUFS (`None` = not analyzed yet).
+    pub loudness_lufs: Option<f32>,
+    /// ReplayGain-style correction (dB) toward the R128 target.
+    pub loudness_gain_db: Option<f32>,
     pub tags: Vec<String>,
     pub added_at: DateTime<Utc>,
     pub last_played_at: Option<DateTime<Utc>>,
@@ -235,6 +239,8 @@ impl Library {
         add_col("daypart_start", "daypart_start INTEGER")?;
         add_col("daypart_end", "daypart_end INTEGER")?;
         add_col("daypart_days", "daypart_days TEXT NOT NULL DEFAULT 'Daily'")?;
+        add_col("loudness_lufs", "loudness_lufs REAL")?;
+        add_col("loudness_gain_db", "loudness_gain_db REAL")?;
         Ok(())
     }
 
@@ -299,6 +305,8 @@ impl Library {
             daypart_start: None,
             daypart_end: None,
             daypart_days: "Daily".to_string(),
+            loudness_lufs: None,
+            loudness_gain_db: None,
             tags: Vec::new(),
             added_at,
             last_played_at: None,
@@ -313,6 +321,48 @@ impl Library {
             params![kind.as_str(), id],
         )?;
         Ok(())
+    }
+
+    /// Store a measured loudness analysis for a track.
+    pub fn set_loudness(&self, id: &str, lufs: f32, gain_db: f32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tracks SET loudness_lufs = ?1, loudness_gain_db = ?2 WHERE id = ?3",
+            params![lufs as f64, gain_db as f64, id],
+        )?;
+        Ok(())
+    }
+
+    /// Tracks still awaiting loudness analysis (bounded scan queue).
+    pub fn tracks_missing_loudness(&self, limit: usize) -> Result<Vec<Track>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, file_path, file_name, title, artist, album, genre, year,
+                    track_number, duration_secs, file_size, sample_rate, channels,
+                    kind, added_at, last_played_at, play_count,
+                    daypart_start, daypart_end, daypart_days,
+                    loudness_lufs, loudness_gain_db
+             FROM tracks
+             WHERE loudness_lufs IS NULL
+             ORDER BY file_name LIMIT ?1",
+        )?;
+        let tracks = stmt
+            .query_map(params![limit as i64], Self::map_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(tracks)
+    }
+
+    /// Tracks with a stored loudness measurement (id + gain in dB),
+    /// queried by exact file path — used to look up per-deck playback gain.
+    pub fn loudness_gain_by_path(&self, path: &str) -> Result<Option<f32>> {
+        let gain: Option<f64> = self
+            .conn
+            .query_row(
+                "SELECT loudness_gain_db FROM tracks WHERE file_path = ?1",
+                params![path],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        Ok(gain.map(|v| v as f32))
     }
 
     /// Override daypart eligibility (`start`/`end` hours, `days` like `Daily`
@@ -338,7 +388,8 @@ impl Library {
             "SELECT id, file_path, file_name, title, artist, album, genre, year,
                     track_number, duration_secs, file_size, sample_rate, channels,
                     kind, added_at, last_played_at, play_count,
-                    daypart_start, daypart_end, daypart_days
+                    daypart_start, daypart_end, daypart_days,
+                    loudness_lufs, loudness_gain_db
              FROM tracks WHERE kind = ?1 ORDER BY file_name",
         )?;
         let tracks = stmt
@@ -377,6 +428,16 @@ impl Library {
             daypart_days: row
                 .get::<_, String>(19)
                 .unwrap_or_else(|_| "Daily".to_string()),
+            loudness_lufs: row
+                .get::<_, Option<f64>>(20)
+                .ok()
+                .flatten()
+                .map(|v| v as f32),
+            loudness_gain_db: row
+                .get::<_, Option<f64>>(21)
+                .ok()
+                .flatten()
+                .map(|v| v as f32),
             tags: Vec::new(),
             added_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(14)?)
                 .map(|dt| dt.with_timezone(&Utc))
@@ -395,7 +456,8 @@ impl Library {
             "SELECT id, file_path, file_name, title, artist, album, genre, year,
                     track_number, duration_secs, file_size, sample_rate, channels,
                     kind, added_at, last_played_at, play_count,
-                    daypart_start, daypart_end, daypart_days
+                    daypart_start, daypart_end, daypart_days,
+                    loudness_lufs, loudness_gain_db
              FROM tracks ORDER BY artist, album, title",
         )?;
 
@@ -412,7 +474,8 @@ impl Library {
             "SELECT id, file_path, file_name, title, artist, album, genre, year,
                     track_number, duration_secs, file_size, sample_rate, channels,
                     kind, added_at, last_played_at, play_count,
-                    daypart_start, daypart_end, daypart_days
+                    daypart_start, daypart_end, daypart_days,
+                    loudness_lufs, loudness_gain_db
              FROM tracks WHERE id = ?1",
         )?;
 
@@ -427,7 +490,8 @@ impl Library {
             "SELECT id, file_path, file_name, title, artist, album, genre, year,
                     track_number, duration_secs, file_size, sample_rate, channels,
                     kind, added_at, last_played_at, play_count,
-                    daypart_start, daypart_end, daypart_days
+                    daypart_start, daypart_end, daypart_days,
+                    loudness_lufs, loudness_gain_db
              FROM tracks WHERE file_path = ?1",
         )?;
         let mut rows = stmt.query_map(params![path], Self::map_row)?;
@@ -441,7 +505,8 @@ impl Library {
             "SELECT id, file_path, file_name, title, artist, album, genre, year,
                     track_number, duration_secs, file_size, sample_rate, channels,
                     kind, added_at, last_played_at, play_count,
-                    daypart_start, daypart_end, daypart_days
+                    daypart_start, daypart_end, daypart_days,
+                    loudness_lufs, loudness_gain_db
              FROM tracks
              WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1
                     OR file_name LIKE ?1 OR genre LIKE ?1
@@ -628,6 +693,33 @@ mod tests {
         let jingle = all.iter().find(|t| t.kind == TrackKind::Jingle).unwrap();
         lib.set_kind(&jingle.id, TrackKind::Music).unwrap();
         assert_eq!(lib.list_by_kind(TrackKind::Music).unwrap().len(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn loudness_store_and_lookup() {
+        let dir = std::env::temp_dir().join(format!("crabboss-loud-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = Library::open(&dir.join("lib.db")).unwrap();
+        lib.conn
+            .execute(
+                "INSERT INTO tracks (id, file_path, file_name, added_at, play_count, kind)
+                 VALUES ('1', '/m/a.mp3', 'a.mp3', ?1, 0, 'music')",
+                rusqlite::params![chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        // Unanalyzed: shows in the missing queue, no gain by path.
+        assert_eq!(lib.tracks_missing_loudness(10).unwrap().len(), 1);
+        assert_eq!(lib.loudness_gain_by_path("/m/a.mp3").unwrap(), None);
+        // Store → gone from queue, gain + fields roundtrip.
+        lib.set_loudness("1", -18.5, -4.5).unwrap();
+        assert!(lib.tracks_missing_loudness(10).unwrap().is_empty());
+        assert!((lib.loudness_gain_by_path("/m/a.mp3").unwrap().unwrap() + 4.5).abs() < 1e-6);
+        let t = &lib.get_all_tracks().unwrap()[0];
+        assert!((t.loudness_lufs.unwrap() + 18.5).abs() < 1e-6);
+        assert!((t.loudness_gain_db.unwrap() + 4.5).abs() < 1e-6);
+        // Unknown path → None, not an error.
+        assert_eq!(lib.loudness_gain_by_path("/m/other.mp3").unwrap(), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -22,6 +22,8 @@ struct AppState {
     playlist_manager: crabcore::playlist::PlaylistManager,
     #[allow(dead_code)]
     current_track_index: usize,
+    /// True while the loudness scan timer is mid-scan (single-flight guard).
+    loudness_scanning: Rc<RefCell<bool>>,
 }
 
 fn fmt_dur(d: Option<f64>) -> String {
@@ -73,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Engine A/B: rodio default, `--engine cpal` opts into new backend.
     let engine_name = engine_choice();
-    let player: Box<dyn Engine> = match engine_name.as_str() {
+    let mut player: Box<dyn Engine> = match engine_name.as_str() {
         "cpal" => {
             tracing::info!("Audio engine: cpal");
             match settings.borrow().output_device.clone() {
@@ -100,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         player.set_eq_band(band, *gain);
     }
     player.set_limiter_ceiling(settings.borrow().limiter_ceiling);
+    player.set_loudness_enabled(settings.borrow().loudness_norm);
 
     // Initialize library (create db in current dir)
     let db_path = std::env::current_dir()
@@ -109,6 +112,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         crabcore::library::Library::open(&db_path).expect("Failed to open library database");
 
     tracing::info!("Library loaded from: {}", db_path.display());
+
+    // Loudness normalization: per-path gain lookup on its own db connection
+    // (the main one moves into AppState below). Applies at decode time to
+    // every play path (library, carts, scheduler, Auto-DJ).
+    if engine_name == "cpal" {
+        let loudness_lib =
+            crabcore::library::Library::open(&db_path).expect("Failed to open loudness lookup db");
+        player.set_loudness_lookup(Some(Box::new(move |p| {
+            loudness_lib
+                .loudness_gain_by_path(&p.to_string_lossy())
+                .unwrap_or(None)
+        })));
+    }
 
     // Scheduler store (shares the same crabboss.db file, separate connection)
     let scheduler = Rc::new(RefCell::new(
@@ -196,11 +212,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_upcoming_count(0);
 
     // Shared state
+    let loudness_scanning = Rc::new(RefCell::new(false));
     let state = Rc::new(RefCell::new(AppState {
         player,
         library,
         playlist_manager,
         current_track_index: 0,
+        loudness_scanning: loudness_scanning.clone(),
     }));
 
     // Tracks currently shown in the library list (all or search-filtered);
@@ -252,6 +270,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     artist: t.artist.clone().unwrap_or_default().into(),
                     duration: fmt_dur(t.duration_secs).into(),
                     kind: kind_label(t.kind).into(),
+                    gain: t
+                        .loudness_gain_db
+                        .map(|g| format!("{g:+.1} dB"))
+                        .unwrap_or_default()
+                        .into(),
                 }
             })
             .collect();
@@ -308,6 +331,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tracing::info!("Manual library health scan");
                 run_health_check(&ui, &state, &last_shown);
             }
+        });
+    }
+
+    // -- Loudness scan: analyze un-analyzed tracks one per timer tick so
+    //    the window stays responsive. The timer idles (flag check only)
+    //    once the scan completes. --
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let last_shown = last_shown.clone();
+        ui.on_loudness_scan(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if *state.borrow().loudness_scanning.borrow() {
+                return; // already running
+            }
+            *state.borrow().loudness_scanning.borrow_mut() = true;
+            ui.set_library_status("🔊 Loudness scan starting…".into());
+            tracing::info!("Loudness scan started");
+            let state = state.clone();
+            let ui_weak = ui.as_weak();
+            let last_shown = last_shown.clone();
+            let tick = slint::Timer::default();
+            tick.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_millis(50),
+                move || {
+                    if !*state.borrow().loudness_scanning.borrow() {
+                        return; // scan not active
+                    }
+                    let Some(ui) = ui_weak.upgrade() else { return };
+                    let s = state.borrow();
+                    let next = s
+                        .library
+                        .tracks_missing_loudness(1)
+                        .ok()
+                        .and_then(|v| v.into_iter().next());
+                    let Some(next) = next else {
+                        // Queue drained: finish up.
+                        drop(s);
+                        *state.borrow().loudness_scanning.borrow_mut() = false;
+                        ui.set_library_status("✓ Loudness scan complete".into());
+                        let tracks = state.borrow().library.get_all_tracks().unwrap_or_default();
+                        ui.set_track_count(tracks.len() as i32);
+                        refresh_library(&ui, tracks, &last_shown);
+                        return;
+                    };
+                    let path = PathBuf::from(&next.file_path);
+                    if !path.is_file() {
+                        // Record a sentinel so missing files never wedge the queue.
+                        let _ = s.library.set_loudness(&next.id, -70.0, 0.0);
+                    } else {
+                        match crabcore::audio::analyze_file(&path) {
+                            Ok(a) => {
+                                let _ =
+                                    s.library
+                                        .set_loudness(&next.id, a.integrated_lufs, a.gain_db);
+                                tracing::info!(
+                                    "Loudness {}: {:.1} LUFS → {:+.1} dB",
+                                    next.file_name,
+                                    a.integrated_lufs,
+                                    a.gain_db
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!("Loudness failed for {}: {}", next.file_name, e);
+                                let _ = s.library.set_loudness(&next.id, -70.0, 0.0);
+                            }
+                        }
+                    }
+                    let remaining = s
+                        .library
+                        .tracks_missing_loudness(1)
+                        .map(|v| v.len())
+                        .unwrap_or(0);
+                    drop(s);
+                    ui.set_library_status(
+                        format!("🔊 Analyzing loudness… {} to go", remaining).into(),
+                    );
+                },
+            );
+            std::mem::forget(tick);
         });
     }
 
@@ -1254,6 +1358,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.set_settings_limiter(
             format!("{:.1} dBFS", lin_to_dbfs(settings.limiter_ceiling)).into(),
         );
+        ui.set_settings_loudness_on(settings.loudness_norm);
     }
     fn lin_to_dbfs(lin: f32) -> f32 {
         20.0 * lin.max(0.001).log10()
@@ -1373,6 +1478,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             s.eq_enabled = !s.eq_enabled;
             let _ = s.save(&settings_path);
             state.borrow().player.set_eq_enabled(s.eq_enabled);
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &settings.borrow());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_loudness_toggle(move || {
+            let mut s = settings.borrow_mut();
+            s.loudness_norm = !s.loudness_norm;
+            let _ = s.save(&settings_path);
+            state.borrow().player.set_loudness_enabled(s.loudness_norm);
             drop(s);
             if let Some(ui) = ui_weak.upgrade() {
                 settings_labels(&ui, &settings.borrow());

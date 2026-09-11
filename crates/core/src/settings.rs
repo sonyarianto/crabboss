@@ -26,6 +26,9 @@ pub struct AppSettings {
     pub eq_gains_db: [f32; EQ_BAND_COUNT],
     /// Limiter ceiling (linear amplitude, 0.1..1.0; ~0 dBFS default).
     pub limiter_ceiling: f32,
+    /// ReplayGain-style loudness normalization (per-track gain toward
+    /// R128 target, applied at decode time from library analysis).
+    pub loudness_norm: bool,
 }
 
 impl Default for AppSettings {
@@ -38,6 +41,7 @@ impl Default for AppSettings {
             eq_enabled: false,
             eq_gains_db: [0.0; EQ_BAND_COUNT],
             limiter_ceiling: 0.99,
+            loudness_norm: true,
         }
     }
 }
@@ -78,6 +82,7 @@ mod tests {
             eq_enabled: true,
             eq_gains_db: [0.0, 1.5, 3.0, 0.0, 0.0, 0.0, -2.0, 0.0, 0.0, 0.0, 4.0, 0.0],
             limiter_ceiling: 0.9,
+            loudness_norm: false,
         };
         s.save(&path).unwrap();
         let back = AppSettings::load(&path);
@@ -91,6 +96,7 @@ mod tests {
         assert_eq!(back.eq_gains_db[6], -2.0);
         assert_eq!(back.eq_gains_db[10], 4.0);
         assert!((back.limiter_ceiling - 0.9).abs() < 1e-6);
+        assert!(!back.loudness_norm);
         std::fs::remove_file(&path).ok();
     }
 

@@ -9,6 +9,9 @@ use crate::audio::mixer::EQ_BAND_COUNT;
 use crate::audio::player::{PlayerState, TrackInfo};
 use crate::error::Result;
 
+/// Per-path loudness gain lookup (dB) used by normalization at decode time.
+pub type LoudnessLookup = Box<dyn Fn(&Path) -> Option<f32>>;
+
 /// Minimal transport + volume interface every backend must provide.
 /// NOTE: no Send+Sync bound — cpal::Stream and rodio::OutputStream are
 /// !Send/!Sync; UI owns the engine single-threaded (Rc/RefCell).
@@ -63,6 +66,16 @@ pub trait Engine {
     /// Live limiter gain reduction in dB (negative when working; UI meter).
     fn limiter_reduction_db(&self) -> f32 {
         0.0
+    }
+    /// Loudness normalization: install a per-path gain lookup (dB) used at
+    /// decode time. Called once with `Some(...)` when the library is open;
+    /// `None` clears it.
+    fn set_loudness_lookup(&mut self, _lookup: Option<LoudnessLookup>) {}
+    /// Enable/disable loudness normalization (lookup stays installed).
+    fn set_loudness_enabled(&self, _on: bool) {}
+    /// True when loudness normalization is active.
+    fn loudness_enabled(&self) -> bool {
+        false
     }
     /// Seconds into the current track (`0.0` when nothing is playing).
     fn position_secs(&self) -> f64 {

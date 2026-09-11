@@ -5,6 +5,7 @@ export struct LibTrack {
     artist: string,
     duration: string,
     kind: string,
+    gain: string,
 }
 
 component TrackRow inherits Rectangle {
@@ -12,6 +13,7 @@ component TrackRow inherits Rectangle {
     in property <string> artist: "";
     in property <string> duration: "";
     in property <string> kind: "Music";
+    in property <string> gain: "";
     in property <bool> is-even: false;
     in property <bool> is-selected: false;
 
@@ -72,6 +74,22 @@ component TrackRow inherits Rectangle {
             font-size: 12px;
             vertical-alignment: center;
             horizontal-stretch: 1;
+        }
+
+        // loudness gain badge (blank until analyzed)
+        Rectangle {
+            width: 56px;
+            height: 18px;
+            border-radius: 4px;
+            background: root.gain == "" ? transparent : Theme.bg-panel;
+            y: (parent.height - self.height) / 2;
+            Text {
+                text: root.gain;
+                color: Theme.text-dim;
+                font-size: 9px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
         }
     }
 }
@@ -153,6 +171,15 @@ component ListHeader inherits Rectangle {
             vertical-alignment: center;
             horizontal-stretch: 1;
         }
+
+        Text {
+            text: "Gain";
+            color: Theme.text-dim;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+            width: 56px;
+        }
     }
 }
 
@@ -167,6 +194,7 @@ export component LibraryPanel inherits Rectangle {
     callback track-double-clicked(int);
     callback import-files;
     callback health-check;
+    callback loudness-scan;
 
     background: Theme.bg-primary;
 
@@ -201,6 +229,25 @@ export component LibraryPanel inherits Rectangle {
 
                     Text {
                         text: "✓ Health";
+                        color: Theme.text-secondary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    width: 84px;
+                    height: 28px;
+                    border-radius: 6px;
+                    background: Theme.bg-panel;
+
+                    TouchArea {
+                        clicked => { root.loudness-scan(); }
+                    }
+
+                    Text {
+                        text: "🔊 Loudness";
                         color: Theme.text-secondary;
                         font-size: 12px;
                         horizontal-alignment: center;
@@ -262,6 +309,7 @@ export component LibraryPanel inherits Rectangle {
                         artist: t.artist;
                         duration: t.duration;
                         kind: t.kind;
+                        gain: t.gain;
                         is-even: mod(i, 2) == 0;
                         is-selected: i == root.selected-index;
                         clicked => {

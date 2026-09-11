@@ -68,7 +68,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Area | RadioBOSS has | CrabBoss today | Status |
 |---|---|---|---|
 | Playback engine | Gapless, sample-accurate crossfade, curve choice | `Mixer` DSP exists, not wired to two cursors; mono-only `CpalEngine` | 🟡 |
-| EQ / dynamics | Full EQ, limiter, loudness normalization | 12-band peaking EQ (±12 dB) + brickwall limiter wired in cpal `Mixer`; loudness normalization open | 🟡 |
+| EQ / dynamics | Full EQ, limiter, loudness normalization | 12-band peaking EQ (±12 dB) + brickwall limiter + BS.1770/R128 loudness normalization (library scan, per-track gain at decode) | ✅ |
 | Playlist generator | Rotation, no-repeat, separation, playcount priority, dayparting, multi-playlist UI | Checkbox only (+ kind-aware counting) | ❌ |
 | Ad scheduler | Dated blocks, intros/outros, color-coded list | Unchecked | ❌ |
 | Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP done | ✅ + depth TODO (§1.3) |
@@ -99,7 +99,12 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] 12-band EQ insert (RBJ peaking biquad chain, ±12 dB, per-band
       Settings steppers, persisted + live-applied, cpal-only) + limiter
       (per-frame brickwall attack with metered release, ceiling stepper in dBFS)
-- [ ] Loudness normalization (ReplayGain-style)
+- [x] Loudness normalization (ReplayGain-style): BS.1770 K-weighting +
+      R128 gating meter (`LoudnessMeter`, validated against the ITU mono-sine
+      −3.01 LUFS anchor), 🔊 Loudness scan button in Media/Playout writes
+      per-track LUFS + gain toward −23 LUFS into the library (responsive
+      one-track-per-tick timer), gain badge per library row, applied at
+      decode time on every cpal play path behind a Settings ON/OFF toggle
 - [ ] Wire `library.search()` results into the Slint model (currently a no-op) — ✅ done (live list + search filter + tap-to-play)
 
 ### 1.2 Playlist Generator (real scope, not a checkbox)

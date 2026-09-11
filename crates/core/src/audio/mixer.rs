@@ -41,9 +41,10 @@ impl EqBand {
     }
 }
 
-/// RBJ "Cookbook" peaking biquad (audio EQ design formulas, direct form 1).
+/// RBJ "Cookbook" biquad (audio EQ design formulas, direct form 1).
+/// Shared by the EQ chain and the BS.1770 K-weighting in `loudness`.
 #[derive(Debug, Clone, Copy)]
-struct Biquad {
+pub struct Biquad {
     b0: f32,
     b1: f32,
     b2: f32,
@@ -64,6 +65,22 @@ impl Biquad {
             b2: 0.0,
             a1: 0.0,
             a2: 0.0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+
+    /// Build from raw (unnormalized) b0..a2 coefficients; a0-normalized.
+    pub(crate) fn from_raw(b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) -> Self {
+        let g = |v: f32| v / a0;
+        Self {
+            b0: g(b0),
+            b1: g(b1),
+            b2: g(b2),
+            a1: g(a1),
+            a2: g(a2),
             x1: 0.0,
             x2: 0.0,
             y1: 0.0,
@@ -103,7 +120,7 @@ impl Biquad {
     }
 
     /// Process one sample with direct-form-1 state.
-    fn tick(&mut self, x: f32) -> f32 {
+    pub(crate) fn tick(&mut self, x: f32) -> f32 {
         let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
             - self.a1 * self.y1
             - self.a2 * self.y2;
