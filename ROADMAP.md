@@ -71,7 +71,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | EQ / dynamics | Full EQ, limiter, loudness normalization | 12-band peaking EQ (±12 dB) + brickwall limiter + BS.1770/R128 loudness normalization (library scan, per-track gain at decode) | ✅ |
 | Playlist generator | Rotation, no-repeat, separation, playcount priority, dayparting, multi-playlist UI | Checkbox only (+ kind-aware counting) | ❌ |
 | Ad scheduler | Dated blocks, intros/outros, color-coded list | Unchecked | ❌ |
-| Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP done | ✅ + depth TODO (§1.3) |
+| Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP + "valid until" expiry with row badges and warnings banner | ✅ |
 | Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
 | Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Unchecked | ❌ |
@@ -118,7 +118,11 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 ### 1.3 Ads, Scheduler & Cart depth
 - [x] Ad blocks with start/end date ranges (validity window + weekday + HH:MM, full Add/Edit UI)
 - [x] Intro/outro clips per ad block (engine pending-queue chains intro→spot→outro; spot play logged)
-- [ ] Scheduler event expiration ("valid until") + warnings
+- [x] Scheduler event expiration ("valid until"): inclusive `YYYY-MM-DD`
+      validity end honored by the auto-tick (`is_due` is date-aware), per-row
+      badge (⏳ ≤7 days / ⚠ last day / expired) + warnings banner (⏳ ≤3 days,
+      ⚠ last-day, expired-but-still-listed) and a Valid-until field in the
+      Add/Edit dialog; empty = runs forever
 - [x] "Insert after current track" (`queue` action + `Engine::queue`: cpal blends
       at the boundary with end-of-track auto-fade; rodio degrades to immediate play)
 - [x] Cart hotkeys (keys 1–8 via FocusScope), per-pad progress bar +

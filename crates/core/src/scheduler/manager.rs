@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{params, Connection};
 use uuid::Uuid;
 
@@ -22,15 +22,36 @@ pub struct ScheduledEvent {
     pub start_time: String,
     /// Repeat days: `Daily` or comma list like `Mon,Tue,Wed`.
     pub days: String,
+    /// "Valid until" date `YYYY-MM-DD` (inclusive) or `None` = runs forever.
+    pub expires_on: Option<String>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
 }
 
+/// Expiration state of an event relative to a date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpiryStatus {
+    /// No expiration set.
+    Forever,
+    /// Still valid, with this many days left (≥ 1).
+    Active(u32),
+    /// Valid until date == today: last firing day.
+    ExpiresToday,
+    /// Valid-until date has passed; won't fire anymore.
+    Expired,
+}
+
 impl ScheduledEvent {
-    /// Does this event fire at the given `HH:MM` + 3-letter weekday (`Mon`..`Sun`)?
-    pub fn is_due(&self, now_hhmm: &str, weekday: &str) -> bool {
+    /// Does this event fire on `today` (`YYYY-MM-DD`) at `HH:MM` +
+    /// 3-letter weekday (`Mon`..`Sun`)? Expiration is inclusive: an event
+    /// valid until today still fires today.
+    pub fn is_due(&self, today: &str, now_hhmm: &str, weekday: &str) -> bool {
         if !self.enabled || self.start_time != now_hhmm {
             return false;
+        }
+        match self.expiry_status(today) {
+            ExpiryStatus::Expired => return false,
+            ExpiryStatus::Forever | ExpiryStatus::Active(_) | ExpiryStatus::ExpiresToday => {}
         }
         if self.days.eq_ignore_ascii_case("daily") {
             return true;
@@ -38,6 +59,26 @@ impl ScheduledEvent {
         self.days
             .split(',')
             .any(|d| d.trim().eq_ignore_ascii_case(weekday))
+    }
+
+    /// Expiration state relative to `today` (`YYYY-MM-DD`).
+    pub fn expiry_status(&self, today: &str) -> ExpiryStatus {
+        let Some(until) = self.expires_on.as_deref() else {
+            return ExpiryStatus::Forever;
+        };
+        let (Ok(until), Ok(now)) = (
+            NaiveDate::parse_from_str(until, "%Y-%m-%d"),
+            NaiveDate::parse_from_str(today, "%Y-%m-%d"),
+        ) else {
+            return ExpiryStatus::Forever; // unparsable stored date: don't disable
+        };
+        match until.cmp(&now) {
+            std::cmp::Ordering::Less => ExpiryStatus::Expired,
+            std::cmp::Ordering::Equal => ExpiryStatus::ExpiresToday,
+            std::cmp::Ordering::Greater => {
+                ExpiryStatus::Active((until - now).num_days().max(0) as u32)
+            }
+        }
     }
 }
 
@@ -50,6 +91,18 @@ pub fn validate_hhmm(v: &str) -> bool {
     let hh: Option<u32> = v[0..2].parse().ok();
     let mm: Option<u32> = v[3..5].parse().ok();
     matches!((hh, mm), (Some(h), Some(m)) if h < 24 && m < 60)
+}
+
+/// Validate an optional `YYYY-MM-DD` date ("" or None = no expiration).
+pub fn parse_expires(v: Option<&str>) -> Result<Option<String>> {
+    match v.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            .map(|_| Some(s.to_string()))
+            .map_err(|_| {
+                crate::error::CrabError::Scheduler(format!("bad date '{s}', want YYYY-MM-DD"))
+            }),
+    }
 }
 
 /// Day bitmask: Mon=1, Tue=2, Wed=4, Thu=8, Fri=16, Sat=32, Sun=64.
@@ -131,9 +184,30 @@ impl SchedulerManager {
                 ",
             )
             .expect("Failed to initialize scheduler tables");
+        // Migrate older stores: add the expiration column if missing.
+        let cols: Vec<String> = self
+            .conn
+            .borrow()
+            .prepare("PRAGMA table_info(scheduled_events)")
+            .expect("pragma scheduled_events")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("pragma query")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("pragma rows");
+        if !cols.iter().any(|c| c == "expires_on") {
+            self.conn
+                .borrow()
+                .execute(
+                    "ALTER TABLE scheduled_events ADD COLUMN expires_on TEXT",
+                    [],
+                )
+                .expect("add expires_on column");
+        }
     }
 
-    /// Create a new event. `start_time` must be `HH:MM`.
+    /// Create a new event. `start_time` must be `HH:MM`; `expires_on` an
+    /// optional `YYYY-MM-DD` (inclusive) or empty for "runs forever".
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
         name: &str,
@@ -141,6 +215,7 @@ impl SchedulerManager {
         target: &str,
         start_time: &str,
         days: &str,
+        expires_on: Option<&str>,
     ) -> Result<ScheduledEvent> {
         if name.trim().is_empty() {
             return Err(crate::error::CrabError::Scheduler("name is empty".into()));
@@ -151,12 +226,13 @@ impl SchedulerManager {
                 start_time
             )));
         }
+        let expires_on = parse_expires(expires_on)?;
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
         self.conn.borrow().execute(
             "INSERT INTO scheduled_events
-             (id, name, action_type, target, start_time, days, enabled, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
+             (id, name, action_type, target, start_time, days, enabled, created_at, expires_on)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8)",
             params![
                 id,
                 name,
@@ -164,7 +240,8 @@ impl SchedulerManager {
                 target,
                 start_time,
                 days,
-                now.to_rfc3339()
+                now.to_rfc3339(),
+                expires_on,
             ],
         )?;
         Ok(ScheduledEvent {
@@ -174,6 +251,7 @@ impl SchedulerManager {
             target: target.to_string(),
             start_time: start_time.to_string(),
             days: days.to_string(),
+            expires_on,
             enabled: true,
             created_at: now,
         })
@@ -182,7 +260,7 @@ impl SchedulerManager {
     pub fn list_all(&self) -> Result<Vec<ScheduledEvent>> {
         let conn = self.conn.borrow();
         let mut stmt = conn.prepare(
-            "SELECT id, name, action_type, target, start_time, days, enabled, created_at
+            "SELECT id, name, action_type, target, start_time, days, enabled, created_at, expires_on
              FROM scheduled_events ORDER BY start_time, name",
         )?;
         let events = stmt
@@ -201,6 +279,7 @@ impl SchedulerManager {
                         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
                         .map(|dt| dt.with_timezone(&Utc))
                         .unwrap_or_else(Utc::now),
+                    expires_on: row.get::<_, Option<String>>(8)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -216,6 +295,7 @@ impl SchedulerManager {
     }
 
     /// Full update from the Add/Edit dialog.
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &self,
         id: &str,
@@ -224,6 +304,7 @@ impl SchedulerManager {
         target: &str,
         start_time: &str,
         days: &str,
+        expires_on: Option<&str>,
     ) -> Result<()> {
         if name.trim().is_empty() {
             return Err(crate::error::CrabError::Scheduler("name is empty".into()));
@@ -234,11 +315,12 @@ impl SchedulerManager {
                 start_time
             )));
         }
+        let expires_on = parse_expires(expires_on)?;
         self.conn.borrow().execute(
             "UPDATE scheduled_events
-             SET name = ?1, action_type = ?2, target = ?3, start_time = ?4, days = ?5
-             WHERE id = ?6",
-            params![name, action_type, target, start_time, days, id],
+             SET name = ?1, action_type = ?2, target = ?3, start_time = ?4, days = ?5, expires_on = ?6
+             WHERE id = ?7",
+            params![name, action_type, target, start_time, days, expires_on, id],
         )?;
         Ok(())
     }
@@ -250,13 +332,48 @@ impl SchedulerManager {
         Ok(())
     }
 
-    /// Events that should fire now (`now_hhmm` = `HH:MM`, `weekday` = `Mon`..).
-    pub fn due_events(&self, now_hhmm: &str, weekday: &str) -> Result<Vec<ScheduledEvent>> {
+    /// Events that should fire now (`today` = `YYYY-MM-DD`, `now_hhmm` =
+    /// `HH:MM`, `weekday` = `Mon`..). Expiration-aware and inclusive.
+    pub fn due_events(
+        &self,
+        today: &str,
+        now_hhmm: &str,
+        weekday: &str,
+    ) -> Result<Vec<ScheduledEvent>> {
         Ok(self
             .list_all()?
             .into_iter()
-            .filter(|e| e.is_due(now_hhmm, weekday))
+            .filter(|e| e.is_due(today, now_hhmm, weekday))
             .collect())
+    }
+
+    /// Warnings for the Scheduler screen: events whose validity ends soon
+    /// (within `warn_days`) or that have already expired silently.
+    pub fn expiry_warnings(&self, today: &str, warn_days: u32) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for e in self.list_all()? {
+            match e.expiry_status(today) {
+                ExpiryStatus::Expired => out.push(format!(
+                    "⚠ '{}' expired {} (set to run {}) — edit or delete it",
+                    e.name,
+                    e.expires_on.clone().unwrap_or_default(),
+                    e.start_time
+                )),
+                ExpiryStatus::ExpiresToday => out.push(format!(
+                    "⚠ '{}' runs for the last time today at {}",
+                    e.name, e.start_time
+                )),
+                ExpiryStatus::Active(days) if days <= warn_days => out.push(format!(
+                    "⏳ '{}' valid {} more day{} (until {})",
+                    e.name,
+                    days,
+                    if days == 1 { "" } else { "s" },
+                    e.expires_on.clone().unwrap_or_default()
+                )),
+                _ => {}
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -271,31 +388,39 @@ mod tests {
     #[test]
     fn create_and_list() {
         let m = mem_manager();
-        m.create("Morning show", "load", "Morning.m3u", "08:00", "Daily")
-            .unwrap();
+        m.create(
+            "Morning show",
+            "load",
+            "Morning.m3u",
+            "08:00",
+            "Daily",
+            None,
+        )
+        .unwrap();
         let all = m.list_all().unwrap();
         assert_eq!(all.len(), 1);
         assert!(all[0].enabled);
+        assert_eq!(all[0].expires_on, None);
     }
 
     #[test]
     fn due_matching() {
         let m = mem_manager();
-        m.create("TOTH jingle", "play", "toth.mp3", "09:00", "Mon,Tue")
+        m.create("TOTH jingle", "play", "toth.mp3", "09:00", "Mon,Tue", None)
             .unwrap();
-        assert_eq!(m.due_events("09:00", "Mon").unwrap().len(), 1);
-        assert_eq!(m.due_events("09:00", "Wed").unwrap().len(), 0);
-        assert_eq!(m.due_events("10:00", "Mon").unwrap().len(), 0);
+        assert_eq!(m.due_events("2026-09-07", "09:00", "Mon").unwrap().len(), 1);
+        assert_eq!(m.due_events("2026-09-07", "09:00", "Wed").unwrap().len(), 0);
+        assert_eq!(m.due_events("2026-09-07", "10:00", "Mon").unwrap().len(), 0);
     }
 
     #[test]
     fn toggle_and_delete() {
         let m = mem_manager();
         let e = m
-            .create("Night", "generate", "Day", "00:00", "Daily")
+            .create("Night", "generate", "Day", "00:00", "Daily", None)
             .unwrap();
         m.set_enabled(&e.id, false).unwrap();
-        assert_eq!(m.due_events("00:00", "Fri").unwrap().len(), 0);
+        assert_eq!(m.due_events("2026-09-07", "00:00", "Fri").unwrap().len(), 0);
         m.delete(&e.id).unwrap();
         assert!(m.list_all().unwrap().is_empty());
     }
@@ -317,14 +442,124 @@ mod tests {
     #[test]
     fn update_rejects_bad_time() {
         let m = mem_manager();
-        let e = m.create("X", "play", "a.mp3", "08:00", "Daily").unwrap();
+        let e = m
+            .create("X", "play", "a.mp3", "08:00", "Daily", None)
+            .unwrap();
         assert!(m
-            .update(&e.id, "X", "play", "a.mp3", "99:99", "Daily")
+            .update(&e.id, "X", "play", "a.mp3", "99:99", "Daily", None)
             .is_err());
-        m.update(&e.id, "Y", "load", "b.m3u", "09:30", "Mon,Fri")
+        m.update(&e.id, "Y", "load", "b.m3u", "09:30", "Mon,Fri", None)
             .unwrap();
         let all = m.list_all().unwrap();
         assert_eq!(all[0].name, "Y");
         assert_eq!(all[0].start_time, "09:30");
+    }
+
+    #[test]
+    fn expiration_gates_due() {
+        let m = mem_manager();
+        // Valid until 2026-09-07: fires ON that date, not after.
+        m.create(
+            "Campaign spot",
+            "play",
+            "spot.mp3",
+            "12:00",
+            "Daily",
+            Some("2026-09-07"),
+        )
+        .unwrap();
+        assert_eq!(m.due_events("2026-09-07", "12:00", "Mon").unwrap().len(), 1);
+        assert_eq!(m.due_events("2026-09-08", "12:00", "Tue").unwrap().len(), 0);
+        // Expiration is honored even when the weekday still matches.
+        assert_eq!(m.due_events("2026-09-14", "12:00", "Mon").unwrap().len(), 0);
+        // Forever events are unaffected.
+        m.create("Forever", "play", "x.mp3", "12:00", "Daily", None)
+            .unwrap();
+        assert_eq!(m.due_events("2026-09-14", "12:00", "Mon").unwrap().len(), 1);
+        // Disabled events never fire, even on their last day.
+        let e = m.list_all().unwrap().remove(0);
+        m.set_enabled(&e.id, false).unwrap();
+        assert_eq!(m.due_events("2026-09-07", "12:00", "Mon").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn expiry_status_and_warnings() {
+        let m = mem_manager();
+        m.create("Old", "play", "a.mp3", "08:00", "Daily", Some("2026-09-01"))
+            .unwrap();
+        m.create(
+            "Today",
+            "play",
+            "b.mp3",
+            "09:00",
+            "Daily",
+            Some("2026-09-07"),
+        )
+        .unwrap();
+        m.create(
+            "Soon",
+            "play",
+            "c.mp3",
+            "10:00",
+            "Daily",
+            Some("2026-09-09"),
+        )
+        .unwrap();
+        m.create(
+            "Later",
+            "play",
+            "d.mp3",
+            "11:00",
+            "Daily",
+            Some("2027-01-01"),
+        )
+        .unwrap();
+        m.create("Always", "play", "e.mp3", "12:00", "Daily", None)
+            .unwrap();
+
+        let all = m.list_all().unwrap();
+        let status = |name: &str| {
+            all.iter()
+                .find(|e| e.name == name)
+                .unwrap()
+                .expiry_status("2026-09-07")
+        };
+        assert_eq!(status("Old"), ExpiryStatus::Expired);
+        assert_eq!(status("Today"), ExpiryStatus::ExpiresToday);
+        assert_eq!(status("Soon"), ExpiryStatus::Active(2));
+        assert_eq!(status("Later"), ExpiryStatus::Active(116));
+        assert_eq!(status("Always"), ExpiryStatus::Forever);
+
+        let warns = m.expiry_warnings("2026-09-07", 3).unwrap();
+        assert!(
+            warns.iter().any(|w| w.contains("'Old' expired")),
+            "{warns:?}"
+        );
+        assert!(
+            warns.iter().any(|w| w.contains("last time today")),
+            "{warns:?}"
+        );
+        assert!(
+            warns.iter().any(|w| w.contains("'Soon' valid 2 more days")),
+            "{warns:?}"
+        );
+        assert!(
+            !warns.iter().any(|w| w.contains("Later")),
+            "beyond window: {warns:?}"
+        );
+        assert!(!warns.iter().any(|w| w.contains("Always")), "{warns:?}");
+    }
+
+    #[test]
+    fn parse_expires_validates() {
+        assert_eq!(parse_expires(None).unwrap(), None);
+        assert_eq!(parse_expires(Some("")).unwrap(), None);
+        assert_eq!(parse_expires(Some("  ")).unwrap(), None);
+        assert_eq!(
+            parse_expires(Some("2026-12-31")).unwrap(),
+            Some("2026-12-31".to_string())
+        );
+        assert!(parse_expires(Some("31-12-2026")).is_err());
+        assert!(parse_expires(Some("soon")).is_err());
     }
 }

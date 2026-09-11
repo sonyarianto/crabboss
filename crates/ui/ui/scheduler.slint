@@ -6,6 +6,9 @@ export struct SchedRow {
     action: string,
     target: string,
     days: string,
+    valid: string,
+    valid-full: string,
+    exp-state: int,
     enabled: bool,
     mon: bool,
     tue: bool,
@@ -44,6 +47,8 @@ component EventRow inherits Rectangle {
     in property <string> ev-action: "";
     in property <string> ev-target: "";
     in property <string> ev-days: "";
+    in property <string> ev-valid: "";
+    in property <int> exp-state: 0;
     in property <bool> ev-enabled: false;
     in property <int> ev-index: 0;
     in property <bool> is-even: false;
@@ -93,6 +98,13 @@ component EventRow inherits Rectangle {
                 text: root.ev-action + " • " + root.ev-target;
                 color: Theme.text-dim;
                 font-size: 10px;
+                overflow: elide;
+            }
+            if (root.ev-valid != "") : Text {
+                text: root.ev-valid;
+                color: root.exp-state == 3 ? Theme.accent : (root.exp-state == 2 ? Theme.warning : Theme.text-dim);
+                font-size: 9px;
+                font-weight: 700;
                 overflow: elide;
             }
         }
@@ -175,12 +187,14 @@ export component SchedulerScreen inherits Rectangle {
     in-out property <[SchedRow]> events;
     in-out property <bool> show-editor: false;
     in-out property <string> editor-error: "";
+    in-out property <[string]> warnings;
 
     // editor-local state
     in-out property <int> editing-index: -1;
     in-out property <string> edit-name: "";
     in-out property <string> edit-time: "08:00";
     in-out property <string> edit-target: "";
+    in-out property <string> edit-expires: "";
     in-out property <int> edit-action-idx: 2;
     in-out property <bool> edit-mon: true;
     in-out property <bool> edit-tue: true;
@@ -194,7 +208,7 @@ export component SchedulerScreen inherits Rectangle {
     callback toggle-event(int);
     callback delete-event(int);
     callback run-event(int);
-    callback save-event(int, string, string, int, string, bool, bool, bool, bool, bool, bool, bool);
+    callback save-event(int, string, string, int, string, string, bool, bool, bool, bool, bool, bool, bool);
 
     background: Theme.bg-primary;
 
@@ -252,6 +266,7 @@ export component SchedulerScreen inherits Rectangle {
                             root.edit-name = "";
                             root.edit-time = "08:00";
                             root.edit-target = "Day";
+                            root.edit-expires = "";
                             root.edit-action-idx = 2;
                             root.edit-mon = true;
                             root.edit-tue = true;
@@ -282,6 +297,24 @@ export component SchedulerScreen inherits Rectangle {
             font-size: 11px;
         }
 
+        if (root.warnings.length > 0) : Rectangle {
+            border-radius: 6px;
+            background: Theme.bg-secondary;
+            border-width: 1px;
+            border-color: Theme.warning;
+
+            VerticalLayout {
+                padding: 8px;
+                spacing: 2px;
+                for w in root.warnings : Text {
+                    text: w;
+                    color: Theme.warning;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
         Rectangle {
             vertical-stretch: 1;
             clip: true;
@@ -306,6 +339,8 @@ export component SchedulerScreen inherits Rectangle {
                         ev-action: ev.action;
                         ev-target: ev.target;
                         ev-days: ev.days;
+                        ev-valid: ev.valid;
+                        exp-state: ev.exp-state;
                         ev-enabled: ev.enabled;
                         ev-index: i;
                         is-even: mod(i, 2) == 0;
@@ -317,6 +352,7 @@ export component SchedulerScreen inherits Rectangle {
                             root.edit-name = ev.name;
                             root.edit-time = ev.time;
                             root.edit-target = ev.target;
+                            root.edit-expires = ev.valid-full;
                             if (ev.action == "play") {
                                 root.edit-action-idx = 0;
                             } else if (ev.action == "load") {
@@ -376,6 +412,13 @@ export component SchedulerScreen inherits Rectangle {
 
                         Text { text: "Start time (HH:MM, 24h)"; color: Theme.text-dim; font-size: 11px; }
                         Field { value <=> root.edit-time; }
+
+                        Text {
+                            text: "Valid until (YYYY-MM-DD, empty = forever)";
+                            color: Theme.text-dim;
+                            font-size: 11px;
+                        }
+                        Field { value <=> root.edit-expires; }
 
                         Text { text: "Action"; color: Theme.text-dim; font-size: 11px; }
                         HorizontalLayout {
@@ -488,7 +531,7 @@ export component SchedulerScreen inherits Rectangle {
                                 background: Theme.accent;
                                 TouchArea {
                                     clicked => {
-                                        root.save-event(root.editing-index, root.edit-name, root.edit-time, root.edit-action-idx, root.edit-target, root.edit-mon, root.edit-tue, root.edit-wed, root.edit-thu, root.edit-fri, root.edit-sat, root.edit-sun);
+                                        root.save-event(root.editing-index, root.edit-name, root.edit-time, root.edit-action-idx, root.edit-target, root.edit-expires, root.edit-mon, root.edit-tue, root.edit-wed, root.edit-thu, root.edit-fri, root.edit-sat, root.edit-sun);
                                     }
                                 }
                                 Text {

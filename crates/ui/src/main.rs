@@ -139,16 +139,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|v| v.is_empty())
         .unwrap_or(false)
     {
-        let _ = scheduler
-            .borrow()
-            .create("Midnight generate", "generate", "Day", "00:00", "Daily");
-        let _ = scheduler
-            .borrow()
-            .create("Morning show", "load", "Morning.m3u", "08:00", "Daily");
-        let _ =
-            scheduler
-                .borrow()
-                .create("Top-of-hour jingle", "play", "toth.mp3", "09:00", "Daily");
+        let _ = scheduler.borrow().create(
+            "Midnight generate",
+            "generate",
+            "Day",
+            "00:00",
+            "Daily",
+            None,
+        );
+        let _ = scheduler.borrow().create(
+            "Morning show",
+            "load",
+            "Morning.m3u",
+            "08:00",
+            "Daily",
+            None,
+        );
+        let _ = scheduler.borrow().create(
+            "Top-of-hour jingle",
+            "play",
+            "toth.mp3",
+            "09:00",
+            "Daily",
+            None,
+        );
         tracing::info!("Seeded starter scheduler events");
     }
 
@@ -415,20 +429,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // -- Scheduler: push events to UI --
+    // -- Scheduler: push events + expiry warnings to UI --
     fn refresh_scheduler(ui: &MainWindow, scheduler: &crabcore::scheduler::SchedulerManager) {
-        use crabcore::scheduler::mask_from_days;
+        use crabcore::scheduler::{mask_from_days, ExpiryStatus};
         let events = scheduler.list_all().unwrap_or_default();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let rows: Vec<SchedRow> = events
             .iter()
             .map(|e| {
                 let mask = mask_from_days(&e.days);
+                // Row badge: expiring within a week, last day, or expired.
+                let (valid, state) = match e.expiry_status(&today) {
+                    ExpiryStatus::Expired => ("⚠ expired".to_string(), 3),
+                    ExpiryStatus::ExpiresToday => ("⚠ last day".to_string(), 2),
+                    ExpiryStatus::Active(n) if n <= 7 => (format!("⏳ {}d", n), 1),
+                    _ => (String::new(), 0),
+                };
                 SchedRow {
                     name: e.name.clone().into(),
                     time: e.start_time.clone().into(),
                     action: e.action_type.clone().into(),
                     target: e.target.clone().into(),
                     days: e.days.clone().into(),
+                    valid: valid.into(),
+                    valid_full: e.expires_on.clone().unwrap_or_default().into(),
+                    exp_state: state,
                     enabled: e.enabled,
                     mon: mask & 1 != 0,
                     tue: mask & 2 != 0,
@@ -443,6 +468,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let model = Rc::new(slint::VecModel::from(rows));
         ui.set_scheduler_events(model.into());
         ui.set_upcoming_count(events.iter().filter(|e| e.enabled).count() as i32);
+        let warns = scheduler.expiry_warnings(&today, 3).unwrap_or_default();
+        let warn_model = Rc::new(slint::VecModel::from(
+            warns
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<slint::SharedString>>(),
+        ));
+        ui.set_scheduler_warnings(warn_model.into());
     }
     ui.set_scheduler_enabled(true);
     ui.set_scheduler_show_editor(false);
@@ -614,7 +647,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui_weak = ui.as_weak();
         let scheduler = scheduler.clone();
         ui.on_scheduler_save_event(
-            move |idx, name, time, action_idx, target, mon, tue, wed, thu, fri, sat, sun| {
+            move |idx,
+                  name,
+                  time,
+                  action_idx,
+                  target,
+                  expires,
+                  mon,
+                  tue,
+                  wed,
+                  thu,
+                  fri,
+                  sat,
+                  sun| {
                 use crabcore::scheduler::days_from_mask;
                 let action = match action_idx {
                     0 => "play",
@@ -646,10 +691,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     mask |= 64;
                 }
                 let days = days_from_mask(mask);
+                let expires_str = expires.to_string();
                 let res = if idx < 0 {
                     scheduler
                         .borrow()
-                        .create(name.trim(), action, target.trim(), time.trim(), &days)
+                        .create(
+                            name.trim(),
+                            action,
+                            target.trim(),
+                            time.trim(),
+                            &days,
+                            Some(expires_str.trim()),
+                        )
                         .map(|_| ())
                 } else {
                     let ids: Vec<String> = scheduler
@@ -667,6 +720,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             target.trim(),
                             time.trim(),
                             &days,
+                            Some(expires_str.trim()),
                         ),
                         None => Err(crabcore::CrabError::Scheduler("event gone".into())),
                     }
@@ -1028,9 +1082,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let hhmm = now.format("%H:%M").to_string();
                 let weekday = now.format("%a").to_string();
                 let minute_key = now.format("%Y-%m-%d %H:%M").to_string();
+                let today = now.format("%Y-%m-%d").to_string();
                 let due = scheduler
                     .borrow()
-                    .due_events(&hhmm, &weekday)
+                    .due_events(&today, &hhmm, &weekday)
                     .unwrap_or_default();
                 let mut fired = fired.borrow_mut();
                 for event in due {

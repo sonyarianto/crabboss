@@ -67,6 +67,7 @@ export component MainWindow inherits Window {
     in-out property <[SchedRow]> scheduler-events;
     in-out property <bool> scheduler-show-editor: false;
     in-out property <string> scheduler-error: "";
+    in-out property <[string]> scheduler-warnings;
 
     // -- Cart Wall state --
     in-out property <[CartRow]> cart-items;
@@ -152,7 +153,7 @@ export component MainWindow inherits Window {
     callback scheduler-toggle-event(int);
     callback scheduler-delete-event(int);
     callback scheduler-run-event(int);
-    callback scheduler-save-event(int, string, string, int, string, bool, bool, bool, bool, bool, bool, bool);
+    callback scheduler-save-event(int, string, string, int, string, string, bool, bool, bool, bool, bool, bool, bool);
 
     // -- Cart Wall callbacks --
     callback cart-play(int);
@@ -441,13 +442,14 @@ export component MainWindow inherits Window {
             events: root.scheduler-events;
             show-editor <=> root.scheduler-show-editor;
             editor-error <=> root.scheduler-error;
+            warnings: root.scheduler-warnings;
 
             scheduler-toggled(en) => { root.scheduler-toggled(en); }
             toggle-event(idx) => { root.scheduler-toggle-event(idx); }
             delete-event(idx) => { root.scheduler-delete-event(idx); }
             run-event(idx) => { root.scheduler-run-event(idx); }
-            save-event(idx, name, time, action-idx, target, mon, tue, wed, thu, fri, sat, sun) => {
-                root.scheduler-save-event(idx, name, time, action-idx, target, mon, tue, wed, thu, fri, sat, sun);
+            save-event(idx, name, time, action-idx, target, expires, mon, tue, wed, thu, fri, sat, sun) => {
+                root.scheduler-save-event(idx, name, time, action-idx, target, expires, mon, tue, wed, thu, fri, sat, sun);
             }
         }
 

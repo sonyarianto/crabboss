@@ -8,5 +8,6 @@
 mod manager;
 
 pub use manager::{
-    days_from_mask, mask_from_days, validate_hhmm, ScheduledEvent, SchedulerManager,
+    days_from_mask, mask_from_days, parse_expires, validate_hhmm, ExpiryStatus, ScheduledEvent,
+    SchedulerManager,
 };
