@@ -11,7 +11,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 slint::include_modules!();
 
-use crabcore::audio::Engine;
+use crabcore::audio::{Engine, EQ_BAND_COUNT};
 use crabcore::library::TrackKind;
 
 /// Application state shared between UI callbacks
@@ -95,6 +95,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Apply persisted DSP prefs live (no-ops on backends without support).
     player.set_crossfade_secs(settings.borrow().crossfade_secs);
     player.set_silence_threshold_secs(settings.borrow().silence_threshold_secs);
+    player.set_eq_enabled(settings.borrow().eq_enabled);
+    for (band, gain) in settings.borrow().eq_gains_db.iter().enumerate() {
+        player.set_eq_band(band, *gain);
+    }
+    player.set_limiter_ceiling(settings.borrow().limiter_ceiling);
 
     // Initialize library (create db in current dir)
     let db_path = std::env::current_dir()
@@ -1239,6 +1244,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fn settings_labels(ui: &MainWindow, settings: &crabcore::settings::AppSettings) {
         ui.set_settings_xfade(format!("{:.1} s", settings.crossfade_secs).into());
         ui.set_settings_silence(format!("{:.0} s", settings.silence_threshold_secs).into());
+        ui.set_settings_eq_on(settings.eq_enabled);
+        ui.set_settings_eq_gains(
+            settings
+                .eq_gains_db
+                .map(|g| format!("{g:+.0}").into())
+                .into(),
+        );
+        ui.set_settings_limiter(
+            format!("{:.1} dBFS", lin_to_dbfs(settings.limiter_ceiling)).into(),
+        );
+    }
+    fn lin_to_dbfs(lin: f32) -> f32 {
+        20.0 * lin.max(0.001).log10()
     }
     push_devices(&ui);
     ui.set_settings_device(
@@ -1337,6 +1355,110 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .borrow()
                 .player
                 .set_silence_threshold_secs(s.silence_threshold_secs);
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &s);
+            }
+        });
+    }
+
+    // EQ + limiter (cpal engine DSP): one toggle, band nudges in a loop,
+    // limiter ceiling stepper — persist, apply live, relabel.
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_eq_toggle(move || {
+            let mut s = settings.borrow_mut();
+            s.eq_enabled = !s.eq_enabled;
+            let _ = s.save(&settings_path);
+            state.borrow().player.set_eq_enabled(s.eq_enabled);
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &settings.borrow());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_eq_inc(move |band| {
+            let band = band as usize;
+            if band >= EQ_BAND_COUNT {
+                return;
+            }
+            let mut s = settings.borrow_mut();
+            s.eq_gains_db[band] = (s.eq_gains_db[band] + 1.0).clamp(-12.0, 12.0);
+            let _ = s.save(&settings_path);
+            state.borrow().player.set_eq_band(band, s.eq_gains_db[band]);
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &s);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_eq_dec(move |band| {
+            let band = band as usize;
+            if band >= EQ_BAND_COUNT {
+                return;
+            }
+            let mut s = settings.borrow_mut();
+            s.eq_gains_db[band] = (s.eq_gains_db[band] - 1.0).clamp(-12.0, 12.0);
+            let _ = s.save(&settings_path);
+            state.borrow().player.set_eq_band(band, s.eq_gains_db[band]);
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &s);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_eq_reset(move || {
+            let mut s = settings.borrow_mut();
+            s.eq_gains_db = [0.0; EQ_BAND_COUNT];
+            let _ = s.save(&settings_path);
+            for (band, gain) in s.eq_gains_db.iter().enumerate() {
+                state.borrow().player.set_eq_band(band, *gain);
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &s);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_limiter_inc(move || {
+            let mut s = settings.borrow_mut();
+            s.limiter_ceiling = (s.limiter_ceiling * 1.122).clamp(0.1, 1.0);
+            let _ = s.save(&settings_path);
+            state.borrow().player.set_limiter_ceiling(s.limiter_ceiling);
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &s);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_limiter_dec(move || {
+            let mut s = settings.borrow_mut();
+            s.limiter_ceiling = (s.limiter_ceiling / 1.122).clamp(0.1, 1.0);
+            let _ = s.save(&settings_path);
+            state.borrow().player.set_limiter_ceiling(s.limiter_ceiling);
             if let Some(ui) = ui_weak.upgrade() {
                 settings_labels(&ui, &s);
             }

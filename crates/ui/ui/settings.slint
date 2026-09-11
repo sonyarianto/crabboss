@@ -136,6 +136,63 @@ component Stepper inherits Rectangle {
     }
 }
 
+component EqBandControl inherits VerticalLayout {
+    in property <int> band;
+    in property <string> freq;
+    in property <string> gain;
+    callback inc;
+    callback dec;
+
+    spacing: 2px;
+
+    Text {
+        text: root.freq;
+        color: Theme.text-dim;
+        font-size: 9px;
+        horizontal-alignment: center;
+    }
+
+    Rectangle {
+        width: 30px;
+        height: 22px;
+        border-radius: 5px;
+        background: Theme.bg-panel;
+        TouchArea { clicked => { root.dec(); } }
+        Text {
+            text: "−";
+            color: Theme.accent;
+            font-size: 13px;
+            font-weight: 800;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    Text {
+        text: root.gain;
+        color: root.gain == "+0" ? Theme.text-dim : Theme.text-primary;
+        font-size: 11px;
+        font-weight: 700;
+        horizontal-alignment: center;
+    }
+
+    Rectangle {
+        width: 30px;
+        height: 22px;
+        border-radius: 5px;
+        background: Theme.bg-panel;
+        TouchArea { clicked => { root.inc(); } }
+        Text {
+            text: "+";
+            color: Theme.accent;
+            font-size: 13px;
+            font-weight: 800;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
 export component SettingsScreen inherits Rectangle {
     in property <string> license-status: "Unlicensed";
     in property <string> license-error: "";
@@ -146,6 +203,9 @@ export component SettingsScreen inherits Rectangle {
     in-out property <string> device-note: "";
     in-out property <string> xfade-label: "3.0 s";
     in-out property <string> silence-label: "10 s";
+    in-out property <bool> eq-on: false;
+    in-out property <[string]> eq-gains;
+    in-out property <string> limiter-label: "-0.1 dBFS";
 
     callback activate-license(string);
     callback clear-license;
@@ -155,6 +215,12 @@ export component SettingsScreen inherits Rectangle {
     callback xfade-dec;
     callback silence-inc;
     callback silence-dec;
+    callback eq-toggle;
+    callback eq-inc(int);
+    callback eq-dec(int);
+    callback eq-reset;
+    callback limiter-inc;
+    callback limiter-dec;
 
     background: Theme.bg-primary;
 
@@ -366,6 +432,94 @@ export component SettingsScreen inherits Rectangle {
                         hint: "Dead-air seconds before auto-recovery (cpal engine only)";
                         inc => { root.silence-inc(); }
                         dec => { root.silence-dec(); }
+                    }
+                }
+            }
+
+            // --- DSP (EQ + limiter, cpal engine) ---
+            Rectangle {
+                background: Theme.bg-secondary;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: "🎚 DSP";
+                            color: Theme.text-primary;
+                            font-size: 15px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Rectangle {
+                            width: 90px;
+                            height: 26px;
+                            border-radius: 6px;
+                            background: root.eq-on ? Theme.accent : Theme.bg-panel;
+                            TouchArea { clicked => { root.eq-toggle(); } }
+                            Text {
+                                text: root.eq-on ? "EQ ON" : "EQ OFF";
+                                color: root.eq-on ? white : Theme.text-dim;
+                                font-size: 11px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Rectangle {
+                            width: 70px;
+                            height: 26px;
+                            border-radius: 6px;
+                            background: Theme.bg-panel;
+                            TouchArea { clicked => { root.eq-reset(); } }
+                            Text {
+                                text: "Flat";
+                                color: Theme.accent;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "12-band program EQ (cpal engine) — ±12 dB per band";
+                        color: Theme.text-dim;
+                        font-size: 10px;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        for i in [0, 1, 2, 3, 4, 5]: EqBandControl {
+                            freq: ["31", "44", "62", "125", "250", "500"][i];
+                            gain: i < root.eq-gains.length ? root.eq-gains[i] : "+0";
+                            inc => { root.eq-inc(i); }
+                            dec => { root.eq-dec(i); }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        for i in [6, 7, 8, 9, 10, 11]: EqBandControl {
+                            freq: ["1k", "2k", "3.2k", "4k", "8k", "16k"][i - 6];
+                            gain: i < root.eq-gains.length ? root.eq-gains[i] : "+0";
+                            inc => { root.eq-inc(i); }
+                            dec => { root.eq-dec(i); }
+                        }
+                    }
+
+                    Stepper {
+                        label: "Limiter ceiling";
+                        value: root.limiter-label;
+                        hint: "Program-bus brickwall (cpal engine); lower = more protection";
+                        inc => { root.limiter-inc(); }
+                        dec => { root.limiter-dec(); }
                     }
                 }
             }

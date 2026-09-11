@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crate::audio::mixer::EQ_BAND_COUNT;
 use crate::audio::player::{PlayerState, TrackInfo};
 use crate::error::Result;
 
@@ -42,6 +43,27 @@ pub trait Engine {
     fn set_silence_threshold_secs(&self, _secs: f32) {}
     /// Blend length for crossfades / queued takeovers.
     fn set_crossfade_secs(&self, _secs: f32) {}
+    /// Enable the program EQ insert (12-band). No-op on backends without DSP.
+    fn set_eq_enabled(&self, _on: bool) {}
+    /// True when the EQ insert is active.
+    fn eq_enabled(&self) -> bool {
+        false
+    }
+    /// Set one EQ band's gain in dB (±12). No-op on backends without DSP.
+    fn set_eq_band(&self, _band: usize, _gain_db: f32) {}
+    /// Current EQ band gains in dB (index order = [`EQ_CENTER_HZ`]).
+    fn eq_bands(&self) -> [f32; EQ_BAND_COUNT] {
+        [0.0; EQ_BAND_COUNT]
+    }
+    /// Limiter ceiling (linear 0.1..1.0) on the program bus.
+    fn set_limiter_ceiling(&self, _ceiling: f32) {}
+    fn limiter_ceiling(&self) -> f32 {
+        0.99
+    }
+    /// Live limiter gain reduction in dB (negative when working; UI meter).
+    fn limiter_reduction_db(&self) -> f32 {
+        0.0
+    }
     /// Seconds into the current track (`0.0` when nothing is playing).
     fn position_secs(&self) -> f64 {
         0.0

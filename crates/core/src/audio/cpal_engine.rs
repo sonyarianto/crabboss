@@ -1,8 +1,9 @@
 //! cpal-backed engine (ROADMAP: rodio → cpal).
 //!
 //! Status: stereo symphonia decode → rubato resample to device rate →
-//! dual-cursor equal-power/linear crossfade through `Mixer` in the callback.
-//! TODO: EQ insert, mic input, Icecast tee.
+//! dual-cursor equal-power/linear crossfade through `Mixer` in the callback,
+//! with 12-band EQ insert and limiter on the program bus.
+//! TODO: mic input, Icecast tee.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -11,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::audio::engine::Engine;
-use crate::audio::mixer::{Frame, Mixer};
+use crate::audio::mixer::{Frame, Mixer, EQ_BAND_COUNT};
 use crate::audio::player::{PlayerState, TrackInfo};
 use crate::audio::silence::SilenceMonitor;
 use crate::error::{CrabError, Result};
@@ -181,6 +182,8 @@ impl CpalEngine {
             Ok((s, rate, name)) => {
                 tracing::info!("CpalEngine: output '{}' @ {} Hz", name, rate);
                 *silence.lock().unwrap() = SilenceMonitor::new(rate, 10.0);
+                mixer.lock().unwrap().set_eq_rate(rate);
+                mixer.lock().unwrap().limiter.reset();
                 (Some(s), rate, name)
             }
             Err(e) => {
@@ -304,7 +307,7 @@ impl CpalEngine {
                 &stream_config,
                 move |data: &mut [f32], _| {
                     let vol = *volume.lock().unwrap();
-                    let mx = mixer.lock().unwrap();
+                    let mut mx = mixer.lock().unwrap();
                     let mut xf = xfade.lock().unwrap();
                     let mut sil = silence.lock().unwrap();
                     let playing = *state.lock().unwrap() == PlayerState::Playing;
@@ -501,6 +504,34 @@ impl Engine for CpalEngine {
 
     fn set_crossfade_secs(&self, secs: f32) {
         *self.crossfade_secs.lock().unwrap() = secs.clamp(0.0, 30.0);
+    }
+
+    fn set_eq_enabled(&self, on: bool) {
+        self.mixer.lock().unwrap().set_eq_enabled(on);
+    }
+
+    fn eq_enabled(&self) -> bool {
+        self.mixer.lock().unwrap().eq_enabled()
+    }
+
+    fn set_eq_band(&self, band: usize, gain_db: f32) {
+        self.mixer.lock().unwrap().set_eq_band(band, gain_db);
+    }
+
+    fn eq_bands(&self) -> [f32; EQ_BAND_COUNT] {
+        self.mixer.lock().unwrap().eq.bands().map(|b| b.gain_db)
+    }
+
+    fn set_limiter_ceiling(&self, ceiling: f32) {
+        self.mixer.lock().unwrap().set_ceiling(ceiling);
+    }
+
+    fn limiter_ceiling(&self) -> f32 {
+        self.mixer.lock().unwrap().limiter.ceiling()
+    }
+
+    fn limiter_reduction_db(&self) -> f32 {
+        self.mixer.lock().unwrap().limiter_reduction_db()
     }
 }
 

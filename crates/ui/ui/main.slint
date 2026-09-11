@@ -92,6 +92,9 @@ export component MainWindow inherits Window {
     in-out property <string> settings-device-note: "";
     in-out property <string> settings-xfade: "3.0 s";
     in-out property <string> settings-silence: "10 s";
+    in-out property <bool> settings-eq-on: false;
+    in-out property <[string]> settings-eq-gains;
+    in-out property <string> settings-limiter: "-0.1 dBFS";
 
     // -- Nav --
     callback navigate(int);
@@ -128,6 +131,12 @@ export component MainWindow inherits Window {
     callback settings-xfade-dec;
     callback settings-silence-inc;
     callback settings-silence-dec;
+    callback settings-eq-toggle;
+    callback settings-eq-inc(int);
+    callback settings-eq-dec(int);
+    callback settings-eq-reset;
+    callback settings-limiter-inc;
+    callback settings-limiter-dec;
 
     // -- Scheduler callbacks --
     callback scheduler-toggled(bool);
@@ -397,6 +406,15 @@ export component MainWindow inherits Window {
             xfade-dec => { root.settings-xfade-dec(); }
             silence-inc => { root.settings-silence-inc(); }
             silence-dec => { root.settings-silence-dec(); }
+            eq-on <=> root.settings-eq-on;
+            eq-gains: root.settings-eq-gains;
+            limiter-label <=> root.settings-limiter;
+            eq-toggle => { root.settings-eq-toggle(); }
+            eq-inc(i) => { root.settings-eq-inc(i); }
+            eq-dec(i) => { root.settings-eq-dec(i); }
+            eq-reset => { root.settings-eq-reset(); }
+            limiter-inc => { root.settings-limiter-inc(); }
+            limiter-dec => { root.settings-limiter-dec(); }
         }
 
         // -- Scheduler --

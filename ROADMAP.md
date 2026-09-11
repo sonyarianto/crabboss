@@ -49,7 +49,7 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [x] Track kinds (music/jingle/ad): auto-classify on import, `set_kind`, pre-kind DB migration
 - [x] Cart Wall MVP: 8 pads, instant play, jingle-first seeding/loading with kind badges
 - [ ] Crossfader + gapless (see §1.1 — full scope below)
-- [ ] 12-band EQ + limiter (see §1.1)
+- [x] 12-band EQ + limiter (see §1.1)
 - [x] Playlist auto-generator with rotation rules (engine done: repeat/separation/priority/daypart/jingles; UI presets open)
 - [x] Auto-DJ continuity: 1 s tick with live progress, prefetch handoff
       (cpal, 8 s horizon), EOF restart, Next/Prev, persisted ON/OFF + Up-next
@@ -68,7 +68,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Area | RadioBOSS has | CrabBoss today | Status |
 |---|---|---|---|
 | Playback engine | Gapless, sample-accurate crossfade, curve choice | `Mixer` DSP exists, not wired to two cursors; mono-only `CpalEngine` | 🟡 |
-| EQ / dynamics | Full EQ, limiter, loudness normalization | Unchecked | ❌ |
+| EQ / dynamics | Full EQ, limiter, loudness normalization | 12-band peaking EQ (±12 dB) + brickwall limiter wired in cpal `Mixer`; loudness normalization open | 🟡 |
 | Playlist generator | Rotation, no-repeat, separation, playcount priority, dayparting, multi-playlist UI | Checkbox only (+ kind-aware counting) | ❌ |
 | Ad scheduler | Dated blocks, intros/outros, color-coded list | Unchecked | ❌ |
 | Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP done | ✅ + depth TODO (§1.3) |
@@ -96,7 +96,9 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] `CpalEngine`: dual-cursor playback — `play()` while playing crossfades instead of cutting
 - [x] Configurable crossfade curve (`CrossfadeCurve::EqualPower` default / `Linear`)
 - [x] `rubato` sinc resampling to device rate at decode time
-- [ ] 12-band EQ insert (biquad chain) + limiter tuning
+- [x] 12-band EQ insert (RBJ peaking biquad chain, ±12 dB, per-band
+      Settings steppers, persisted + live-applied, cpal-only) + limiter
+      (per-frame brickwall attack with metered release, ceiling stepper in dBFS)
 - [ ] Loudness normalization (ReplayGain-style)
 - [ ] Wire `library.search()` results into the Slint model (currently a no-op) — ✅ done (live list + search filter + tap-to-play)
 
