@@ -32,9 +32,12 @@ const STATE_CONNECTING: u8 = 1;
 const STATE_LIVE: u8 = 2;
 const STATE_ERROR: u8 = 3;
 
-/// Bounded reconnect policy after connect/send failures.
+/// Bounded reconnect policy after connect/send failures. The first delays
+/// are deliberately roomy: a dropped attempt can leave a half-open
+/// connection holding the mount server-side for a few seconds, and an
+/// instant retry would just collect a 409 "in use" for our own zombie.
 const MAX_RECONNECTS: u32 = 5;
-const RETRY_DELAYS_SECS: [u64; 5] = [1, 2, 5, 10, 20];
+const RETRY_DELAYS_SECS: [u64; 5] = [2, 5, 10, 20, 30];
 
 /// Producer side of the tap: the audio callback calls [`StreamTap::push`]
 /// with post-DSP interleaved stereo frames. Never blocks; on overflow the

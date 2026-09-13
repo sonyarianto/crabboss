@@ -16,7 +16,11 @@ use crate::error::{CrabError, Result};
 use crate::stream::StreamConfig;
 
 /// How long to wait for the server during connect + handshake.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+/// Generous on purpose: post-auth source setup can stall behind slow
+/// server-side auth hooks or event handlers, and giving up too early
+/// leaves a half-open connection holding the mount (the next attempt
+/// then eats a 409 "in use" for our own zombie).
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// An established source connection to an Icecast server.
 #[derive(Debug)]
