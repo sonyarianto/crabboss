@@ -77,6 +77,30 @@ pub trait Engine {
     fn loudness_enabled(&self) -> bool {
         false
     }
+    /// Install the streaming (Icecast) config; applied on next start.
+    fn set_stream_config(&mut self, _config: crate::stream::StreamConfig) {}
+    /// Current streaming config.
+    fn stream_config(&self) -> crate::stream::StreamConfig {
+        crate::stream::StreamConfig::default()
+    }
+    /// Start streaming (encode the program bus + push to the server).
+    /// Errors surface via [`Engine::stream_state`], not here, since the
+    /// connection happens on the sender thread.
+    fn stream_start(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Stop streaming.
+    fn stream_stop(&mut self) {}
+    /// Live streaming state (Off/Connecting/Live/Error).
+    fn stream_state(&self) -> crate::stream::StreamState {
+        crate::stream::StreamState::Off
+    }
+    /// Counters since this stream run started.
+    fn stream_stats(&self) -> crate::stream::StreamStats {
+        crate::stream::StreamStats::default()
+    }
+    /// Queue a now-playing metadata update for the stream.
+    fn set_stream_title(&self, _title: &str) {}
     /// Seconds into the current track (`0.0` when nothing is playing).
     fn position_secs(&self) -> f64 {
         0.0

@@ -146,6 +146,9 @@ pub struct CpalEngine {
     /// Loudness normalization: enabled flag + per-path gain lookup (dB).
     loudness_lookup: Option<crate::audio::engine::LoudnessLookup>,
     loudness_enabled: std::cell::Cell<bool>,
+    /// Icecast streaming: manager + live tap for the audio callback.
+    stream: Arc<Mutex<crate::stream::StreamManager>>,
+    stream_tap: Arc<Mutex<Option<crate::stream::StreamTap>>>,
 }
 
 impl CpalEngine {
@@ -174,6 +177,7 @@ impl CpalEngine {
         let volume = Arc::new(Mutex::new(1.0));
         let mixer = Arc::new(Mutex::new(Mixer::default()));
         let silence = Arc::new(Mutex::new(SilenceMonitor::new(48000, 10.0)));
+        let stream_tap: Arc<Mutex<Option<crate::stream::StreamTap>>> = Arc::new(Mutex::new(None));
 
         let (stream, device_rate, device_name) = match Self::open_silent_stream(
             xfade.clone(),
@@ -181,6 +185,7 @@ impl CpalEngine {
             volume.clone(),
             mixer.clone(),
             silence.clone(),
+            stream_tap.clone(),
             want,
         ) {
             Ok((s, rate, name)) => {
@@ -209,6 +214,10 @@ impl CpalEngine {
             mixer,
             loudness_lookup: None,
             loudness_enabled: std::cell::Cell::new(false),
+            stream: Arc::new(Mutex::new(crate::stream::StreamManager::new(
+                crate::stream::StreamConfig::default(),
+            ))),
+            stream_tap: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -302,6 +311,7 @@ impl CpalEngine {
         volume: Arc<Mutex<f32>>,
         mixer: Arc<Mutex<Mixer>>,
         silence: Arc<Mutex<SilenceMonitor>>,
+        stream_tap: Arc<Mutex<Option<crate::stream::StreamTap>>>,
         want: Option<String>,
     ) -> std::result::Result<(cpal::Stream, u32, String), String> {
         let host = cpal::default_host();
@@ -335,16 +345,35 @@ impl CpalEngine {
                     let mut xf = xfade.lock().unwrap();
                     let mut sil = silence.lock().unwrap();
                     let playing = *state.lock().unwrap() == PlayerState::Playing;
+                    // Program-bus tap (streaming): cloned once per callback.
+                    let tap = stream_tap.lock().unwrap().clone();
+                    let mut tap_buf = [0.0f32; 8192];
+                    let mut tap_n = 0usize;
 
                     for frame in data.chunks_mut(channels) {
                         let req = if playing { xf.pull() } else { None };
                         let (l, r) = match req {
                             Some((a, b, x)) => {
                                 let f = mx.process_x(Some(a), b, x);
-                                (f.l * vol, f.r * vol)
+                                (f.l, f.r)
                             }
                             None => (0.0, 0.0),
                         };
+                        // Tap post-DSP, pre-monitor-volume: the broadcast
+                        // feed carries full program level regardless of the
+                        // operator's local listening volume.
+                        if tap.is_some() {
+                            if tap_n + 2 > tap_buf.len() {
+                                if let Some(t) = &tap {
+                                    t.push(&tap_buf[..tap_n]);
+                                }
+                                tap_n = 0;
+                            }
+                            tap_buf[tap_n] = l;
+                            tap_buf[tap_n + 1] = r;
+                            tap_n += 2;
+                        }
+                        let (l, r) = (l * vol, r * vol);
                         sil.push_frame(playing, l, r);
                         if channels == 1 {
                             frame[0] = (l + r) * 0.5;
@@ -357,6 +386,10 @@ impl CpalEngine {
                                 *s = 0.0;
                             }
                         }
+                    }
+                    // Flush the tap buffer for this callback invocation.
+                    if let Some(t) = &tap {
+                        t.push(&tap_buf[..tap_n]);
                     }
                     // Auto-stop at EOF.
                     if playing && xf.is_done() {
@@ -568,6 +601,37 @@ impl Engine for CpalEngine {
 
     fn loudness_enabled(&self) -> bool {
         self.loudness_enabled.get()
+    }
+
+    fn set_stream_config(&mut self, config: crate::stream::StreamConfig) {
+        self.stream.lock().unwrap().set_config(config);
+    }
+
+    fn stream_config(&self) -> crate::stream::StreamConfig {
+        self.stream.lock().unwrap().config()
+    }
+
+    fn stream_start(&mut self) -> Result<()> {
+        let tap = self.stream.lock().unwrap().start(self.device_rate);
+        *self.stream_tap.lock().unwrap() = tap;
+        Ok(())
+    }
+
+    fn stream_stop(&mut self) {
+        self.stream.lock().unwrap().stop();
+        *self.stream_tap.lock().unwrap() = None;
+    }
+
+    fn stream_state(&self) -> crate::stream::StreamState {
+        self.stream.lock().unwrap().state()
+    }
+
+    fn stream_stats(&self) -> crate::stream::StreamStats {
+        self.stream.lock().unwrap().stats()
+    }
+
+    fn set_stream_title(&self, title: &str) {
+        self.stream.lock().unwrap().set_title(title);
     }
 }
 

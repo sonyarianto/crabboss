@@ -103,6 +103,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     player.set_limiter_ceiling(settings.borrow().limiter_ceiling);
     player.set_loudness_enabled(settings.borrow().loudness_norm);
+    // Streaming (Icecast): install config; auto-start when enabled.
+    player.set_stream_config(settings.borrow().stream.clone());
+    if settings.borrow().stream.enabled && engine_name == "cpal" {
+        if let Err(e) = player.stream_start() {
+            tracing::warn!("Stream auto-start failed: {e}");
+        }
+    }
 
     // Initialize library (create db in current dir)
     let db_path = std::env::current_dir()
@@ -1488,6 +1495,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fn lin_to_dbfs(lin: f32) -> f32 {
         20.0 * lin.max(0.001).log10()
     }
+    fn stream_labels(ui: &MainWindow, player: &dyn crabcore::audio::Engine) {
+        let cfg = player.stream_config();
+        let state = player.stream_state();
+        ui.set_settings_stream_enabled(cfg.enabled);
+        ui.set_settings_stream_status(state.label().into());
+        let stats = player.stream_stats();
+        ui.set_settings_stream_stats(if state.is_live() {
+            format!(
+                "{} · {:.1} MB · {}s",
+                cfg.bitrate_kbps,
+                stats.bytes_sent as f64 / 1_048_576.0,
+                stats.stream_secs
+            )
+            .into()
+        } else {
+            "".into()
+        });
+        ui.set_settings_stream_host(cfg.host.into());
+        ui.set_settings_stream_port(cfg.port.to_string().into());
+        ui.set_settings_stream_mount(cfg.mount.into());
+        // Never echo the stored password back to the input field.
+        ui.set_settings_stream_password(
+            if cfg.password.is_empty() {
+                ""
+            } else {
+                "••••••"
+            }
+            .into(),
+        );
+        ui.set_settings_stream_bitrate(format!("{} kbps", cfg.bitrate_kbps).into());
+    }
     push_devices(&ui);
     ui.set_settings_device(
         settings
@@ -1499,6 +1537,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     ui.set_settings_device_note("".into());
     settings_labels(&ui, &settings.borrow());
+    stream_labels(&ui, state.borrow().player.as_ref());
     {
         let ui_weak = ui.as_weak();
         ui.on_settings_refresh_devices(move || {
@@ -1707,6 +1746,166 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.borrow().player.set_limiter_ceiling(s.limiter_ceiling);
             if let Some(ui) = ui_weak.upgrade() {
                 settings_labels(&ui, &s);
+            }
+        });
+    }
+
+    // -- Streaming (Icecast): toggle, field commits, bitrate stepper --
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_stream_toggle(move || {
+            let mut s = settings.borrow_mut();
+            s.stream.enabled = !s.stream.enabled;
+            let _ = s.save(&settings_path);
+            state
+                .borrow_mut()
+                .player
+                .set_stream_config(s.stream.clone());
+            if s.stream.enabled {
+                if let Err(e) = state.borrow_mut().player.stream_start() {
+                    tracing::warn!("Stream start failed: {e}");
+                }
+            } else {
+                state.borrow_mut().player.stream_stop();
+            }
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                stream_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_stream_host_committed(move |text| {
+            let mut s = settings.borrow_mut();
+            s.stream.host = text.to_string();
+            let _ = s.save(&settings_path);
+            state
+                .borrow_mut()
+                .player
+                .set_stream_config(s.stream.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                stream_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_stream_port_committed(move |text| {
+            let mut s = settings.borrow_mut();
+            s.stream.port = text.to_string().parse().unwrap_or(s.stream.port);
+            let _ = s.save(&settings_path);
+            state
+                .borrow_mut()
+                .player
+                .set_stream_config(s.stream.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                stream_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_stream_mount_committed(move |text| {
+            let mut s = settings.borrow_mut();
+            s.stream.mount = text.to_string();
+            let _ = s.save(&settings_path);
+            state
+                .borrow_mut()
+                .player
+                .set_stream_config(s.stream.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                stream_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_stream_password_committed(move |text| {
+            let mut s = settings.borrow_mut();
+            // The UI shows •••••• as a placeholder; empty input keeps
+            // the stored password (type it again to change it).
+            let t = text.to_string();
+            if t != "••••••" && !t.is_empty() {
+                s.stream.password = t;
+            }
+            let _ = s.save(&settings_path);
+            state
+                .borrow_mut()
+                .player
+                .set_stream_config(s.stream.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                stream_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    fn stream_bitrate_step(current: u32, up: bool) -> u32 {
+        const LADDER: [u32; 16] = [
+            8, 16, 24, 32, 40, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+        ];
+        let idx = LADDER
+            .iter()
+            .position(|&b| b >= current)
+            .unwrap_or(LADDER.len() - 1);
+        match up {
+            true => LADDER[(idx + 1).min(LADDER.len() - 1)],
+            false => LADDER[idx.saturating_sub(1)],
+        }
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_stream_bitrate_inc(move || {
+            let mut s = settings.borrow_mut();
+            s.stream.bitrate_kbps = stream_bitrate_step(s.stream.bitrate_kbps, true);
+            let _ = s.save(&settings_path);
+            state
+                .borrow_mut()
+                .player
+                .set_stream_config(s.stream.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                stream_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_stream_bitrate_dec(move || {
+            let mut s = settings.borrow_mut();
+            s.stream.bitrate_kbps = stream_bitrate_step(s.stream.bitrate_kbps, false);
+            let _ = s.save(&settings_path);
+            state
+                .borrow_mut()
+                .player
+                .set_stream_config(s.stream.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                stream_labels(&ui, state.borrow().player.as_ref());
             }
         });
     }
@@ -1921,6 +2120,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if has_progress || ui.get_cart_had_progress() {
                         refresh_carts(&ui, &carts, &s.library, live);
                         ui.set_cart_had_progress(has_progress);
+                    }
+                }
+                // Streaming status + now-playing metadata (cheap, lock-free).
+                {
+                    let s = state.borrow();
+                    stream_labels(&ui, s.player.as_ref());
+                    if let Some(t) = s.player.current_track() {
+                        let label = t.title.clone().unwrap_or_else(|| {
+                            t.path
+                                .file_name()
+                                .map(|f| f.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        });
+                        s.player.set_stream_title(&label);
                     }
                 }
                 if !ui.get_autodj_enabled() || !*auto_continue.borrow() {

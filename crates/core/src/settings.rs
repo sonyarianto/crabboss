@@ -8,6 +8,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::audio::EQ_BAND_COUNT;
+use crate::stream::StreamConfig;
 
 /// Persisted preferences. Device applies on next launch (stream rebuild);
 /// crossfade + silence threshold also apply live.
@@ -29,6 +30,8 @@ pub struct AppSettings {
     /// ReplayGain-style loudness normalization (per-track gain toward
     /// R128 target, applied at decode time from library analysis).
     pub loudness_norm: bool,
+    /// Icecast/Shoutcast streaming (§1.5): server, mount, encoder.
+    pub stream: StreamConfig,
 }
 
 impl Default for AppSettings {
@@ -42,6 +45,7 @@ impl Default for AppSettings {
             eq_gains_db: [0.0; EQ_BAND_COUNT],
             limiter_ceiling: 0.99,
             loudness_norm: true,
+            stream: StreamConfig::default(),
         }
     }
 }
@@ -83,6 +87,15 @@ mod tests {
             eq_gains_db: [0.0, 1.5, 3.0, 0.0, 0.0, 0.0, -2.0, 0.0, 0.0, 0.0, 4.0, 0.0],
             limiter_ceiling: 0.9,
             loudness_norm: false,
+            stream: StreamConfig {
+                enabled: true,
+                host: "cast.example.com".into(),
+                port: 8443,
+                mount: "/live".into(),
+                password: "pw".into(),
+                bitrate_kbps: 192,
+                ..Default::default()
+            },
         };
         s.save(&path).unwrap();
         let back = AppSettings::load(&path);
@@ -97,6 +110,11 @@ mod tests {
         assert_eq!(back.eq_gains_db[10], 4.0);
         assert!((back.limiter_ceiling - 0.9).abs() < 1e-6);
         assert!(!back.loudness_norm);
+        assert!(back.stream.enabled);
+        assert_eq!(back.stream.host, "cast.example.com");
+        assert_eq!(back.stream.port, 8443);
+        assert_eq!(back.stream.mount, "/live");
+        assert_eq!(back.stream.bitrate_kbps, 192);
         std::fs::remove_file(&path).ok();
     }
 

@@ -29,5 +29,9 @@ lofty = "0.21"
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Streaming (Icecast source client, ROADMAP §1.5)
+mp3lame-encoder = { workspace = true }
+base64 = { workspace = true }
+
 # Async file scanning
 walkdir = "2"

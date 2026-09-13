@@ -207,7 +207,22 @@ export component SettingsScreen inherits Rectangle {
     in-out property <[string]> eq-gains;
     in-out property <string> limiter-label: "-0.1 dBFS";
     in-out property <bool> loudness-on: false;
+    in-out property <string> stream-status: "⏸ Off";
+    in-out property <string> stream-stats: "";
+    in-out property <bool> stream-enabled: false;
+    in-out property <string> stream-host: "127.0.0.1";
+    in-out property <string> stream-port: "8000";
+    in-out property <string> stream-mount: "/stream";
+    in-out property <string> stream-password: "";
+    in-out property <string> stream-bitrate: "128 kbps";
 
+    callback stream-toggle;
+    callback stream-host-committed(string);
+    callback stream-port-committed(string);
+    callback stream-mount-committed(string);
+    callback stream-password-committed(string);
+    callback stream-bitrate-inc;
+    callback stream-bitrate-dec;
     callback activate-license(string);
     callback clear-license;
     callback select-device(string);
@@ -555,6 +570,210 @@ export component SettingsScreen inherits Rectangle {
                         color: Theme.text-dim;
                         font-size: 10px;
                         wrap: word-wrap;
+                    }
+                }
+            }
+
+            // --- Streaming (Icecast, cpal engine) ---
+            Rectangle {
+                background: Theme.bg-secondary;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: "📡 Streaming";
+                            color: Theme.text-primary;
+                            font-size: 15px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Rectangle {
+                            width: 110px;
+                            height: 26px;
+                            border-radius: 6px;
+                            background: root.stream-enabled ? Theme.accent : Theme.bg-panel;
+                            TouchArea { clicked => { root.stream-toggle(); } }
+                            Text {
+                                text: root.stream-enabled ? "STREAM ON" : "STREAM OFF";
+                                color: root.stream-enabled ? white : Theme.text-dim;
+                                font-size: 11px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: root.stream-status;
+                            color: root.stream-status == "🔴 Live" ? #4caf50 : Theme.text-secondary;
+                            font-size: 12px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.stream-stats;
+                            color: Theme.text-dim;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: "Broadcast the program mix to an Icecast server (MP3). Server + bitrate changes apply on restart of the stream.";
+                        color: Theme.text-dim;
+                        font-size: 10px;
+                        wrap: word-wrap;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        // Host
+                        Rectangle {
+                            horizontal-stretch: 2;
+                            height: 34px;
+                            border-radius: 6px;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                stream-host-input := TextInput {
+                                    text: root.stream-host;
+                                    color: Theme.text-primary;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    // Commit on Enter or focus loss via accepted.
+                                    accepted() => { root.stream-host-committed(stream-host-input.text); }
+                                }
+                            }
+                        }
+                        // Port
+                        Rectangle {
+                            width: 76px;
+                            height: 34px;
+                            border-radius: 6px;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                stream-port-input := TextInput {
+                                    text: root.stream-port;
+                                    color: Theme.text-primary;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    input-type: number;
+                                    accepted() => { root.stream-port-committed(stream-port-input.text); }
+                                }
+                            }
+                        }
+                        // Mount
+                        Rectangle {
+                            width: 110px;
+                            height: 34px;
+                            border-radius: 6px;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                stream-mount-input := TextInput {
+                                    color: Theme.text-primary;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    accepted() => { root.stream-mount-committed(stream-mount-input.text); }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        // Password
+                        Rectangle {
+                            horizontal-stretch: 2;
+                            height: 34px;
+                            border-radius: 6px;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                stream-password-input := TextInput {
+                                    color: Theme.text-primary;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    input-type: password;
+                                    accepted() => { root.stream-password-committed(stream-password-input.text); }
+                                }
+                            }
+                        }
+                        // Bitrate stepper (compact)
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Rectangle {
+                                width: 30px;
+                                height: 26px;
+                                border-radius: 6px;
+                                background: Theme.bg-panel;
+                                TouchArea { clicked => { root.stream-bitrate-dec(); } }
+                                Text {
+                                    text: "−";
+                                    color: Theme.accent;
+                                    font-size: 14px;
+                                    font-weight: 800;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Text {
+                                text: root.stream-bitrate;
+                                color: Theme.text-primary;
+                                font-size: 12px;
+                                font-weight: 700;
+                                width: 74px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                width: 30px;
+                                height: 26px;
+                                border-radius: 6px;
+                                background: Theme.bg-panel;
+                                TouchArea { clicked => { root.stream-bitrate-inc(); } }
+                                Text {
+                                    text: "+";
+                                    color: Theme.accent;
+                                    font-size: 14px;
+                                    font-weight: 800;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "Server: host / port / mount (press Enter to save each field) — source user is fixed to 'source'";
+                        color: Theme.text-dim;
+                        font-size: 10px;
                     }
                 }
             }

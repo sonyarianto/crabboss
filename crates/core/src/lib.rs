@@ -12,5 +12,6 @@ pub mod playlist;
 pub mod report;
 pub mod scheduler;
 pub mod settings;
+pub mod stream;
 
 pub use error::{CrabError, Result};

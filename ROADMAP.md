@@ -54,11 +54,11 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [x] Auto-DJ continuity: 1 s tick with live progress, prefetch handoff
       (cpal, 8 s horizon), EOF restart, Next/Prev, persisted ON/OFF + Up-next
 - [x] Ad scheduler (dated blocks with intros/outros, chained breaks — see §1.3)
-- [ ] Icecast/Shoutcast output (see §1.5)
+- [x] Icecast/Shoutcast output (see §1.5)
 - [ ] Mic/line-in input with ducking (see §1.6)
 - [x] Report generator (play logs → CSV + screen; XLS/PDF open — see §1.9)
 - [ ] File dialog (`rfd`), progress timer in UI (see §1.9) — `rfd` import done, progress timer still open
-- [x] Settings screen (device picker, live DSP prefs, license — streaming config still open, see §1.9)
+- [x] Settings screen (device picker, live DSP prefs, license, streaming config — see §1.9)
 - [ ] Quality: `cargo fmt/clippy`, unit tests (`library`, `playlist`), CI (see §1.10)
 
 ## Gap Matrix vs RadioBOSS 7.x (2026)
@@ -74,7 +74,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP + "valid until" expiry with row badges and warnings banner | ✅ |
 | Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
-| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Unchecked | ❌ |
+| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME, PUT + SOURCE fallback, reconnect, metadata) + Settings UI with live status; Shoutcast/relay/listener stats open | 🟡 |
 | Mic / line-in | Mixed input, sidechain ducking, bed music | Unchecked | ❌ |
 | Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
 | Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
@@ -136,9 +136,16 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [ ] Teaser/promo clips scheduled between songs
 
 ### 1.5 Streaming Output
-- [ ] Icecast source client (encode + push)
+- [x] Icecast source client (encode + push): MP3/LAME CBR encoder tapped off the
+      post-DSP cpal mix bus (pre-monitor-volume), lock-free `rtrb` ring → sender
+      thread with real-time pacing, Icecast 2.4 `PUT` with legacy `SOURCE`
+      fallback, in-band `StreamTitle` metadata, bounded reconnects (5, backoff)
+- [x] Settings UI: STREAM ON/OFF toggle (auto-start on launch when enabled),
+      host/port/mount/password fields (Enter commits, persisted), bitrate
+      ladder stepper (8–320 kbps), live status (⏳ Connecting/🔴 Live/⚠ error)
+      + bytes/uptime stats
 - [ ] Shoutcast v1/v2 source client
-- [ ] Listener/connection stats in UI
+- [ ] Listener/connection stats in UI (local bytes/uptime done; listener counts need Icecast admin/JSON API)
 - [ ] Artwork metadata forwarding to encoders
 
 ### 1.6 Mic / Live Assist
