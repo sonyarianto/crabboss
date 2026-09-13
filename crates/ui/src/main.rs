@@ -3235,12 +3235,16 @@ fn view_settings(state: &App) -> Element<'_, Message> {
             text(sec.description()).size(11),
             text(format!("License: {}", state.license_status)).size(12),
             text(&state.license_error).size(11),
+            text_input("License key CB-XXXX-XXXX-XXXX", &state.license_key)
+                .on_input(Message::LicenseKeyInput)
+                .padding(6),
             row![
-                text_input("License key CB-XXXX-XXXX-XXXX", &state.license_key)
-                    .on_input(Message::LicenseKeyInput)
-                    .padding(6),
-                button(text("Activate").size(12)).on_press(Message::ActivateLicense),
-                button(text("Clear").size(12)).on_press(Message::ClearLicense),
+                button(text("Activate").size(12))
+                    .width(Length::Fill)
+                    .on_press(Message::ActivateLicense),
+                button(text("Clear").size(12))
+                    .width(Length::Fill)
+                    .on_press(Message::ClearLicense),
             ]
             .spacing(6),
         ]
