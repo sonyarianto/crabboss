@@ -107,8 +107,9 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] Loudness normalization (ReplayGain-style): BS.1770 K-weighting +
       R128 gating meter (`LoudnessMeter`, validated against the ITU mono-sine
       −3.01 LUFS anchor), 🔊 Loudness scan button in Media/Playout writes
-      per-track LUFS + gain toward −23 LUFS into the library (responsive
-      one-track-per-tick timer), gain badge per library row, applied at
+      per-track LUFS + gain toward the adjustable target (default −9 LUFS,
+      RadioBOSS-style; −23 broadcast floor available) into the library (responsive
+      background-thread scan with live progress), gain badge per library row, applied at
       decode time on every cpal play path behind a Settings ON/OFF toggle
 - [x] Background decode loader: `play`/`queue` return instantly (idle play
       announces + `Buffering`); live handoffs keep the old deck sounding

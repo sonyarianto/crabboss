@@ -14,8 +14,15 @@ use crate::audio::cpal_engine::decode_to_stereo;
 use crate::audio::mixer::Biquad;
 use crate::error::Result;
 
-/// Normalization target: EBU R128 broadcast level (RadioBOSS-style stations).
-pub const TARGET_LUFS: f32 = -23.0;
+/// Default normalization target in LUFS: RadioBOSS-style listening level
+/// (RadioBOSS Cloud defaults to −9). Hot enough that modern masters play
+/// near their authored level; the −23 broadcast target lives at
+/// [`TARGET_MIN_LUFS`] for stations feeding a downstream processor.
+pub const TARGET_LUFS: f32 = -9.0;
+
+/// Adjustable target range (Settings stepper): broadcast floor … hot ceiling.
+pub const TARGET_MIN_LUFS: f32 = -23.0;
+pub const TARGET_MAX_LUFS: f32 = -6.0;
 
 /// Safety clamp on applied correction (±24 dB covers practically anything).
 pub const MAX_GAIN_DB: f32 = 24.0;
@@ -247,17 +254,18 @@ mod tests {
 
     #[test]
     fn gain_points_at_target() {
+        // At the −9 default a −33 LUFS track wants exactly +24 dB (rail).
         let a = LoudnessAnalysis {
             integrated_lufs: -33.0,
-            gain_db: 10.0,
+            gain_db: (TARGET_LUFS - (-33.0)).clamp(-MAX_GAIN_DB, MAX_GAIN_DB),
         };
-        assert!((a.gain_db - (TARGET_LUFS - a.integrated_lufs)).abs() < 1e-5);
-        // Over-loud track gets negative correction, clamped at the bound.
+        assert!((a.gain_db - 24.0).abs() < 1e-5);
+        // Over-loud track gets negative correction, inside the rails.
         let hot = LoudnessAnalysis {
             integrated_lufs: -3.0,
             gain_db: (TARGET_LUFS - (-3.0)).clamp(-MAX_GAIN_DB, MAX_GAIN_DB),
         };
-        assert!((hot.gain_db - (-20.0)).abs() < 1e-5);
+        assert!((hot.gain_db - (-6.0)).abs() < 1e-5);
     }
 
     #[test]

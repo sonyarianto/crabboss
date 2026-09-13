@@ -207,6 +207,7 @@ export component SettingsScreen inherits Rectangle {
     in-out property <[string]> eq-gains;
     in-out property <string> limiter-label: "-0.1 dBFS";
     in-out property <bool> loudness-on: false;
+    in-out property <string> loudness-target: "-9 LUFS";
     in-out property <string> stream-status: "⏸ Off";
     in-out property <string> stream-stats: "";
     in-out property <bool> stream-enabled: false;
@@ -264,6 +265,8 @@ export component SettingsScreen inherits Rectangle {
     callback limiter-inc;
     callback limiter-dec;
     callback loudness-toggle;
+    callback loudness-target-inc;
+    callback loudness-target-dec;
 
     background: Theme.bg-primary;
 
@@ -591,8 +594,16 @@ export component SettingsScreen inherits Rectangle {
                         }
                     }
 
+                    Stepper {
+                        label: "Normalization target";
+                        value: root.loudness-target;
+                        hint: "Hotter (−9, RadioBOSS-style) preserves mastered levels; broadcast floor is −23";
+                        inc => { root.loudness-target-inc(); }
+                        dec => { root.loudness-target-dec(); }
+                    }
+
                     Text {
-                        text: "Per-track gain toward −23 LUFS (EBU R128) from the library 🔊 scan — analyze tracks from Media Manager first";
+                        text: "Per-track gain toward the target above (EBU R128) from the library 🔊 scan — analyze tracks from Media Manager first";
                         color: Theme.text-dim;
                         font-size: 10px;
                         wrap: word-wrap;

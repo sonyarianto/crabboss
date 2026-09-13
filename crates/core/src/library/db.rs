@@ -368,6 +368,24 @@ impl Library {
         Ok(())
     }
 
+    /// Rewrite stored gains for a new normalization target (dB toward
+    /// `target` from each measured LUFS, clamped). The raw LUFS values are
+    /// kept, so this never needs re-analysis: changing the Settings target
+    /// (or migrating rows baked under an older default) is one cheap UPDATE.
+    /// Missing-file sentinels (`−70 LUFS / 0 dB`) and unanalyzed rows
+    /// (`NULL`) are left untouched. Returns rows rewritten.
+    pub fn retarget_gains(&self, target: f32) -> Result<usize> {
+        use crate::audio::{MAX_GAIN_DB, TARGET_MAX_LUFS, TARGET_MIN_LUFS};
+        let target = target.clamp(TARGET_MIN_LUFS, TARGET_MAX_LUFS);
+        let n = self.conn.execute(
+            "UPDATE tracks
+             SET loudness_gain_db = max(-?1, min(?1, ?2 - loudness_lufs))
+             WHERE loudness_lufs IS NOT NULL AND loudness_lufs > -69.0",
+            params![MAX_GAIN_DB as f64, target as f64],
+        )?;
+        Ok(n)
+    }
+
     /// Tracks still awaiting loudness analysis (bounded scan queue).
     pub fn tracks_missing_loudness(&self, limit: usize) -> Result<Vec<Track>> {
         let mut stmt = self.conn.prepare(
@@ -823,6 +841,54 @@ mod tests {
         assert!((t.loudness_gain_db.unwrap() + 4.5).abs() < 1e-6);
         // Unknown path → None, not an error.
         assert_eq!(lib.loudness_gain_by_path("/m/other.mp3").unwrap(), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retarget_rewrites_gains_without_rescan() {
+        let dir = std::env::temp_dir().join(format!("crabboss-retarget-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = Library::open(&dir.join("lib.db")).unwrap();
+        // Analyzed under the old −23 default, a missing-file sentinel,
+        // and an unanalyzed row.
+        for (id, lufs, gain) in [
+            ("old", Some(-10.0), Some(-13.0)),
+            ("sentinel", Some(-70.0), Some(0.0)),
+            ("fresh", None, None),
+        ] {
+            lib.conn
+                .execute(
+                    "INSERT INTO tracks (id, file_path, file_name, added_at, play_count, kind,
+                                         loudness_lufs, loudness_gain_db)
+                     VALUES (?1, ?2, ?3, ?4, 0, 'music', ?5, ?6)",
+                    rusqlite::params![
+                        id,
+                        format!("/m/{id}.mp3"),
+                        format!("{id}.mp3"),
+                        chrono::Utc::now().to_rfc3339(),
+                        lufs,
+                        gain,
+                    ],
+                )
+                .unwrap();
+        }
+        // Retarget to the RadioBOSS-style −9 default: only the genuinely
+        // analyzed row moves (−10 → +1 dB), no re-analysis needed.
+        assert_eq!(lib.retarget_gains(-9.0).unwrap(), 1);
+        let gains: std::collections::HashMap<_, _> = lib
+            .get_all_tracks()
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.id, (t.loudness_lufs, t.loudness_gain_db)))
+            .collect();
+        assert!((gains["old"].1.unwrap() - 1.0).abs() < 1e-6);
+        assert!((gains["old"].0.unwrap() + 10.0).abs() < 1e-6);
+        assert_eq!(gains["sentinel"].1.unwrap(), 0.0);
+        assert_eq!(gains["fresh"].1, None);
+        // Out-of-range targets clamp instead of exploding the library.
+        assert_eq!(lib.retarget_gains(-99.0).unwrap(), 1);
+        let t = lib.find_by_path("/m/old.mp3").unwrap().unwrap();
+        assert!((t.loudness_gain_db.unwrap() + 13.0).abs() < 1e-6);
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -9,7 +9,10 @@ mod silence;
 
 pub use cpal_engine::CpalEngine;
 pub use engine::{needs_prefetch, Engine, PlayerState, TrackInfo};
-pub use loudness::{analyze_file, LoudnessAnalysis, LoudnessMeter, MAX_GAIN_DB, TARGET_LUFS};
+pub use loudness::{
+    analyze_file, LoudnessAnalysis, LoudnessMeter, MAX_GAIN_DB, TARGET_LUFS, TARGET_MAX_LUFS,
+    TARGET_MIN_LUFS,
+};
 pub use mic::{Ducker, MicConfig, MicResampler, MicState, MIC_RING_SAMPLES};
 pub use mixer::{CrossfadeCurve, EqBand, EqChain, Frame, Mixer, EQ_BAND_COUNT, EQ_CENTER_HZ};
 pub use silence::{SilenceMonitor, SILENCE_FLOOR};

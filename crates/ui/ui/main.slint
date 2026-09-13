@@ -103,6 +103,7 @@ export component MainWindow inherits Window {
     in-out property <[string]> settings-eq-gains;
     in-out property <string> settings-limiter: "-0.1 dBFS";
     in-out property <bool> settings-loudness-on: false;
+    in-out property <string> settings-loudness-target: "-9 LUFS";
     in-out property <string> settings-stream-status: "⏸ Off";
     in-out property <string> settings-stream-stats: "";
     in-out property <bool> settings-stream-enabled: false;
@@ -168,6 +169,8 @@ export component MainWindow inherits Window {
     callback settings-limiter-inc;
     callback settings-limiter-dec;
     callback settings-loudness-toggle;
+    callback settings-loudness-target-inc;
+    callback settings-loudness-target-dec;
     callback settings-stream-toggle;
     callback settings-stream-host-committed(string);
     callback settings-stream-port-committed(string);
@@ -470,6 +473,7 @@ export component MainWindow inherits Window {
             eq-gains: root.settings-eq-gains;
             limiter-label <=> root.settings-limiter;
             loudness-on <=> root.settings-loudness-on;
+            loudness-target <=> root.settings-loudness-target;
             eq-toggle => { root.settings-eq-toggle(); }
             eq-inc(i) => { root.settings-eq-inc(i); }
             eq-dec(i) => { root.settings-eq-dec(i); }
@@ -477,6 +481,8 @@ export component MainWindow inherits Window {
             limiter-inc => { root.settings-limiter-inc(); }
             limiter-dec => { root.settings-limiter-dec(); }
             loudness-toggle => { root.settings-loudness-toggle(); }
+            loudness-target-inc => { root.settings-loudness-target-inc(); }
+            loudness-target-dec => { root.settings-loudness-target-dec(); }
             stream-status <=> root.settings-stream-status;
             stream-stats <=> root.settings-stream-stats;
             stream-enabled <=> root.settings-stream-enabled;

@@ -12,7 +12,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 slint::include_modules!();
 
-use crabcore::audio::{Engine, EQ_BAND_COUNT};
+use crabcore::audio::{Engine, EQ_BAND_COUNT, MAX_GAIN_DB, TARGET_MAX_LUFS, TARGET_MIN_LUFS};
 use crabcore::library::TrackKind;
 
 /// One analyzed track posted by the loudness worker thread back to the
@@ -140,6 +140,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(0) => {}
         Ok(n) => tracing::info!("Re-labeled {} tracks (kind repair)", n),
         Err(e) => tracing::warn!("Kind repair scan failed: {}", e),
+    }
+
+    // Gain repair: rewrite stored gains toward the active Settings target
+    // (e.g. rows baked under the old −23 default move to −9). Pure SQL from
+    // the kept LUFS values — no re-analysis; sentinels/unanalyzed untouched.
+    match library.retarget_gains(settings.borrow().loudness_target_lufs) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Re-targeted {n} loudness gains"),
+        Err(e) => tracing::warn!("Gain retarget failed: {e}"),
     }
 
     // Loudness normalization: per-path gain lookup on its own db connection
@@ -433,6 +442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui: &MainWindow,
         scan_rx: &Rc<RefCell<Option<mpsc::Receiver<LoudnessDone>>>>,
         scan_progress: &Rc<RefCell<(usize, usize)>>,
+        target_lufs: f32,
         announce_empty: bool,
     ) {
         if *state.borrow().loudness_scanning.borrow() {
@@ -453,6 +463,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return;
         }
         let total = jobs.len();
+        // Bake gains toward the caller's snapshot (Settings target): rows
+        // stay consistent even if the user moves the stepper mid-scan.
+        let target_lufs = target_lufs.clamp(
+            crabcore::audio::TARGET_MIN_LUFS,
+            crabcore::audio::TARGET_MAX_LUFS,
+        );
         *state.borrow().loudness_scanning.borrow_mut() = true;
         *scan_progress.borrow_mut() = (0, total);
         let (tx, rx) = mpsc::channel();
@@ -469,7 +485,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (-70.0, 0.0)
                     } else {
                         match crabcore::audio::analyze_file(&p) {
-                            Ok(a) => (a.integrated_lufs, a.gain_db),
+                            Ok(a) => (
+                                a.integrated_lufs,
+                                (target_lufs - a.integrated_lufs).clamp(-MAX_GAIN_DB, MAX_GAIN_DB),
+                            ),
                             Err(e) => {
                                 tracing::warn!("Loudness failed for {file_name}: {e}");
                                 (-70.0, 0.0)
@@ -571,11 +590,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let state = state.clone();
         let ui_weak = ui.as_weak();
+        let settings = settings.clone();
         let scan_rx = scan_rx.clone();
         let scan_progress = scan_progress.clone();
         ui.on_loudness_scan(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                start_loudness_scan(&state, &ui, &scan_rx, &scan_progress, true);
+                let target = settings.borrow().loudness_target_lufs;
+                start_loudness_scan(&state, &ui, &scan_rx, &scan_progress, target, true);
             }
         });
     }
@@ -1635,6 +1656,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("{:.1} dBFS", lin_to_dbfs(settings.limiter_ceiling)).into(),
         );
         ui.set_settings_loudness_on(settings.loudness_norm);
+        ui.set_settings_loudness_target(
+            format!("{:.0} LUFS", settings.loudness_target_lufs).into(),
+        );
     }
     fn lin_to_dbfs(lin: f32) -> f32 {
         20.0 * lin.max(0.001).log10()
@@ -1840,6 +1864,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             drop(s);
             if let Some(ui) = ui_weak.upgrade() {
                 settings_labels(&ui, &settings.borrow());
+            }
+        });
+    }
+    // Loudness target stepper (RadioBOSS-style, −23…−6 LUFS): persist,
+    // rewrite stored gains instantly (kept LUFS, no re-analysis), relabel
+    // the stepper and refresh the Gain badges.
+    fn retarget_and_refresh(
+        state: &Rc<RefCell<AppState>>,
+        ui: &MainWindow,
+        last_shown: &Rc<RefCell<Vec<crabcore::library::Track>>>,
+        target: f32,
+    ) {
+        match state.borrow().library.retarget_gains(target) {
+            Ok(n) => tracing::info!("Re-targeted {n} loudness gains to {target:.0} LUFS"),
+            Err(e) => tracing::warn!("Gain retarget failed: {e}"),
+        }
+        let tracks = state.borrow().library.get_all_tracks().unwrap_or_default();
+        let total = tracks.len();
+        refresh_library(ui, tracks, last_shown, total);
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let last_shown = last_shown.clone();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_loudness_target_inc(move || {
+            let mut s = settings.borrow_mut();
+            s.loudness_target_lufs =
+                (s.loudness_target_lufs + 1.0).clamp(TARGET_MIN_LUFS, TARGET_MAX_LUFS);
+            let _ = s.save(&settings_path);
+            let target = s.loudness_target_lufs;
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &settings.borrow());
+                retarget_and_refresh(&state, &ui, &last_shown, target);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let last_shown = last_shown.clone();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_loudness_target_dec(move || {
+            let mut s = settings.borrow_mut();
+            s.loudness_target_lufs =
+                (s.loudness_target_lufs - 1.0).clamp(TARGET_MIN_LUFS, TARGET_MAX_LUFS);
+            let _ = s.save(&settings_path);
+            let target = s.loudness_target_lufs;
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                settings_labels(&ui, &settings.borrow());
+                retarget_and_refresh(&state, &ui, &last_shown, target);
             }
         });
     }
@@ -2626,6 +2705,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui_weak = ui.as_weak();
         let last_shown = last_shown.clone();
         let import_active = import_active.clone();
+        let settings = settings.clone();
         let scan_rx = scan_rx.clone();
         let scan_progress = scan_progress.clone();
         ui.on_import_files(move || {
@@ -2662,6 +2742,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ui_weak = ui_weak.clone();
             let last_shown = last_shown.clone();
             let import_active = import_active.clone();
+            let settings = settings.clone();
             let scan_rx = scan_rx.clone();
             let scan_progress = scan_progress.clone();
             let tick = slint::Timer::default();
@@ -2697,7 +2778,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // to the background scanner (no freeze, no-op when
                         // nothing is pending or a scan already runs).
                         if added > 0 {
-                            start_loudness_scan(&state, &ui, &scan_rx, &scan_progress, false);
+                            let target = settings.borrow().loudness_target_lufs;
+                            start_loudness_scan(
+                                &state,
+                                &ui,
+                                &scan_rx,
+                                &scan_progress,
+                                target,
+                                false,
+                            );
                         }
                         return;
                     };
@@ -2935,7 +3024,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pending = state.borrow().library.count_missing_loudness().unwrap_or(0);
         if pending > 0 {
             tracing::info!("Auto-starting loudness scan ({pending} pending)");
-            start_loudness_scan(&state, &ui, &scan_rx, &scan_progress, false);
+            let target = settings.borrow().loudness_target_lufs;
+            start_loudness_scan(&state, &ui, &scan_rx, &scan_progress, target, false);
         }
     }
     ui.run()?;

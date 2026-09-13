@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio::MicConfig;
 use crate::audio::EQ_BAND_COUNT;
+use crate::audio::{TARGET_LUFS, TARGET_MAX_LUFS, TARGET_MIN_LUFS};
 use crate::stream::StreamConfig;
 
 /// Persisted preferences. Device applies on next launch (stream rebuild);
@@ -28,9 +29,13 @@ pub struct AppSettings {
     pub eq_gains_db: [f32; EQ_BAND_COUNT],
     /// Limiter ceiling (linear amplitude, 0.1..1.0; ~0 dBFS default).
     pub limiter_ceiling: f32,
-    /// ReplayGain-style loudness normalization (per-track gain toward
-    /// R128 target, applied at decode time from library analysis).
+    /// ReplayGain-style loudness normalization (per-track gain toward an
+    /// adjustable LUFS target, applied at decode time from library analysis).
     pub loudness_norm: bool,
+    /// Normalization target in LUFS ([`TARGET_MIN_LUFS`]…[`TARGET_MAX_LUFS`],
+    /// default [`TARGET_LUFS`], RadioBOSS-style). Changing it rewrites the
+    /// stored per-track gains (no re-analysis needed); LUFS values are kept.
+    pub loudness_target_lufs: f32,
     /// Icecast/Shoutcast streaming (§1.5): server, mount, encoder.
     pub stream: StreamConfig,
     /// Mic/line-in with ducking (§1.6): device, level, duck prefs.
@@ -48,6 +53,7 @@ impl Default for AppSettings {
             eq_gains_db: [0.0; EQ_BAND_COUNT],
             limiter_ceiling: 0.99,
             loudness_norm: true,
+            loudness_target_lufs: TARGET_LUFS,
             stream: StreamConfig::default(),
             mic: MicConfig::default(),
         }
@@ -66,6 +72,9 @@ impl AppSettings {
             *g = g.clamp(-12.0, 12.0);
         }
         s.limiter_ceiling = s.limiter_ceiling.clamp(0.1, 1.0);
+        s.loudness_target_lufs = s
+            .loudness_target_lufs
+            .clamp(TARGET_MIN_LUFS, TARGET_MAX_LUFS);
         s.mic = std::mem::take(&mut s.mic).sanitized();
         s
     }
@@ -92,6 +101,7 @@ mod tests {
             eq_gains_db: [0.0, 1.5, 3.0, 0.0, 0.0, 0.0, -2.0, 0.0, 0.0, 0.0, 4.0, 0.0],
             limiter_ceiling: 0.9,
             loudness_norm: false,
+            loudness_target_lufs: -14.0,
             stream: StreamConfig {
                 enabled: true,
                 host: "cast.example.com".into(),
@@ -116,6 +126,7 @@ mod tests {
         assert_eq!(back.eq_gains_db[10], 4.0);
         assert!((back.limiter_ceiling - 0.9).abs() < 1e-6);
         assert!(!back.loudness_norm);
+        assert!((back.loudness_target_lufs + 14.0).abs() < 1e-6);
         assert!(back.stream.enabled);
         assert_eq!(back.stream.host, "cast.example.com");
         assert_eq!(back.stream.port, 8443);
@@ -187,12 +198,13 @@ mod tests {
         let eq_clamp = dir.join("crabboss-settings-eq.json");
         std::fs::write(
             &eq_clamp,
-            br#"{"eq_gains_db":[99,-99,0,0,0,0,0,0,0,0,0,0],"limiter_ceiling":5.0}"#,
+            br#"{"eq_gains_db":[99,-99,0,0,0,0,0,0,0,0,0,0],"limiter_ceiling":5.0,"loudness_target_lufs":-99.0}"#,
         )
         .unwrap();
         let d = AppSettings::load(&eq_clamp);
         assert_eq!((d.eq_gains_db[0], d.eq_gains_db[1]), (12.0, -12.0));
         assert!((d.limiter_ceiling - 1.0).abs() < 1e-6);
+        assert!((d.loudness_target_lufs - TARGET_MIN_LUFS).abs() < 1e-6);
         std::fs::remove_file(&bad).ok();
         std::fs::remove_file(&clamped).ok();
         std::fs::remove_file(&eq_clamp).ok();
