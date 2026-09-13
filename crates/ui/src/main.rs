@@ -2150,7 +2150,12 @@ fn cart_hotkey(key: iced::keyboard::Key, _: iced::keyboard::Modifiers) -> Option
 fn subscription(_: &App) -> Subscription<Message> {
     Subscription::batch(vec![
         iced::time::every(Duration::from_millis(200)).map(|_| Message::Tick),
-        iced::keyboard::on_key_press(cart_hotkey),
+        iced::keyboard::listen().filter_map(|event| match event {
+            iced::keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                cart_hotkey(key, modifiers)
+            }
+            _ => None,
+        }),
     ])
 }
 
@@ -2174,7 +2179,7 @@ fn view(state: &App) -> Element<'_, Message> {
             };
             r = r.push(button(text(label).size(13)).on_press(Message::Navigate(s)));
         }
-        r.push(iced::widget::horizontal_space())
+        r.push(iced::widget::space::horizontal())
             .push(text(&state.station_name).size(12))
     };
 
@@ -2296,7 +2301,7 @@ fn view_player_panel(state: &App) -> Element<'_, Message> {
         ]
         .spacing(8),
         row![
-            checkbox("Auto-DJ", state.autodj).on_toggle(Message::AutodjToggled),
+            checkbox(state.autodj).label("Auto-DJ").on_toggle(Message::AutodjToggled),
             text(if state.up_next.is_empty() {
                 String::new()
             } else {
@@ -2324,7 +2329,7 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
     };
     let header = row![
         text(format!("Library - {}", count_label)).size(14),
-        iced::widget::horizontal_space(),
+        iced::widget::space::horizontal(),
         button(text("Health").size(12)).on_press(Message::HealthCheck),
         button(text("Loudness").size(12)).on_press(Message::LoudnessScan),
         button(text("+ Import").size(12)).on_press(Message::ImportFiles),
@@ -2456,8 +2461,8 @@ fn view_scheduler(state: &App) -> Element<'_, Message> {
     }
     let mut col = column![row![
         text("Scheduler").size(16),
-        iced::widget::horizontal_space(),
-        checkbox("Enabled", state.sched_enabled).on_toggle(Message::SchedulerMasterToggled),
+        iced::widget::space::horizontal(),
+        checkbox(state.sched_enabled).label("Enabled").on_toggle(Message::SchedulerMasterToggled),
         button(text("+ New").size(12)).on_press(Message::SchedulerNew),
     ]
     .spacing(8),]
@@ -2469,25 +2474,25 @@ fn view_scheduler(state: &App) -> Element<'_, Message> {
     col = col.push(scrollable(list).height(Length::Fill));
     if state.sched_editor_open {
         let day_names: [Element<'_, Message>; 7] = [
-            checkbox("Mon", state.se_days[0])
+            checkbox(state.se_days[0]).label("Mon")
                 .on_toggle(|b| Message::SchedDayChanged(0, b))
                 .into(),
-            checkbox("Tue", state.se_days[1])
+            checkbox(state.se_days[1]).label("Tue")
                 .on_toggle(|b| Message::SchedDayChanged(1, b))
                 .into(),
-            checkbox("Wed", state.se_days[2])
+            checkbox(state.se_days[2]).label("Wed")
                 .on_toggle(|b| Message::SchedDayChanged(2, b))
                 .into(),
-            checkbox("Thu", state.se_days[3])
+            checkbox(state.se_days[3]).label("Thu")
                 .on_toggle(|b| Message::SchedDayChanged(3, b))
                 .into(),
-            checkbox("Fri", state.se_days[4])
+            checkbox(state.se_days[4]).label("Fri")
                 .on_toggle(|b| Message::SchedDayChanged(4, b))
                 .into(),
-            checkbox("Sat", state.se_days[5])
+            checkbox(state.se_days[5]).label("Sat")
                 .on_toggle(|b| Message::SchedDayChanged(5, b))
                 .into(),
-            checkbox("Sun", state.se_days[6])
+            checkbox(state.se_days[6]).label("Sun")
                 .on_toggle(|b| Message::SchedDayChanged(6, b))
                 .into(),
         ];
@@ -2597,7 +2602,7 @@ fn view_carts(state: &App) -> Element<'_, Message> {
     column![
         row![
             text("Cart Wall").size(16),
-            iced::widget::horizontal_space(),
+            iced::widget::space::horizontal(),
             button(text(if state.cart_assign {
                 "Assign: ON"
             } else {
@@ -2628,7 +2633,7 @@ fn view_reports(state: &App) -> Element<'_, Message> {
         range_row =
             range_row.push(button(text(label).size(12)).on_press(Message::ReportRangeChanged(i)));
     }
-    range_row = range_row.push(iced::widget::horizontal_space());
+    range_row = range_row.push(iced::widget::space::horizontal());
     range_row = range_row.push(button(text("Export CSV").size(12)).on_press(Message::ReportExport));
     let mut list = column![].spacing(2);
     for e in &state.report_entries {
@@ -2684,7 +2689,7 @@ fn view_ads(state: &App) -> Element<'_, Message> {
     }
     let mut col = column![row![
         text("Ads").size(16),
-        iced::widget::horizontal_space(),
+        iced::widget::space::horizontal(),
         button(text("+ New block").size(12)).on_press(Message::AdsNew),
     ]
     .spacing(8),]
@@ -2694,19 +2699,19 @@ fn view_ads(state: &App) -> Element<'_, Message> {
     if state.ads_editor_open {
         let mut day_row = row![].spacing(8);
         day_row = day_row
-            .push(checkbox("Mon", state.ab_days[0]).on_toggle(|b| Message::AdDayChanged(0, b)));
+            .push(checkbox(state.ab_days[0]).label("Mon").on_toggle(|b| Message::AdDayChanged(0, b)));
         day_row = day_row
-            .push(checkbox("Tue", state.ab_days[1]).on_toggle(|b| Message::AdDayChanged(1, b)));
+            .push(checkbox(state.ab_days[1]).label("Tue").on_toggle(|b| Message::AdDayChanged(1, b)));
         day_row = day_row
-            .push(checkbox("Wed", state.ab_days[2]).on_toggle(|b| Message::AdDayChanged(2, b)));
+            .push(checkbox(state.ab_days[2]).label("Wed").on_toggle(|b| Message::AdDayChanged(2, b)));
         day_row = day_row
-            .push(checkbox("Thu", state.ab_days[3]).on_toggle(|b| Message::AdDayChanged(3, b)));
+            .push(checkbox(state.ab_days[3]).label("Thu").on_toggle(|b| Message::AdDayChanged(3, b)));
         day_row = day_row
-            .push(checkbox("Fri", state.ab_days[4]).on_toggle(|b| Message::AdDayChanged(4, b)));
+            .push(checkbox(state.ab_days[4]).label("Fri").on_toggle(|b| Message::AdDayChanged(4, b)));
         day_row = day_row
-            .push(checkbox("Sat", state.ab_days[5]).on_toggle(|b| Message::AdDayChanged(5, b)));
+            .push(checkbox(state.ab_days[5]).label("Sat").on_toggle(|b| Message::AdDayChanged(5, b)));
         day_row = day_row
-            .push(checkbox("Sun", state.ab_days[6]).on_toggle(|b| Message::AdDayChanged(6, b)));
+            .push(checkbox(state.ab_days[6]).label("Sun").on_toggle(|b| Message::AdDayChanged(6, b)));
         col = col.push(
             column![
                 text("Ad block").size(14),
@@ -2845,7 +2850,7 @@ fn view_settings(state: &App) -> Element<'_, Message> {
                 Message::SilenceInc
             ),
             row![
-                checkbox("EQ enabled", s.eq_enabled).on_toggle(|_| Message::EqToggle),
+                checkbox(s.eq_enabled).label("EQ enabled").on_toggle(|_| Message::EqToggle),
                 button(text("Reset EQ").size(11)).on_press(Message::EqReset),
             ]
             .spacing(8),
@@ -2855,7 +2860,7 @@ fn view_settings(state: &App) -> Element<'_, Message> {
                 Message::LimiterDec,
                 Message::LimiterInc
             ),
-            row![checkbox("Loudness normalize", s.loudness_norm)
+            row![checkbox(s.loudness_norm).label("Loudness normalize")
                 .on_toggle(|_| Message::LoudnessToggle),]
             .spacing(8),
             stepper(
@@ -2865,7 +2870,7 @@ fn view_settings(state: &App) -> Element<'_, Message> {
             ),
             text("Streaming (Icecast)").size(14),
             row![
-                checkbox("Stream enabled", stream_cfg.enabled).on_toggle(|_| Message::StreamToggle),
+                checkbox(stream_cfg.enabled).label("Stream enabled").on_toggle(|_| Message::StreamToggle),
                 text(stream_state.label()).size(12),
                 text(if stream_state.is_live() {
                     format!(
@@ -2906,7 +2911,7 @@ fn view_settings(state: &App) -> Element<'_, Message> {
             ),
             text("Microphone / line-in").size(14),
             row![
-                checkbox("Mic enabled", mic_cfg.enabled).on_toggle(|_| Message::MicToggle),
+                checkbox(mic_cfg.enabled).label("Mic enabled").on_toggle(|_| Message::MicToggle),
                 text(mic_state_label(&mic_state)).size(12),
                 text(if mic_state_is_live(&mic_state) {
                     format!(
@@ -2932,7 +2937,7 @@ fn view_settings(state: &App) -> Element<'_, Message> {
                 Message::MicLevelDec,
                 Message::MicLevelInc
             ),
-            row![checkbox("Ducking", mic_cfg.duck_enabled).on_toggle(|_| Message::MicDuckToggle),]
+            row![checkbox(mic_cfg.duck_enabled).label("Ducking").on_toggle(|_| Message::MicDuckToggle),]
                 .spacing(8),
             stepper(
                 format!("Threshold: {:+.0} dB", mic_cfg.duck_threshold_db),
@@ -2974,8 +2979,9 @@ fn mic_state_is_live(st: &crabcore::audio::MicState) -> bool {
 // ---------------------------------------------------------------------------
 
 fn main() -> iced::Result {
-    iced::application("CrabBoss", update, view)
+    iced::application(boot, update, view)
+        .title("CrabBoss")
         .subscription(subscription)
-        .theme(|_| Theme::Dark)
-        .run_with(boot)
+        .theme(|_: &App| Theme::Dark)
+        .run()
 }

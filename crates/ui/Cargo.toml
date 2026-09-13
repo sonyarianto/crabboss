@@ -8,6 +8,10 @@ description = "CrabBoss desktop UI built with Iced"
 crabcore = { path = "../core" }
 chrono = { workspace = true }
 rfd = "0.15"
-iced = { version = "0.13", features = ["tokio"] }
+# 0.14 defaults pull the wgpu (DirectX) renderer, whose Windows dependency
+# set (wgpu-hal vs gpu-allocator) does not compile as a unit — see branch
+# notes. tiny-skia (CPU) renders this mostly-static playout UI with ease
+# and needs no GPU/COM stack at all.
+iced = { version = "0.14", default-features = false, features = ["tokio", "tiny-skia"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
