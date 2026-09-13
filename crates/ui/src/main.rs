@@ -2175,7 +2175,7 @@ fn view(state: &App) -> Element<'_, Message> {
             r = r.push(button(text(label).size(13)).on_press(Message::Navigate(s)));
         }
         r.push(iced::widget::horizontal_space())
-            .push(text(format!("{} | {}", state.station_name, state.audio_engine)).size(12))
+            .push(text(&state.station_name).size(12))
     };
 
     let body: Element<'_, Message> = match state.screen {
