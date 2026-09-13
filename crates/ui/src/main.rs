@@ -1,4 +1,4 @@
-//! CrabBoss — Radio Automation Software
+//! CrabBoss
 //!
 //! Desktop UI entry point using Iced (Elm architecture).
 
@@ -2961,7 +2961,7 @@ fn mic_state_is_live(st: &crabcore::audio::MicState) -> bool {
 // ---------------------------------------------------------------------------
 
 fn main() -> iced::Result {
-    iced::application("CrabBoss - Radio Automation", update, view)
+    iced::application("CrabBoss", update, view)
         .subscription(subscription)
         .theme(|_| Theme::Dark)
         .run_with(boot)
