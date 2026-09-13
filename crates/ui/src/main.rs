@@ -2158,29 +2158,6 @@ fn subscription(_: &App) -> Subscription<Message> {
 }
 
 fn view(state: &App) -> Element<'_, Message> {
-    let nav = {
-        let mut r = row![].spacing(6).padding(8);
-        for s in [
-            Screen::Home,
-            Screen::Playout,
-            Screen::Media,
-            Screen::Scheduler,
-            Screen::Carts,
-            Screen::Reports,
-            Screen::Ads,
-            Screen::Settings,
-        ] {
-            let label = if s == state.screen {
-                format!("[{}]", s.label())
-            } else {
-                s.label().to_string()
-            };
-            r = r.push(button(text(label).size(13)).on_press(Message::Navigate(s)));
-        }
-        r.push(iced::widget::space::horizontal())
-            .push(text(&state.station_name).size(12))
-    };
-
     let body: Element<'_, Message> = match state.screen {
         Screen::Home => view_home(state),
         Screen::Playout => view_playout(state),
@@ -2192,7 +2169,52 @@ fn view(state: &App) -> Element<'_, Message> {
         Screen::Settings => view_settings(state),
     };
 
-    column![nav, body].into()
+    row![
+        view_sidebar(state),
+        container(body).width(Length::Fill).height(Length::Fill),
+    ]
+    .into()
+}
+
+/// Halloy-style left sidebar (v1: fixed position, no collapse, no badges):
+/// station name, one entry per screen with the active one highlighted, and
+/// the on-air status pinned at the bottom so it is visible everywhere.
+fn view_sidebar(state: &App) -> Element<'_, Message> {
+    let mut entries = column![text(&state.station_name).size(15)].spacing(4);
+    for s in [
+        Screen::Home,
+        Screen::Playout,
+        Screen::Media,
+        Screen::Scheduler,
+        Screen::Carts,
+        Screen::Reports,
+        Screen::Ads,
+        Screen::Settings,
+    ] {
+        let label = if s == state.screen {
+            format!("[{}]", s.label())
+        } else {
+            s.label().to_string()
+        };
+        entries = entries.push(
+            button(text(label).size(13))
+                .width(Length::Fill)
+                .on_press(Message::Navigate(s)),
+        );
+    }
+    let status = if state.is_playing {
+        format!("ON AIR: {} - {}", state.now_title, state.now_artist)
+    } else {
+        "Off air".to_string()
+    };
+    entries = entries
+        .push(iced::widget::space::vertical())
+        .push(text(status).size(11));
+
+    container(entries.spacing(6).padding(10))
+        .width(Length::Fixed(172.0))
+        .height(Length::Fill)
+        .into()
 }
 
 fn view_home(state: &App) -> Element<'_, Message> {
