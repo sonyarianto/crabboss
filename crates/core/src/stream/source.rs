@@ -58,7 +58,8 @@ impl IcecastSource {
             .map_err(|e| CrabError::Audio(format!("Icecast timeouts: {e}")))?;
 
         let headers = Self::request_headers(&config);
-        match Self::handshake(&mut stream, &addr, "PUT", &headers, true) {
+        let mount = config.mount.clone();
+        match Self::handshake(&mut stream, &addr, "PUT", &mount, &headers, true) {
             Ok(meta_interval) => {
                 let src = Self::finish(stream, meta_interval);
                 Ok((src, HandshakeProtocol::Put))
@@ -72,12 +73,13 @@ impl IcecastSource {
                     .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
                     .and_then(|_| stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT)))
                     .map_err(|e| CrabError::Audio(format!("Icecast timeouts: {e}")))?;
-                let meta_interval = Self::handshake(&mut stream, &addr, "SOURCE", &headers, false)
-                    .map_err(|src_err| {
-                        CrabError::Audio(format!(
-                            "Icecast handshake failed — PUT: {put_err}; SOURCE: {src_err}"
-                        ))
-                    })?;
+                let meta_interval =
+                    Self::handshake(&mut stream, &addr, "SOURCE", &mount, &headers, false)
+                        .map_err(|src_err| {
+                            CrabError::Audio(format!(
+                                "Icecast handshake failed — PUT: {put_err}; SOURCE: {src_err}"
+                            ))
+                        })?;
                 let src = Self::finish(stream, meta_interval);
                 Ok((src, HandshakeProtocol::Source))
             }
@@ -122,15 +124,20 @@ impl IcecastSource {
 
     /// Send the request line + headers, read the response, and return the
     /// negotiated `ice-metadata-interval` (0 when absent).
+    ///
+    /// The mountpoint travels in the request path per the Icecast source
+    /// protocol (`PUT /live HTTP/1.1`) — a bare `/` leaves the server with
+    /// no mount to attach, so real servers reject it.
     fn handshake(
         stream: &mut TcpStream,
         addr: &str,
         method: &str,
+        mount: &str,
         headers: &str,
         expect_continue: bool,
     ) -> Result<usize> {
         let host = addr.split(':').next().unwrap_or(addr);
-        let mut req = format!("{method} / HTTP/1.1\r\nHost: {host}\r\n{headers}");
+        let mut req = format!("{method} {mount} HTTP/1.1\r\nHost: {host}\r\n{headers}");
         if expect_continue {
             req.push_str("Expect: 100-continue\r\n");
         }
@@ -144,54 +151,32 @@ impl IcecastSource {
             .flush()
             .map_err(|e| CrabError::Audio(format!("Icecast flush: {e}")))?;
 
-        // Read until end of response headers.
-        let mut buf = [0u8; 4096];
-        let mut response = Vec::new();
-        loop {
-            let n = stream
-                .read(&mut buf)
-                .map_err(|e| CrabError::Audio(format!("Icecast read: {e}")))?;
-            if n == 0 {
-                return Err(CrabError::Audio(
-                    "Icecast closed the connection during handshake \
-                     (server may not support this method)"
-                        .into(),
-                ));
-            }
-            response.extend_from_slice(&buf[..n]);
-            if response.windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
-            if response.len() > 64 * 1024 {
-                return Err(CrabError::Audio("Icecast handshake header flood".into()));
-            }
-        }
-        let text = String::from_utf8_lossy(&response);
-        let status = text.lines().next().unwrap_or_default().trim().to_string();
-
-        // 100 Continue is provisional; keep reading until real status.
+        // Read response headers. A provisional `100 Continue` is followed by
+        // the real status in a LATER segment, so keep reading (preserving
+        // any pipelined bytes) instead of judging the first block.
+        let mut pending = Vec::new();
+        let mut response = Self::read_response_headers(stream, &mut pending)?;
+        let mut status = response
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         if status.starts_with("HTTP/1.1 100") || status.starts_with("HTTP/1.0 100") {
-            // Find the final status line: last HTTP/ line before blank.
-            // Simple approach: scan all lines for the last "HTTP/" one.
-            let final_status = text
+            response = Self::read_response_headers(stream, &mut pending)?;
+            status = response
                 .lines()
-                .rev()
-                .find(|l| l.starts_with("HTTP/"))
+                .next()
                 .unwrap_or_default()
+                .trim()
                 .to_string();
-            if !final_status.starts_with("HTTP/1.0 200")
-                && !final_status.starts_with("HTTP/1.1 200")
-            {
-                return Err(CrabError::Audio(format!(
-                    "Icecast rejected: {final_status}"
-                )));
-            }
-        } else if !status.starts_with("HTTP/1.0 200") && !status.starts_with("HTTP/1.1 200") {
+        }
+        if !status.starts_with("HTTP/1.0 200") && !status.starts_with("HTTP/1.1 200") {
             return Err(CrabError::Audio(format!("Icecast rejected: {status}")));
         }
 
         // Negotiated metadata interval (bytes between metadata blocks).
-        let meta_interval = text
+        let meta_interval = response
             .lines()
             .find_map(|l| {
                 let (k, v) = l.split_once(':')?;
@@ -202,6 +187,34 @@ impl IcecastSource {
             .unwrap_or(0);
         tracing::info!("Icecast handshake OK ({method}, metadata interval {meta_interval})");
         Ok(meta_interval)
+    }
+
+    /// Read one response header block (through the blank line), preserving
+    /// any pipelined bytes after it in `pending` for the next call. This is
+    /// what lets a split `100 Continue` + final status (or both coalesced
+    /// in one segment) parse correctly either way.
+    fn read_response_headers(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<String> {
+        let mut buf = [0u8; 4096];
+        loop {
+            if let Some(pos) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head: Vec<u8> = pending.drain(..pos + 4).collect();
+                return Ok(String::from_utf8_lossy(&head).to_string());
+            }
+            if pending.len() > 64 * 1024 {
+                return Err(CrabError::Audio("Icecast handshake header flood".into()));
+            }
+            let n = stream
+                .read(&mut buf)
+                .map_err(|e| CrabError::Audio(format!("Icecast read: {e}")))?;
+            if n == 0 {
+                return Err(CrabError::Audio(
+                    "Icecast closed the connection during handshake \
+                     (server may not support this method)"
+                        .into(),
+                ));
+            }
+            pending.extend_from_slice(&buf[..n]);
+        }
     }
 
     /// Send encoded audio bytes. The caller paces the rate; this just
@@ -326,7 +339,7 @@ mod tests {
                 let mut buf = vec![0u8; 8192];
                 let n = sock.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                assert!(req.starts_with("PUT / HTTP/1.1"));
+                assert!(req.starts_with("PUT /stream HTTP/1.1"), "{req}");
                 assert!(req.contains("Authorization: Basic c291cmNlOg=="), "{req}");
                 assert!(req.contains("Content-Type: audio/mpeg"));
                 assert!(req.contains("Expect: 100-continue"));
@@ -344,6 +357,77 @@ mod tests {
         let (src, proto) = IcecastSource::connect(&cfg).unwrap();
         assert_eq!(proto, HandshakeProtocol::Put);
         assert_eq!(src.meta_interval, 8192);
+    }
+
+    /// A strict server sends `100 Continue` first and the final status in a
+    /// LATER segment (separate writes + delay so they cannot coalesce).
+    /// The client must wait for the real status instead of rejecting the 100.
+    #[test]
+    fn handshake_split_100_continue_then_200() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut head = Vec::new();
+                let mut one = [0u8; 1];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 65536 {
+                    match sock.read(&mut one) {
+                        Ok(1) => head.push(one[0]),
+                        _ => break,
+                    }
+                }
+                let req = String::from_utf8_lossy(&head).to_string();
+                assert!(req.starts_with("PUT /stream HTTP/1.1"), "{req}");
+                let _ = sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+                let _ = sock.flush();
+                // Force separate segments: the 200 must arrive later.
+                std::thread::sleep(Duration::from_millis(400));
+                let _ = sock.write_all(ok_response(0).as_bytes());
+                let _ = sock.flush();
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        });
+        let cfg = StreamConfig {
+            host: addr.split(':').next().unwrap().to_string(),
+            port: addr.rsplit(':').next().unwrap().parse().unwrap(),
+            ..Default::default()
+        };
+        let (_src, proto) = IcecastSource::connect(&cfg).unwrap();
+        assert_eq!(proto, HandshakeProtocol::Put);
+    }
+
+    /// Pre-2.4 servers close the PUT connection without a reply; the client
+    /// must reconnect with legacy SOURCE — carrying the mount in the path.
+    #[test]
+    fn handshake_source_fallback_carries_mount() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Attempt 1 (PUT): hang up with no reply, like old servers.
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = vec![0u8; 8192];
+                let _ = sock.read(&mut buf);
+            }
+            // Attempt 2 (SOURCE): answer 200.
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = sock.write_all(ok_response(0).as_bytes());
+                let _ = sock.flush();
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        });
+        let cfg = StreamConfig {
+            host: addr.split(':').next().unwrap().to_string(),
+            port: addr.rsplit(':').next().unwrap().parse().unwrap(),
+            ..Default::default()
+        };
+        let (_src, proto) = IcecastSource::connect(&cfg).unwrap();
+        assert_eq!(proto, HandshakeProtocol::Source);
+        let req = rx.recv_timeout(Duration::from_secs(15)).unwrap();
+        assert!(req.starts_with("SOURCE /stream "), "{req}");
     }
 
     #[test]
