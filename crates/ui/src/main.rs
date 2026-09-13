@@ -2171,16 +2171,18 @@ fn view(state: &App) -> Element<'_, Message> {
 
     row![
         view_sidebar(state),
+        iced::widget::rule::vertical(1),
         container(body).width(Length::Fill).height(Length::Fill),
     ]
     .into()
 }
 
 /// Halloy-style left sidebar (v1: fixed position, no collapse, no badges):
-/// station name, one entry per screen with the active one highlighted, and
-/// the on-air status pinned at the bottom so it is visible everywhere.
+/// station name, a scrollable entry list (one per screen, active
+/// highlighted), and the on-air status pinned at the bottom so it is
+/// visible everywhere.
 fn view_sidebar(state: &App) -> Element<'_, Message> {
-    let mut entries = column![text(&state.station_name).size(15)].spacing(4);
+    let mut list = column![].spacing(4);
     for s in [
         Screen::Home,
         Screen::Playout,
@@ -2196,7 +2198,7 @@ fn view_sidebar(state: &App) -> Element<'_, Message> {
         } else {
             s.label().to_string()
         };
-        entries = entries.push(
+        list = list.push(
             button(text(label).size(13))
                 .width(Length::Fill)
                 .on_press(Message::Navigate(s)),
@@ -2207,14 +2209,19 @@ fn view_sidebar(state: &App) -> Element<'_, Message> {
     } else {
         "Off air".to_string()
     };
-    entries = entries
-        .push(iced::widget::space::vertical())
-        .push(text(status).size(11));
 
-    container(entries.spacing(6).padding(10))
-        .width(Length::Fixed(172.0))
-        .height(Length::Fill)
-        .into()
+    container(
+        column![
+            text(&state.station_name).size(15),
+            scrollable(list).height(Length::Fill),
+            text(status).size(11),
+        ]
+        .spacing(6)
+        .padding(10),
+    )
+    .width(Length::Fixed(172.0))
+    .height(Length::Fill)
+    .into()
 }
 
 fn view_home(state: &App) -> Element<'_, Message> {
