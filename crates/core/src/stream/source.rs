@@ -230,6 +230,12 @@ impl IcecastSource {
                 .to_string();
         }
         if !status.starts_with("HTTP/1.0 200") && !status.starts_with("HTTP/1.1 200") {
+            if status.contains("404") {
+                return Err(CrabError::Audio(format!(
+                    "Icecast 404 for mount '{mount}': mountpoint not found — \
+                     check the mount name and the server's mount configuration"
+                )));
+            }
             return Err(CrabError::Audio(format!("Icecast rejected: {status}")));
         }
 

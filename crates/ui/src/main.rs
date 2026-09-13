@@ -2079,7 +2079,9 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 .set_stream_config(state.settings.stream.clone());
         }
         Message::StreamPassword(v) => {
-            if v != "••••••" && !v.is_empty() {
+            // Empty edits are ignored so the saved password cannot be
+            // wiped by clearing the field; there is no length cap.
+            if !v.is_empty() {
                 state.settings.stream.password = v;
                 state.save_settings();
                 state
@@ -3177,16 +3179,10 @@ fn view_settings(state: &App) -> Element<'_, Message> {
             text_input("Username", &stream_cfg.username)
                 .on_input(Message::StreamUsername)
                 .padding(6),
-            text_input(
-                "Password",
-                if stream_cfg.password.is_empty() {
-                    ""
-                } else {
-                    "••••••"
-                }
-            )
-            .on_input(Message::StreamPassword)
-            .padding(6),
+            text_input("Password", &stream_cfg.password)
+                .on_input(Message::StreamPassword)
+                .secure(true)
+                .padding(6),
             stepper(
                 format!("Bitrate: {} kbps", stream_cfg.bitrate_kbps),
                 Message::StreamBitrateDec,
