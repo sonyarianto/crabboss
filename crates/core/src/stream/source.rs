@@ -7,8 +7,8 @@
 //! metadata updates via the in-stream `icy-meta` protocol.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::time::Duration;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 
@@ -21,6 +21,13 @@ use crate::stream::StreamConfig;
 /// leaves a half-open connection holding the mount (the next attempt
 /// then eats a 409 "in use" for our own zombie).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long to wait for a handshake REPLY once connected. Rejections
+/// (401/403/404/409) always arrive instantly; a `100 Continue` means
+/// "send the body now". Past this wait with total silence we proceed
+/// optimistically — some stacks only finalize after body bytes start
+/// flowing, and stalling here is worse than streaming into the void
+/// (a dead socket surfaces on the first send anyway).
+const HANDSHAKE_GRACE: Duration = Duration::from_secs(5);
 
 /// An established source connection to an Icecast server.
 #[derive(Debug)]
@@ -130,7 +137,14 @@ impl IcecastSource {
     /// socket first so the TLS handshake itself stays bounded; SNI uses
     /// the configured host.
     fn open(config: &StreamConfig, addr: &str) -> Result<SourceStream> {
-        let stream = TcpStream::connect(addr)
+        // Bounded resolve + connect: a filtered port must fail here in
+        // seconds, not after the OS minute-long TCP timeout.
+        let sock_addr = addr
+            .to_socket_addrs()
+            .map_err(|e| CrabError::Audio(format!("Icecast resolve {addr}: {e}")))?
+            .next()
+            .ok_or_else(|| CrabError::Audio(format!("Icecast resolve {addr}: no address")))?;
+        let stream = TcpStream::connect_timeout(&sock_addr, HANDSHAKE_TIMEOUT)
             .map_err(|e| CrabError::Audio(format!("Icecast connect {addr}: {e}")))?;
         stream
             .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
@@ -213,25 +227,41 @@ impl IcecastSource {
             .flush()
             .map_err(|e| CrabError::Audio(format!("Icecast flush: {e}")))?;
 
-        // Read response headers. A provisional `100 Continue` is followed by
-        // the real status in a LATER segment, so keep reading (preserving
-        // any pipelined bytes) instead of judging the first block.
+        // Bound the reply wait. Rejections (401/403/404/409) always arrive
+        // instantly and are honored below. A `100 Continue` IS the go-ahead
+        // ("send the body now") — per Icecast's own source code the final
+        // 200 for a PUT source may only arrive at teardown, so waiting for
+        // one here can stall a healthy connection forever. Total silence
+        // gets an optimistic proceed: some stacks only finalize once body
+        // bytes start flowing, and a dead socket surfaces on the first
+        // send anyway.
+        stream
+            .socket()
+            .set_read_timeout(Some(HANDSHAKE_GRACE))
+            .map_err(|e| CrabError::Audio(format!("Icecast timeouts: {e}")))?;
+        let t0 = Instant::now();
         let mut pending = Vec::new();
-        let mut response = Self::read_response_headers(stream, &mut pending)?;
-        let mut status = response
+        let response = match Self::read_response_headers(stream, &mut pending) {
+            Ok(r) => r,
+            Err(_) if t0.elapsed() >= HANDSHAKE_GRACE => {
+                tracing::warn!(
+                    "No handshake reply in {:?}; streaming optimistically — \
+                     the server may finalize once audio starts flowing",
+                    HANDSHAKE_GRACE
+                );
+                return Ok(0);
+            }
+            Err(e) => return Err(e),
+        };
+        let status = response
             .lines()
             .next()
             .unwrap_or_default()
             .trim()
             .to_string();
         if status.starts_with("HTTP/1.1 100") || status.starts_with("HTTP/1.0 100") {
-            response = Self::read_response_headers(stream, &mut pending)?;
-            status = response
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+            tracing::info!("Icecast handshake OK ({method}, go-ahead 100)");
+            return Ok(Self::meta_interval(&response));
         }
         if !status.starts_with("HTTP/1.0 200") && !status.starts_with("HTTP/1.1 200") {
             if status.contains("404") {
@@ -244,7 +274,14 @@ impl IcecastSource {
         }
 
         // Negotiated metadata interval (bytes between metadata blocks).
-        let meta_interval = response
+        let meta_interval = Self::meta_interval(&response);
+        tracing::info!("Icecast handshake OK ({method}, metadata interval {meta_interval})");
+        Ok(meta_interval)
+    }
+
+    /// `ice-metadata-interval` harvested from a handshake block (0 absent).
+    fn meta_interval(response: &str) -> usize {
+        response
             .lines()
             .find_map(|l| {
                 let (k, v) = l.split_once(':')?;
@@ -252,9 +289,7 @@ impl IcecastSource {
                     .eq_ignore_ascii_case("ice-metadata-interval")
                     .then(|| v.trim().parse::<usize>().ok())?
             })
-            .unwrap_or(0);
-        tracing::info!("Icecast handshake OK ({method}, metadata interval {meta_interval})");
-        Ok(meta_interval)
+            .unwrap_or(0)
     }
 
     /// Read one response header block (through the blank line), preserving
@@ -466,6 +501,86 @@ mod tests {
 
     /// Pre-2.4 servers close the PUT connection without a reply; the client
     /// must reconnect with legacy SOURCE — carrying the mount in the path.
+    /// A lone `100 Continue` with nothing after it is already the go-ahead:
+    /// Icecast only sends the final 200 at teardown, so waiting for one
+    /// would stall a healthy connection until timeout.
+    #[test]
+    fn handshake_lone_100_is_enough() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = vec![0u8; 8192];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+                let _ = sock.flush();
+                // Then silence: no 200 ever follows on a live source.
+                std::thread::sleep(Duration::from_secs(3));
+            }
+        });
+        let cfg = StreamConfig {
+            host: addr.split(':').next().unwrap().to_string(),
+            port: addr.rsplit(':').next().unwrap().parse().unwrap(),
+            ..Default::default()
+        };
+        let (_src, proto) = IcecastSource::connect(&cfg).unwrap();
+        assert_eq!(proto, HandshakeProtocol::Put);
+    }
+
+    /// Total silence gets an optimistic proceed after the grace wait (some
+    /// stacks only finalize once body bytes flow); a dead socket surfaces
+    /// on the first send instead of hanging the connect forever.
+    #[test]
+    fn handshake_silence_proceeds_optimistically() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = vec![0u8; 8192];
+                let _ = sock.read(&mut buf);
+                // Say nothing at all, but keep the socket open.
+                std::thread::sleep(Duration::from_secs(15));
+            }
+        });
+        let cfg = StreamConfig {
+            host: addr.split(':').next().unwrap().to_string(),
+            port: addr.rsplit(':').next().unwrap().parse().unwrap(),
+            ..Default::default()
+        };
+        let t0 = std::time::Instant::now();
+        let (_src, proto) = IcecastSource::connect(&cfg).unwrap();
+        assert_eq!(proto, HandshakeProtocol::Put);
+        assert!(
+            t0.elapsed() >= Duration::from_secs(4),
+            "should wait out the grace wait, took {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// A hangup with no reply at all is a definite rejection (legacy
+    /// servers do this to PUT): must Err so the SOURCE fallback still runs.
+    #[test]
+    fn handshake_eof_is_rejection_not_optimism() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            // Both attempts (PUT then SOURCE): read, then hang up silently.
+            for _ in 0..2 {
+                if let Ok((mut sock, _)) = listener.accept() {
+                    let mut buf = vec![0u8; 8192];
+                    let _ = sock.read(&mut buf);
+                }
+            }
+        });
+        let cfg = StreamConfig {
+            host: addr.split(':').next().unwrap().to_string(),
+            port: addr.rsplit(':').next().unwrap().parse().unwrap(),
+            ..Default::default()
+        };
+        let err = IcecastSource::connect(&cfg).unwrap_err();
+        assert!(err.to_string().contains("SOURCE"), "{err}");
+    }
+
     #[test]
     fn handshake_source_fallback_carries_mount() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
