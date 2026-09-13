@@ -592,7 +592,12 @@ impl CpalEngine {
             stream: Arc::new(Mutex::new(crate::stream::StreamManager::new(
                 crate::stream::StreamConfig::default(),
             ))),
-            stream_tap: Arc::new(Mutex::new(None)),
+            // Must share the SAME Arc handed to the audio callback above:
+            // `stream_start`/`stream_stop` publish the live tap through this
+            // handle, and the callback drains it. (A second `Arc::new` here
+            // would silently break streaming — the callback would see `None`
+            // forever while the UI reports Live. See `stream_tap_flows`.)
+            stream_tap,
             _mic_stream: None,
             mic_consumer,
             mic_live,
@@ -1526,6 +1531,86 @@ mod tests {
         eng.set_volume(0.5);
         assert!((eng.volume() - 0.5).abs() < 1e-6);
         assert_eq!(eng.volume.load(Ordering::SeqCst), 0.5f32.to_bits());
+    }
+
+    /// Streaming smoke test: audio played locally must arrive at the Icecast
+    /// server. Guards against the tap handle published by `stream_start`
+    /// never reaching the audio callback (which fails silent: the sender
+    /// connects, reports Live, and then sends zero bytes forever).
+    /// Needs a real output device — skipped headless (no callback exists).
+    #[test]
+    fn stream_tap_flows_to_the_server() {
+        use std::io::Read;
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        let dir = loader_test_dir("streamtap");
+        let f = dir.join("a.wav");
+        write_test_wav(&f, 4.0, 44100);
+
+        let mut eng = CpalEngine::new();
+        if !eng.has_audio_device() {
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+
+        // Fake Icecast: accept the PUT handshake, reply 200, count every
+        // byte after the header as delivered audio.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let received = Arc::new(AtomicU64::new(0));
+        let received_cb = received.clone();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                sock.set_read_timeout(Some(std::time::Duration::from_secs(25)))
+                    .ok();
+                let mut head = Vec::new();
+                let mut one = [0u8; 1];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 65536 {
+                    match sock.read(&mut one) {
+                        Ok(1) => head.push(one[0]),
+                        _ => break,
+                    }
+                }
+                let _ = sock.write_all(b"HTTP/1.0 200 OK\r\n\r\n");
+                let _ = sock.flush();
+                let mut buf = [0u8; 8192];
+                loop {
+                    match sock.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            received_cb.fetch_add(n as u64, Ordering::SeqCst);
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
+
+        let cfg = crate::stream::StreamConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port,
+            ..crate::stream::StreamConfig::default()
+        };
+        eng.set_stream_config(cfg);
+        eng.play(&f).unwrap();
+        wait_for("deck live", || {
+            eng.state() == PlayerState::Playing && eng.current_track().is_some_and(|t| t.path == f)
+        });
+        eng.stream_start().unwrap();
+        assert!(
+            eng.stream_tap.lock().unwrap().is_some(),
+            "engine holds the live tap"
+        );
+        wait_for("audio reaches the server", || {
+            received.load(Ordering::SeqCst) >= 4096
+        });
+        assert!(eng.stream_stats().bytes_sent > 0);
+        eng.stream_stop();
+        eng.stop();
+        assert_eq!(eng.stream_state(), crate::stream::StreamState::Off);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
