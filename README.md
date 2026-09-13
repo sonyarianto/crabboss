@@ -30,8 +30,8 @@ A professional radio station management application inspired by RadioBoss, featu
 
 | Layer | Technology |
 |-------|-----------|
-| UI Framework | [Iced](https://iced.rs/) (v0.13, Elm architecture) |
-| Audio Playback | [cpal](https://github.com/RustAudio/cpal) |
+| UI Framework | [Iced](https://iced.rs/) (v0.14, Elm architecture; wgpu with tiny-skia fallback) |
+| Audio Playback | [cpal](https://github.com/RustAudio/cpal) (v0.18) |
 | Audio Decoding | [symphonia](https://crates.io/crates/symphonia) |
 | Metadata | [lofty](https://crates.io/crates/lofty) |
 | Database | [rusqlite](https://crates.io/crates/rusqlite) (SQLite) |
@@ -46,9 +46,16 @@ crabboss/
 ├── crates/
 │   ├── core/           # crabcore — audio engine, library, playlists
 │   │   └── src/
-│   │       ├── audio/  # Player, DSP, streaming
+│   │       ├── audio/  # Player, DSP, streaming, mic
 │   │       ├── library/ # SQLite library & metadata
-│   │       └── playlist/ # Playlist management
+│   │       ├── playlist/ # Playlist management + generator
+│   │       ├── scheduler/ # Timed events + expiration
+│   │       ├── cart/    # Cart wall pads
+│   │       ├── ads/     # Dated ad blocks
+│   │       ├── stream/  # Icecast source client
+│   │       ├── report.rs # Play-log reports
+│   │       ├── settings.rs # Persisted prefs (incl. station name)
+│   │       └── license.rs # Offline license keys
 │   └── ui/             # crabui — Iced desktop application
 │       └── src/main.rs   # Elm app: 8 screens + tick subscriptions
 └── README.md

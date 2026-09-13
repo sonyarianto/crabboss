@@ -22,16 +22,19 @@ the legacy rodio `Player` and the `rodio` dependency are removed.
 **Target:**
 - `cpal` for I/O (output + input streams, device enum, format/latency control).
 - `symphonia` directly for decode (mp3/flac/aac/ogg/wav/aiff/opus).
-- `rubato` for resampling to device rate, `rtrb` for decoder→mixer ring buffer.
+- `rubato` for resampling to device rate at decode time; background loader
+  thread decodes full tracks off the UI thread; `rtrb` rings carry mic
+  input and the stream tap (lock-free, audio-thread-safe).
 - Keep `lofty` for metadata, `rusqlite` for library.
 
-**Target signal chain:**
+**As-built signal chain:**
 ```
-symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
-  Mixer [gain -> 12-band EQ (biquad) -> crossfade -> limiter] ->
-    cpal OutputStream (program)
-    + cpal InputStream (mic/line-in, mixed/ducked)
-    + Icecast/Shoutcast tee (encoded stream)
+background loader: symphonia decode -> loudness gain -> rubato resample ->
+  install dual-cursor deck (crossfade handoff, generation-guarded)
+Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
+  cpal OutputStream (program, x monitor volume)
+  + cpal InputStream (mic/line-in via rtrb, ducked, pre-limiter/tap)
+  + Icecast tee (post-DSP tap via rtrb -> MP3 sender thread)
 ```
 
 **Migration (kept `crabui` working throughout):**
@@ -56,15 +59,17 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [x] Crossfader + gapless (see §1.1 — stereo dual-cursor engine, equal-power/linear curves, background decode loader)
 - [x] 12-band EQ + limiter (see §1.1)
 - [x] Playlist auto-generator with rotation rules (engine done: repeat/separation/priority/daypart/jingles; UI presets open)
-- [x] Auto-DJ continuity: 1 s tick with live progress, prefetch handoff
-      (cpal, 8 s horizon), EOF restart, Next/Prev, persisted ON/OFF + Up-next
+- [x] Auto-DJ continuity: 200 ms tick with live progress, prefetch handoff
+      (cpal, 8 s horizon), single-outstanding prefetch guard (in-flight
+      decodes count as pending — no duplicate queue storms), EOF restart,
+      Next/Prev, persisted ON/OFF + Up-next
 - [x] Ad scheduler (dated blocks with intros/outros, chained breaks — see §1.3)
 - [x] Icecast/Shoutcast output (see §1.5)
 - [x] Mic/line-in input with ducking (see §1.6)
 - [x] Report generator (play logs → CSV + screen; XLS/PDF open — see §1.9)
 - [x] File dialog (`rfd`) + import progress in UI (see §1.9) — native multi-select dialog, chunked per-tick import with live status
 - [x] Settings screen (device picker, live DSP prefs, license, streaming config — see §1.9)
-- [ ] Quality: `cargo fmt/clippy`, unit tests (`library`, `playlist`), CI (see §1.10)
+- [x] Quality: `cargo fmt/clippy`, unit tests (`library`, `playlist`), CI (see §1.10)
 
 ## Gap Matrix vs RadioBOSS 7.x (2026)
 
@@ -90,7 +95,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Stream archive | Scheduled output recording | — | — |
 | License | Offline key, holder, tier | MVP done (checksum → ed25519 TODO) | ✅ |
 | File import UX | File dialog | Native `rfd` multi-select import with per-tick progress + report-export dialog | ✅ |
-| Quality gates | — | 107 tests green (library, playlist, scheduler, cart, mixer, license, stream); `cargo fmt` + `clippy -D warnings` in CI | ✅ |
+| Quality gates | — | 113 tests green (library, playlist, scheduler, cart, mixer, license, stream, audio engine); `cargo fmt` + `clippy -D warnings` in CI | ✅ |
 
 Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardware, see §2).
 
@@ -153,7 +158,8 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] Settings UI: STREAM ON/OFF toggle (auto-start on launch when enabled),
       host/port/mount/password fields (Enter commits, persisted), bitrate
       ladder stepper (8–320 kbps), live status (⏳ Connecting/🔴 Live/⚠ error)
-      + bytes/uptime stats
+      + bytes/uptime stats; stream tap handle shared with the audio
+      callback (fixed silent dead-air-while-Live)
 - [ ] Shoutcast v1/v2 source client
 - [ ] Listener/connection stats in UI (local bytes/uptime done; listener counts need Icecast admin/JSON API)
 - [ ] Artwork metadata forwarding to encoders
@@ -174,7 +180,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 
 ### 1.7 Reliability
 - [x] Silence detector: `SilenceMonitor` meters the cpal mix bus (−60 dBFS floor,
-      10 s default threshold); UI polls every 5 s and auto-recovers dead air
+      10 s default threshold); the 200 ms UI tick auto-recovers dead air
       with a filler music track (rate-limited 1/min).
 - [x] Background library health scan: `missing_files()` + startup scan, on-demand
       `✓ Health` button in Media/Playout, ⚠ prefixes on missing rows
@@ -190,12 +196,13 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] Play-log reports: range presets (Today/7d/30d/All), jingle+ad exclusion, newest-100 list, CSV export
 - [ ] XLS/PDF export (CSV done — spreadsheets/royalty bodies accept it; native XLS/PDF later)
 - [x] Settings screen: output device picker (persisted, applies on restart, with
-      unplugged-device fallback), engine display, crossfade + silence-alarm
+      unplugged-device fallback), station name (persisted, dashboard header),
+      engine display, crossfade + silence-alarm
       steppers (persisted, applied live), license section
 - [x] `rfd` native file dialog for import (+ report export)
 
 ### 1.10 Quality gates
-- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — 107 tests green: kind classification + repair, loudness store/count, migrations, generator rules, manager CRUD
+- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — 113 tests green: kind classification + repair, loudness store/count, migrations, generator rules, manager CRUD, audio engine (loader generations, tap sharing, prefetch guard)
 - [x] `cargo fmt` + `clippy` in CI (`-D warnings`, zero warnings) + `ci.yml` (fmt/clippy/test on push+PR)
 
 ## 2. Beyond Parity — Where CrabBoss Wins
