@@ -2410,7 +2410,32 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
         .on_input(Message::LibrarySearchChanged)
         .padding(8);
 
-    let mut list = column![].spacing(2);
+    // Fixed column widths shared by the header and every row, so the list
+    // reads as a table: only Title/Artist flex, everything else lines up.
+    const PLAY_W: f32 = 64.0;
+    const KIND_W: f32 = 70.0;
+    const DUR_W: f32 = 56.0;
+    const GAIN_W: f32 = 72.0;
+
+    let mut list = column![
+        row![
+            text("").width(PLAY_W),
+            text("Kind").width(KIND_W).size(11),
+            text("Title").width(Length::Fill).size(11),
+            text("Artist").width(Length::Fill).size(11),
+            text("Dur")
+                .width(DUR_W)
+                .size(11)
+                .align_x(iced::alignment::Horizontal::Right),
+            text("Gain")
+                .width(GAIN_W)
+                .size(11)
+                .align_x(iced::alignment::Horizontal::Right),
+        ]
+        .spacing(6),
+        iced::widget::rule::horizontal(1),
+    ]
+    .spacing(4);
     if state.lib_tracks.is_empty() {
         list = list.push(text("Import audio files to get started").size(12));
     } else {
@@ -2432,21 +2457,26 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
                 .unwrap_or_default();
             list = list.push(
                 row![
-                    button(text("Play").size(11)).on_press(Message::LibraryTrackPlay(i)),
-                    button(
-                        text(format!(
-                            "{} | {} | {} | {} | {}",
-                            kind_label(t.kind),
-                            title,
-                            artist,
-                            dur,
-                            gain
-                        ))
+                    button(text("Play").size(11))
+                        .width(PLAY_W)
+                        .on_press(Message::LibraryTrackPlay(i)),
+                    text(kind_label(t.kind)).size(12).width(KIND_W),
+                    button(text(title).size(12))
+                        .style(iced::widget::button::text)
+                        .width(Length::Fill)
+                        .on_press(Message::LibraryTrackSelected(i)),
+                    text(artist).size(12).width(Length::Fill),
+                    text(dur)
                         .size(12)
-                    )
-                    .on_press(Message::LibraryTrackSelected(i)),
+                        .width(DUR_W)
+                        .align_x(iced::alignment::Horizontal::Right),
+                    text(gain)
+                        .size(12)
+                        .width(GAIN_W)
+                        .align_x(iced::alignment::Horizontal::Right),
                 ]
-                .spacing(6),
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
             );
         }
         if shown > 500 {
