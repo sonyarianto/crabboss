@@ -2414,7 +2414,7 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
     // reads as a table: only Title/Artist flex, everything else lines up.
     const PLAY_W: f32 = 64.0;
     const KIND_W: f32 = 70.0;
-    const DUR_W: f32 = 56.0;
+    const DUR_W: f32 = 68.0;
     const GAIN_W: f32 = 72.0;
 
     let mut list = column![
@@ -2423,7 +2423,7 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
             text("Kind").width(KIND_W).size(11),
             text("Title").width(Length::Fill).size(11),
             text("Artist").width(Length::Fill).size(11),
-            text("Dur")
+            text("Duration")
                 .width(DUR_W)
                 .size(11)
                 .align_x(iced::alignment::Horizontal::Right),
