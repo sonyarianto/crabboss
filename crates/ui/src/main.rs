@@ -2435,7 +2435,10 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
         .spacing(6),
         iced::widget::rule::horizontal(1),
     ]
-    .spacing(4);
+    .spacing(4)
+    // Keep text clear of the floating scrollbar, which would otherwise
+    // cover the last pixels of the Gain column.
+    .padding(iced::padding::right(14));
     if state.lib_tracks.is_empty() {
         list = list.push(text("Import audio files to get started").size(12));
     } else {
@@ -2457,9 +2460,14 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
                 .unwrap_or_default();
             list = list.push(
                 row![
-                    button(text("Play").size(11))
-                        .width(PLAY_W)
-                        .on_press(Message::LibraryTrackPlay(i)),
+                    button(
+                        text("Play")
+                            .size(11)
+                            .width(Length::Fill)
+                            .align_x(iced::alignment::Horizontal::Center)
+                    )
+                    .width(PLAY_W)
+                    .on_press(Message::LibraryTrackPlay(i)),
                     text(kind_label(t.kind)).size(12).width(KIND_W),
                     button(text(title).size(12))
                         .style(iced::widget::button::text)
