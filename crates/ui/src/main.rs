@@ -2911,6 +2911,23 @@ fn stepper(label: String, dec: Message, inc: Message) -> Element<'static, Messag
     .into()
 }
 
+/// A settings section card: titled container on a lifted, rounded surface.
+/// Groups related controls so the page scans as sections, not one long form.
+fn settings_card<'a>(
+    title: &'a str,
+    content: iced::widget::Column<'a, Message>,
+) -> Element<'a, Message> {
+    container(column![text(title).size(14), content].spacing(8))
+        .padding(12)
+        .width(Length::Fill)
+        .style(|theme: &Theme| {
+            iced::widget::container::Style::default()
+                .background(theme.extended_palette().background.weak.color)
+                .border(iced::Border::default().rounded(8.0))
+        })
+        .into()
+}
+
 fn view_settings(state: &App) -> Element<'_, Message> {
     let s = &state.settings;
     let stream_cfg = state.player.stream_config();
@@ -2921,26 +2938,25 @@ fn view_settings(state: &App) -> Element<'_, Message> {
 
     let mut devices = column![text("Output devices:").size(12)].spacing(4);
     for d in &state.output_devices {
-        let label = if *d == state.sel_device {
-            format!("[{}]", d)
-        } else {
-            d.clone()
-        };
         let name = d.clone();
-        devices = devices
-            .push(button(text(label).size(12)).on_press(Message::SettingsSelectDevice(name)));
+        let entry = button(text(d).size(12)).on_press(Message::SettingsSelectDevice(name));
+        devices = devices.push(if *d == state.sel_device {
+            entry.style(iced::widget::button::primary)
+        } else {
+            entry
+        });
     }
 
     let mut inputs = column![text("Input devices:").size(12)].spacing(4);
     let cur_mic = mic_cfg.device.clone().unwrap_or_default();
     for d in &state.input_devices {
-        let label = if *d == cur_mic {
-            format!("[{}]", d)
-        } else {
-            d.clone()
-        };
         let name = d.clone();
-        inputs = inputs.push(button(text(label).size(12)).on_press(Message::MicSelectDevice(name)));
+        let entry = button(text(d).size(12)).on_press(Message::MicSelectDevice(name));
+        inputs = inputs.push(if *d == cur_mic {
+            entry.style(iced::widget::button::primary)
+        } else {
+            entry
+        });
     }
 
     let mut eq = column![text("12-band EQ:").size(12)].spacing(2);
@@ -2964,160 +2980,204 @@ fn view_settings(state: &App) -> Element<'_, Message> {
     scrollable(
         column![
             text("Settings").size(16),
-            text(format!("License: {}", state.license_status)).size(12),
-            text(&state.license_error).size(11),
-            row![
-                text_input("License key CB-XXXX-XXXX-XXXX", &state.license_key)
-                    .on_input(Message::LicenseKeyInput)
-                    .padding(6),
-                button(text("Activate").size(12)).on_press(Message::ActivateLicense),
-                button(text("Clear").size(12)).on_press(Message::ClearLicense),
-            ]
-            .spacing(6),
-            text("Station").size(14),
-            text_input("Station name", &state.settings.station_name)
-                .on_input(Message::StationName)
-                .padding(6),
-            text(format!(
-                "Engine: {} | Device: {}",
-                state.audio_engine,
-                state.player.device_name()
-            ))
-            .size(12),
-            devices,
-            text(&state.device_note).size(11),
-            button(text("Refresh devices").size(12)).on_press(Message::SettingsRefreshDevices),
-            stepper(
-                format!("Crossfade: {:.1} s", s.crossfade_secs),
-                Message::XfadeDec,
-                Message::XfadeInc
+            settings_card(
+                "License",
+                column![
+                    text(format!("License: {}", state.license_status)).size(12),
+                    text(&state.license_error).size(11),
+                    row![
+                        text_input("License key CB-XXXX-XXXX-XXXX", &state.license_key)
+                            .on_input(Message::LicenseKeyInput)
+                            .padding(6),
+                        button(text("Activate").size(12)).on_press(Message::ActivateLicense),
+                        button(text("Clear").size(12)).on_press(Message::ClearLicense),
+                    ]
+                    .spacing(6),
+                ]
+                .spacing(6)
             ),
-            stepper(
-                format!("Silence alarm: {:.0} s", s.silence_threshold_secs),
-                Message::SilenceDec,
-                Message::SilenceInc
+            settings_card(
+                "Station",
+                column![text_input("Station name", &state.settings.station_name)
+                    .on_input(Message::StationName)
+                    .padding(6),]
+                .spacing(6)
             ),
-            row![
-                checkbox(s.eq_enabled)
-                    .label("EQ enabled")
-                    .on_toggle(|_| Message::EqToggle),
-                button(text("Reset EQ").size(11)).on_press(Message::EqReset),
-            ]
-            .spacing(8),
-            eq,
-            stepper(
-                format!("Limiter: {:.1} dBFS", lin_to_dbfs(s.limiter_ceiling)),
-                Message::LimiterDec,
-                Message::LimiterInc
+            settings_card(
+                "Audio Device",
+                column![
+                    text(format!(
+                        "Engine: {} | Device: {}",
+                        state.audio_engine,
+                        state.player.device_name()
+                    ))
+                    .size(12),
+                    devices,
+                    text(&state.device_note).size(11),
+                    button(text("Refresh devices").size(12))
+                        .on_press(Message::SettingsRefreshDevices),
+                ]
+                .spacing(6)
             ),
-            row![checkbox(s.loudness_norm)
-                .label("Loudness normalize")
-                .on_toggle(|_| Message::LoudnessToggle),]
-            .spacing(8),
-            stepper(
-                format!("Target: {:.0} LUFS", s.loudness_target_lufs),
-                Message::LoudnessTargetDec,
-                Message::LoudnessTargetInc
+            settings_card(
+                "Playout",
+                column![
+                    stepper(
+                        format!("Crossfade: {:.1} s", s.crossfade_secs),
+                        Message::XfadeDec,
+                        Message::XfadeInc
+                    ),
+                    stepper(
+                        format!("Silence alarm: {:.0} s", s.silence_threshold_secs),
+                        Message::SilenceDec,
+                        Message::SilenceInc
+                    ),
+                ]
+                .spacing(6)
             ),
-            text("Streaming (Icecast)").size(14),
-            row![
-                checkbox(stream_cfg.enabled)
-                    .label("Stream enabled")
-                    .on_toggle(|_| Message::StreamToggle),
-                text(stream_state.label()).size(12),
-                text(if stream_state.is_live() {
-                    format!(
-                        "{} kbps - {:.1} MB - {}s",
-                        stream_cfg.bitrate_kbps,
-                        stream_stats.bytes_sent as f64 / 1_048_576.0,
-                        stream_stats.stream_secs
-                    )
-                } else {
-                    String::new()
-                })
-                .size(11),
-            ]
-            .spacing(8),
-            text_input("Host", &stream_cfg.host)
-                .on_input(Message::StreamHost)
-                .padding(6),
-            text_input("Port", &stream_cfg.port.to_string())
-                .on_input(Message::StreamPort)
-                .padding(6),
-            text_input("Mount", &stream_cfg.mount)
-                .on_input(Message::StreamMount)
-                .padding(6),
-            text_input(
-                "Password",
-                if stream_cfg.password.is_empty() {
-                    ""
-                } else {
-                    "••••••"
-                }
-            )
-            .on_input(Message::StreamPassword)
-            .padding(6),
-            stepper(
-                format!("Bitrate: {} kbps", stream_cfg.bitrate_kbps),
-                Message::StreamBitrateDec,
-                Message::StreamBitrateInc
+            settings_card(
+                "Equalizer & Limiter",
+                column![
+                    row![
+                        checkbox(s.eq_enabled)
+                            .label("EQ enabled")
+                            .on_toggle(|_| Message::EqToggle),
+                        button(text("Reset EQ").size(11)).on_press(Message::EqReset),
+                    ]
+                    .spacing(8),
+                    eq,
+                    stepper(
+                        format!("Limiter: {:.1} dBFS", lin_to_dbfs(s.limiter_ceiling)),
+                        Message::LimiterDec,
+                        Message::LimiterInc
+                    ),
+                ]
+                .spacing(6)
             ),
-            text("Microphone / line-in").size(14),
-            row![
-                checkbox(mic_cfg.enabled)
-                    .label("Mic enabled")
-                    .on_toggle(|_| Message::MicToggle),
-                text(mic_state_label(&mic_state)).size(12),
-                text(if mic_state_is_live(&mic_state) {
-                    format!(
-                        "{:.1} dBFS{}",
-                        state.player.mic_level_db(),
-                        if state.player.mic_ducking() {
-                            " - ducking"
+            settings_card(
+                "Loudness",
+                column![
+                    row![checkbox(s.loudness_norm)
+                        .label("Loudness normalize")
+                        .on_toggle(|_| Message::LoudnessToggle),]
+                    .spacing(8),
+                    stepper(
+                        format!("Target: {:.0} LUFS", s.loudness_target_lufs),
+                        Message::LoudnessTargetDec,
+                        Message::LoudnessTargetInc
+                    ),
+                ]
+                .spacing(6)
+            ),
+            settings_card(
+                "Streaming (Icecast)",
+                column![
+                    row![
+                        checkbox(stream_cfg.enabled)
+                            .label("Stream enabled")
+                            .on_toggle(|_| Message::StreamToggle),
+                        text(stream_state.label()).size(12),
+                        text(if stream_state.is_live() {
+                            format!(
+                                "{} kbps - {:.1} MB - {}s",
+                                stream_cfg.bitrate_kbps,
+                                stream_stats.bytes_sent as f64 / 1_048_576.0,
+                                stream_stats.stream_secs
+                            )
                         } else {
+                            String::new()
+                        })
+                        .size(11),
+                    ]
+                    .spacing(8),
+                    text_input("Host", &stream_cfg.host)
+                        .on_input(Message::StreamHost)
+                        .padding(6),
+                    text_input("Port", &stream_cfg.port.to_string())
+                        .on_input(Message::StreamPort)
+                        .padding(6),
+                    text_input("Mount", &stream_cfg.mount)
+                        .on_input(Message::StreamMount)
+                        .padding(6),
+                    text_input(
+                        "Password",
+                        if stream_cfg.password.is_empty() {
                             ""
+                        } else {
+                            "••••••"
                         }
                     )
-                } else {
-                    String::new()
-                })
-                .size(11),
-            ]
-            .spacing(8),
-            inputs,
-            text(&state.mic_note).size(11),
-            button(text("Refresh inputs").size(12)).on_press(Message::MicRefreshDevices),
-            stepper(
-                format!("Mic level: {:.0}%", mic_cfg.level * 100.0),
-                Message::MicLevelDec,
-                Message::MicLevelInc
+                    .on_input(Message::StreamPassword)
+                    .padding(6),
+                    stepper(
+                        format!("Bitrate: {} kbps", stream_cfg.bitrate_kbps),
+                        Message::StreamBitrateDec,
+                        Message::StreamBitrateInc
+                    ),
+                ]
+                .spacing(6)
             ),
-            row![checkbox(mic_cfg.duck_enabled)
-                .label("Ducking")
-                .on_toggle(|_| Message::MicDuckToggle),]
-            .spacing(8),
-            stepper(
-                format!("Threshold: {:+.0} dB", mic_cfg.duck_threshold_db),
-                Message::MicThresholdDec,
-                Message::MicThresholdInc
-            ),
-            stepper(
-                format!("Depth: -{:.0} dB", mic_cfg.duck_depth_db),
-                Message::MicDepthDec,
-                Message::MicDepthInc
-            ),
-            stepper(
-                format!("Attack: {:.0} ms", mic_cfg.attack_ms),
-                Message::MicAttackDec,
-                Message::MicAttackInc
-            ),
-            stepper(
-                format!("Release: {:.0} ms", mic_cfg.release_ms),
-                Message::MicReleaseDec,
-                Message::MicReleaseInc
+            settings_card(
+                "Microphone / line-in",
+                column![
+                    row![
+                        checkbox(mic_cfg.enabled)
+                            .label("Mic enabled")
+                            .on_toggle(|_| Message::MicToggle),
+                        text(mic_state_label(&mic_state)).size(12),
+                        text(if mic_state_is_live(&mic_state) {
+                            format!(
+                                "{:.1} dBFS{}",
+                                state.player.mic_level_db(),
+                                if state.player.mic_ducking() {
+                                    " - ducking"
+                                } else {
+                                    ""
+                                }
+                            )
+                        } else {
+                            String::new()
+                        })
+                        .size(11),
+                    ]
+                    .spacing(8),
+                    inputs,
+                    text(&state.mic_note).size(11),
+                    button(text("Refresh inputs").size(12)).on_press(Message::MicRefreshDevices),
+                    stepper(
+                        format!("Mic level: {:.0}%", mic_cfg.level * 100.0),
+                        Message::MicLevelDec,
+                        Message::MicLevelInc
+                    ),
+                    row![checkbox(mic_cfg.duck_enabled)
+                        .label("Ducking")
+                        .on_toggle(|_| Message::MicDuckToggle),]
+                    .spacing(8),
+                    stepper(
+                        format!("Threshold: {:+.0} dB", mic_cfg.duck_threshold_db),
+                        Message::MicThresholdDec,
+                        Message::MicThresholdInc
+                    ),
+                    stepper(
+                        format!("Depth: -{:.0} dB", mic_cfg.duck_depth_db),
+                        Message::MicDepthDec,
+                        Message::MicDepthInc
+                    ),
+                    stepper(
+                        format!("Attack: {:.0} ms", mic_cfg.attack_ms),
+                        Message::MicAttackDec,
+                        Message::MicAttackInc
+                    ),
+                    stepper(
+                        format!("Release: {:.0} ms", mic_cfg.release_ms),
+                        Message::MicReleaseDec,
+                        Message::MicReleaseInc
+                    ),
+                ]
+                .spacing(6)
             ),
         ]
-        .spacing(10)
+        .spacing(12)
         .padding(12),
     )
     .into()
