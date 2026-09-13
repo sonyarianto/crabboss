@@ -3181,7 +3181,6 @@ fn view_settings(state: &App) -> Element<'_, Message> {
                 .padding(6),
             text_input("Password", &stream_cfg.password)
                 .on_input(Message::StreamPassword)
-                .secure(true)
                 .padding(6),
             stepper(
                 format!("Bitrate: {} kbps", stream_cfg.bitrate_kbps),
