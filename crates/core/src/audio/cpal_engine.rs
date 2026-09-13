@@ -733,7 +733,13 @@ impl CpalEngine {
     pub fn list_output_devices() -> Vec<String> {
         cpal::default_host()
             .output_devices()
-            .map(|devs| devs.filter_map(|d| d.name().ok()).collect::<Vec<_>>())
+            .map(|devs| {
+                devs
+                    .filter_map(|d| {
+                        d.description().ok().map(|desc| desc.name().to_string())
+                    })
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
     }
 
@@ -753,9 +759,9 @@ impl CpalEngine {
     ) -> std::result::Result<(cpal::Stream, u32, String), String> {
         let host = cpal::default_host();
         let named = want.as_deref().and_then(|n| {
-            host.output_devices()
-                .ok()
-                .and_then(|mut devs| devs.find(|d| d.name().is_ok_and(|dn| dn == n)))
+            host.output_devices().ok().and_then(|mut devs| {
+                devs.find(|d| d.description().is_ok_and(|desc| desc.name() == n))
+            })
         });
         if want.is_some() && named.is_none() {
             tracing::warn!(
@@ -766,15 +772,18 @@ impl CpalEngine {
         let device = named
             .or_else(|| host.default_output_device())
             .ok_or_else(|| "no output device".to_string())?;
-        let name = device.name().unwrap_or_else(|_| "Default".to_string());
+        let name = device
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| "Default".to_string());
         let config = device.default_output_config().map_err(|e| e.to_string())?;
-        let sample_rate = config.sample_rate().0;
+        let sample_rate = config.sample_rate();
         let channels = config.channels() as usize;
         let base_config: cpal::StreamConfig = config.into();
         // Stability over latency (radio playout): a deeper-than-default
         // buffer rides out scheduling jitter from other processes instead of
         // underrunning. Retried with the device default below when rejected.
-        let mut fixed_config = base_config.clone();
+        let mut fixed_config = base_config;
         fixed_config.buffer_size = cpal::BufferSize::Fixed(OUTPUT_BUFFER_FRAMES);
 
         let err_fn = |err| tracing::error!("cpal stream error: {}", err);
@@ -902,14 +911,14 @@ impl CpalEngine {
             }
         };
         let stream = device
-            .build_output_stream(&fixed_config, make_callback(), err_fn, None)
+            .build_output_stream(fixed_config, make_callback(), err_fn, None)
             .or_else(|e| {
                 tracing::warn!(
                     "Fixed {}-frame output buffer rejected ({}); using device default",
                     OUTPUT_BUFFER_FRAMES,
                     e
                 );
-                device.build_output_stream(&base_config, make_callback(), err_fn, None)
+                device.build_output_stream(base_config, make_callback(), err_fn, None)
             })
             .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
@@ -920,7 +929,13 @@ impl CpalEngine {
     pub fn list_input_devices() -> Vec<String> {
         cpal::default_host()
             .input_devices()
-            .map(|devs| devs.filter_map(|d| d.name().ok()).collect::<Vec<_>>())
+            .map(|devs| {
+                devs
+                    .filter_map(|d| {
+                        d.description().ok().map(|desc| desc.name().to_string())
+                    })
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
     }
 
@@ -936,9 +951,9 @@ impl CpalEngine {
         use cpal::SampleFormat;
         let host = cpal::default_host();
         let named = want.as_deref().and_then(|n| {
-            host.input_devices()
-                .ok()
-                .and_then(|mut devs| devs.find(|d| d.name().is_ok_and(|dn| dn == n)))
+            host.input_devices().ok().and_then(|mut devs| {
+                devs.find(|d| d.description().is_ok_and(|desc| desc.name() == n))
+            })
         });
         if want.is_some() && named.is_none() {
             tracing::warn!(
@@ -949,7 +964,10 @@ impl CpalEngine {
         let device = named
             .or_else(|| host.default_input_device())
             .ok_or_else(|| "no input device".to_string())?;
-        let name = device.name().unwrap_or_else(|_| "Default".to_string());
+        let name = device
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| "Default".to_string());
         // Prefer an f32 config at the output rate (zero resampling);
         // otherwise take the default input config and resample in the
         // callback. Non-f32-only devices are rejected (rare on desktop).
@@ -960,15 +978,13 @@ impl CpalEngine {
         let at_rate = supported.iter().find(|c| {
             c.sample_format() == SampleFormat::F32
                 && c.channels() >= 1
-                && c.min_sample_rate().0 <= device_rate
-                && device_rate <= c.max_sample_rate().0
+                && c.min_sample_rate() <= device_rate
+                && device_rate <= c.max_sample_rate()
         });
         let (stream_config, input_rate) = match at_rate {
             Some(c) => {
                 let channels = c.channels().min(8);
-                let cfg = (*c)
-                    .with_sample_rate(cpal::SampleRate(device_rate))
-                    .config();
+                let cfg = (*c).with_sample_rate(device_rate).config();
                 (cpal::StreamConfig { channels, ..cfg }, device_rate)
             }
             None => {
@@ -976,7 +992,7 @@ impl CpalEngine {
                 if def.sample_format() != SampleFormat::F32 {
                     return Err(format!("input '{name}' offers no f32 capture config"));
                 }
-                let rate = def.sample_rate().0;
+                let rate = def.sample_rate();
                 (def.config(), rate)
             }
         };
@@ -990,7 +1006,7 @@ impl CpalEngine {
         let mut scratch: Vec<(f32, f32)> = Vec::with_capacity(2048);
         let stream = device
             .build_input_stream(
-                &stream_config,
+                stream_config,
                 move |data: &[f32], _: &_| {
                     scratch.clear();
                     for frame in data.chunks(channels.max(1)) {
