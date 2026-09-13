@@ -124,6 +124,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Library loaded from: {}", db_path.display());
 
+    // Repair kind labels stored by older over-eager path rules
+    // (e.g. `Downloads/` mislabeled as ads) before seeding/stats.
+    match library.reclassify_all() {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Re-labeled {} tracks (kind repair)", n),
+        Err(e) => tracing::warn!("Kind repair scan failed: {}", e),
+    }
+
     // Loudness normalization: per-path gain lookup on its own db connection
     // (the main one moves into AppState below). Applies at decode time to
     // every play path (library, carts, scheduler, Auto-DJ).
@@ -325,30 +333,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_shown: &Rc<RefCell<Vec<crabcore::library::Track>>>,
     ) {
         let s = state.borrow();
+        // Repair stale kind labels first so the refreshed list shows them.
+        let fixed = s.library.reclassify_all().unwrap_or(0);
         let missing = s.library.missing_files().unwrap_or_default();
-        if missing.is_empty() {
-            ui.set_library_status("✓ All files OK".into());
-        } else {
+        let pending = s.library.count_missing_loudness().unwrap_or(0);
+        if !missing.is_empty() {
             for t in &missing {
                 tracing::warn!("Missing file: {}", t.file_path);
             }
-            ui.set_library_status(format!("⚠ {} files missing (see log)", missing.len()).into());
         }
+        if fixed > 0 {
+            tracing::info!("Health scan re-labeled {} tracks", fixed);
+        }
+        let mut parts = if missing.is_empty() {
+            vec!["✓ All files OK".to_string()]
+        } else {
+            vec![format!("⚠ {} files missing (see log)", missing.len())]
+        };
+        if fixed > 0 {
+            parts.push(format!("re-labeled {fixed}"));
+        }
+        if pending > 0 {
+            parts.push(format!("🔊 {pending} to analyze"));
+        }
+        ui.set_library_status(parts.join(" · ").into());
         let tracks = s.library.get_all_tracks().unwrap_or_default();
         ui.set_track_count(tracks.len() as i32);
         drop(s);
         refresh_library(ui, tracks, last_shown);
     }
     {
-        let n_missing = state
-            .borrow()
-            .library
-            .missing_files()
-            .unwrap_or_default()
-            .len();
-        if n_missing > 0 {
-            tracing::warn!("Startup health scan: {} missing files", n_missing);
-            ui.set_library_status(format!("⚠ {} files missing (see log)", n_missing).into());
+        let s = state.borrow();
+        let n_missing = s.library.missing_files().unwrap_or_default().len();
+        let pending = s.library.count_missing_loudness().unwrap_or(0);
+        if n_missing > 0 || pending > 0 {
+            if n_missing > 0 {
+                tracing::warn!("Startup health scan: {} missing files", n_missing);
+            }
+            let mut parts = Vec::new();
+            if n_missing > 0 {
+                parts.push(format!("⚠ {} files missing (see log)", n_missing));
+            }
+            if pending > 0 {
+                parts.push(format!("🔊 {} to analyze", pending));
+            }
+            ui.set_library_status(parts.join(" · ").into());
         }
     }
     {
@@ -2757,6 +2786,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing::info!("🦀 CrabBoss UI ready — launching window");
+    ui.window().set_maximized(true);
     ui.run()?;
 
     Ok(())

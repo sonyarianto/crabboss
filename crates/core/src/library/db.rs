@@ -36,64 +36,84 @@ impl TrackKind {
     }
 
     /// Guess kind from a file path (folder names like `Jingles/`, `Ads/`).
+    ///
+    /// Matching is token-based (split on non-alphanumerics): short keys
+    /// like `ad`/`spot` must appear as whole words, so `Downloads/`,
+    /// `Spotify/`, `Spotlight`, or `Bedroom Mix` never misfire. A few
+    /// long keys additionally match as substrings (`StationIDs/`
+    /// still hits) — long enough to never collide with ordinary words.
     pub fn classify_path(path: &std::path::Path) -> Self {
-        let lower = path.to_string_lossy().to_lowercase();
-        // Check directory components first, then the file stem.
-        let is_dir_hit = |keys: &[&str]| {
-            path.parent()
-                .map(|p| {
-                    let d = p.to_string_lossy().to_lowercase();
-                    keys.iter().any(|k| d.contains(k))
-                })
-                .unwrap_or(false)
-        };
-        if is_dir_hit(&[
+        /// Whole-word keys (short keys MUST stay here — never substrings).
+        const JINGLE_TOKENS: &[&str] = &[
+            "jingle",
+            "jingles",
+            "bumper",
+            "bumpers",
+            "sweeper",
+            "sweepers",
+            "stationid",
+            "toth",
+            "stinger",
+            "stingers",
+            "beds",
+            "liners",
+            "drops",
+            "id",
+            "ids",
+        ];
+        const AD_TOKENS: &[&str] = &[
+            "ad",
+            "ads",
+            "advert",
+            "adverts",
+            "commercial",
+            "commercials",
+            "promo",
+            "promos",
+            "spot",
+            "spots",
+            "iklan",
+        ];
+        const JINGLE_SUBS: &[&str] = &[
             "jingle",
             "bumper",
             "sweeper",
             "stationid",
-            "station id",
-            "toth",
             "stinger",
-            "beds",
             "liners",
-            "drops",
-        ]) {
+        ];
+        const AD_SUBS: &[&str] = &["advert", "commercial"];
+        fn hit(text: &str, tokens: &[&str], subs: &[&str]) -> bool {
+            if text
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|t| tokens.contains(&t))
+            {
+                return true;
+            }
+            subs.iter().any(|k| text.contains(k))
+        }
+        // Check directory components first, then the file stem.
+        // Jingle wins ties (a station ID inside an ad folder is still an ID).
+        let parent = path
+            .parent()
+            .map(|p| p.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if hit(&parent, JINGLE_TOKENS, JINGLE_SUBS) {
             return TrackKind::Jingle;
         }
-        if is_dir_hit(&["ads", "advert", "commercial", "promo", "spot"]) {
+        if hit(&parent, AD_TOKENS, AD_SUBS) {
             return TrackKind::Ad;
         }
         let stem = path
             .file_stem()
             .map(|s| s.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        for key in [
-            "jingle",
-            "bumper",
-            "sweeper",
-            "toth",
-            "stationid",
-            "stinger",
-        ] {
-            if stem.contains(key) {
-                return TrackKind::Jingle;
-            }
-        }
-        for key in ["advert", "commercial", "promo", "spot"] {
-            if stem.contains(key) {
-                return TrackKind::Ad;
-            }
-        }
-        // Bare " ad "/"id" tokens only (avoid matching "radio", "madonna", ...).
-        let padded = format!(" {} ", stem.replace(['_', '-', '.'], " "));
-        if padded.contains(" ad ") || padded.contains(" ads ") {
-            return TrackKind::Ad;
-        }
-        if padded.contains(" id ") || padded.contains(" ids ") {
+        if hit(&stem, JINGLE_TOKENS, JINGLE_SUBS) {
             return TrackKind::Jingle;
         }
-        let _ = lower;
+        if hit(&stem, AD_TOKENS, AD_SUBS) {
+            return TrackKind::Ad;
+        }
         TrackKind::Music
     }
 }
@@ -323,6 +343,22 @@ impl Library {
         Ok(())
     }
 
+    /// Re-run path classification over every row, repairing labels stored
+    /// by older over-eager rules (e.g. `Downloads/` matching "ads").
+    /// Returns the number of rows changed.
+    pub fn reclassify_all(&self) -> Result<usize> {
+        let tracks = self.get_all_tracks()?;
+        let mut fixed = 0;
+        for t in &tracks {
+            let kind = TrackKind::classify_path(std::path::Path::new(&t.file_path));
+            if kind != t.kind {
+                self.set_kind(&t.id, kind)?;
+                fixed += 1;
+            }
+        }
+        Ok(fixed)
+    }
+
     /// Store a measured loudness analysis for a track.
     pub fn set_loudness(&self, id: &str, lufs: f32, gain_db: f32) -> Result<()> {
         self.conn.execute(
@@ -348,6 +384,17 @@ impl Library {
             .query_map(params![limit as i64], Self::map_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(tracks)
+    }
+
+    /// Count of tracks still awaiting loudness analysis — cheap status
+    /// probe for the library confidence line (no row loading).
+    pub fn count_missing_loudness(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tracks WHERE loudness_lufs IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(n.max(0) as usize)
     }
 
     /// Tracks with a stored loudness measurement (id + gain in dB),
@@ -663,6 +710,62 @@ mod tests {
         assert_eq!(j("/music/summer_ad.mp3"), TrackKind::Ad);
         assert_eq!(j("/music/Rock/madonna_hit.mp3"), TrackKind::Music);
         assert_eq!(j("/music/Rock/song.mp3"), TrackKind::Music);
+        // Regression: ordinary words containing short keys must NOT hit.
+        // ("ads" ⊂ "downloads" labeled whole folders as ads.)
+        assert_eq!(j("C:/Users/DJ/Downloads/track01.mp3"), TrackKind::Music);
+        assert_eq!(j("C:/Users/DJ/Music/Spotify/song.mp3"), TrackKind::Music);
+        assert_eq!(j("/music/Bedroom Mix/chill.mp3"), TrackKind::Music);
+        assert_eq!(j("/music/Raindrops Best/song.mp3"), TrackKind::Music);
+        assert_eq!(j("/music/Spotlight - hits.mp3"), TrackKind::Music);
+        assert_eq!(j("/music/lead vocal take.mp3"), TrackKind::Music);
+        assert_eq!(j("/music/promenade.mp3"), TrackKind::Music);
+        // Genuine hits still classify (tokens, plurals, substrings, ID).
+        assert_eq!(j("/music/My Ads/coke.mp3"), TrackKind::Ad);
+        assert_eq!(j("/music/StationIDs/toth.mp3"), TrackKind::Jingle);
+        assert_eq!(j("/music/Iklan/sirup.mp3"), TrackKind::Ad);
+        assert_eq!(j("/music/coke_spot.mp3"), TrackKind::Ad);
+        assert_eq!(j("/music/promo_mix.mp3"), TrackKind::Ad);
+    }
+
+    #[test]
+    fn reclassify_repairs_over_eager_labels() {
+        let dir = std::env::temp_dir().join(format!("crabboss-reclass-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = Library::open(&dir.join("lib.db")).unwrap();
+        // Rows as the old substring rules stored them: a Downloads track
+        // wrongly labeled Ad, plus one genuinely correct Ad row.
+        for (id, path, kind) in [
+            ("1", "C:/Users/DJ/Downloads/track01.mp3", "ad"),
+            ("2", "/music/Ads/coke.mp3", "ad"),
+            ("3", "/music/Rock/song.mp3", "music"),
+        ] {
+            lib.conn
+                .execute(
+                    "INSERT INTO tracks (id, file_path, file_name, added_at, play_count, kind)
+                     VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+                    rusqlite::params![
+                        id,
+                        path,
+                        path.rsplit('/').next().unwrap_or(path),
+                        chrono::Utc::now().to_rfc3339(),
+                        kind
+                    ],
+                )
+                .unwrap();
+        }
+        assert_eq!(lib.reclassify_all().unwrap(), 1);
+        let kinds: std::collections::HashMap<_, _> = lib
+            .get_all_tracks()
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.id, t.kind))
+            .collect();
+        assert_eq!(kinds["1"], TrackKind::Music);
+        assert_eq!(kinds["2"], TrackKind::Ad);
+        assert_eq!(kinds["3"], TrackKind::Music);
+        // Second run is a no-op.
+        assert_eq!(lib.reclassify_all().unwrap(), 0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -720,6 +823,32 @@ mod tests {
         assert!((t.loudness_gain_db.unwrap() + 4.5).abs() < 1e-6);
         // Unknown path → None, not an error.
         assert_eq!(lib.loudness_gain_by_path("/m/other.mp3").unwrap(), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn count_missing_loudness_tracks_queue() {
+        let dir = std::env::temp_dir().join(format!("crabboss-loudcount-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = Library::open(&dir.join("lib.db")).unwrap();
+        assert_eq!(lib.count_missing_loudness().unwrap(), 0);
+        for i in 0..3 {
+            lib.conn
+                .execute(
+                    "INSERT INTO tracks (id, file_path, file_name, added_at, play_count, kind)
+                     VALUES (?1, ?2, ?3, ?4, 0, 'music')",
+                    rusqlite::params![
+                        i.to_string(),
+                        format!("/m/{i}.mp3"),
+                        format!("{i}.mp3"),
+                        chrono::Utc::now().to_rfc3339()
+                    ],
+                )
+                .unwrap();
+        }
+        assert_eq!(lib.count_missing_loudness().unwrap(), 3);
+        lib.set_loudness("1", -18.5, -4.5).unwrap();
+        assert_eq!(lib.count_missing_loudness().unwrap(), 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 

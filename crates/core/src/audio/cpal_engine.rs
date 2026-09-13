@@ -5,9 +5,9 @@
 //! stream tap with voice-activated ducking of the music bed.
 
 use std::collections::VecDeque;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::RingBuffer;
@@ -131,6 +131,257 @@ impl XfadeState {
     }
 }
 
+/// One decode unit for the background loader thread. A single FIFO
+/// worker executes these in submit order, so chained sequences
+/// (ad intro → spot → outro, Auto-DJ prefetch → next pick) keep playing
+/// in the order the UI requested them.
+enum LoadJob {
+    /// Start `path` now-ish (crossfade when `was_live` was true at submit).
+    /// Carries a generation: a later `play`/`stop` supersedes it.
+    Play {
+        path: PathBuf,
+        gen: u64,
+        was_live: bool,
+        gain_db: f32,
+    },
+    /// Append `path` behind the live deck (insert-after-current).
+    /// Keeps its submit-time generation: a later `play`/`stop` discards it.
+    Queue {
+        path: PathBuf,
+        gen: u64,
+        gain_db: f32,
+    },
+}
+
+impl LoadJob {
+    fn gen(&self) -> u64 {
+        match self {
+            LoadJob::Play { gen, .. } => *gen,
+            LoadJob::Queue { gen, .. } => *gen,
+        }
+    }
+}
+
+/// Transport handles shared with the loader thread. Everything is
+/// lock-protected and installed sequentially (never nested), matching the
+/// audio callback's lock order — the engine itself stays `!Send` behind
+/// `Rc` in the UI, only these `Arc`s cross threads.
+#[derive(Clone)]
+struct LoaderShared {
+    xfade: Arc<Mutex<XfadeState>>,
+    state: Arc<Mutex<PlayerState>>,
+    current_track: Arc<Mutex<Option<TrackInfo>>>,
+    silence: Arc<Mutex<SilenceMonitor>>,
+    crossfade_secs: Arc<Mutex<f32>>,
+    load_gen: Arc<AtomicU64>,
+    /// True while a `play` decode is in flight — the resume target when a
+    /// pause lands mid-load (back to `Buffering`, so the landing deck still
+    /// advances instead of stranding the transport in `Paused`).
+    loading: Arc<AtomicBool>,
+    device_rate: u32,
+}
+
+impl LoaderShared {
+    fn xfade_secs(&self) -> f32 {
+        *self.crossfade_secs.lock().unwrap()
+    }
+
+    /// Install a decoded `play` job (mirrors the old synchronous branches:
+    /// crossfade when something was live at submit, hard switch otherwise).
+    /// A pause pressed mid-load wins: only `Buffering` auto-advances.
+    fn install_play(
+        &self,
+        path: PathBuf,
+        gen: u64,
+        cursor: PlaybackCursor,
+        duration: Option<f64>,
+        was_live: bool,
+    ) {
+        let mut xf = self.xfade.lock().unwrap();
+        let secs = self.xfade_secs();
+        xf.auto_len = (secs * self.device_rate as f32) as usize;
+        if was_live {
+            let remaining = xf
+                .current
+                .as_ref()
+                .map(|c| c.remaining_frames())
+                .unwrap_or(0);
+            let want = (secs * self.device_rate as f32) as usize;
+            xf.len = want.min(remaining).min(cursor.remaining_frames()).max(1);
+            xf.pos = 0;
+            xf.next = VecDeque::from([cursor]);
+            tracing::info!(
+                "CpalEngine crossfading ({} frames): {}",
+                xf.len,
+                path.display()
+            );
+        } else {
+            xf.current = Some(cursor);
+            xf.next.clear();
+            xf.pos = 0;
+            xf.len = 0;
+            tracing::info!("CpalEngine playing: {}", path.display());
+        }
+        drop(xf);
+        if self.load_gen.load(Ordering::SeqCst) == gen {
+            self.loading.store(false, Ordering::SeqCst);
+        }
+        self.silence.lock().unwrap().reset();
+        *self.current_track.lock().unwrap() = Some(TrackInfo {
+            path,
+            title: None,
+            artist: None,
+            duration_secs: duration,
+        });
+        let mut st = self.state.lock().unwrap();
+        // A pause pressed mid-load wins (stays `Paused` for an explicit
+        // resume); anything else advances to `Playing` — including a live
+        // handoff whose old deck ran out while the new one was decoding.
+        if *st != PlayerState::Paused {
+            *st = PlayerState::Playing;
+        }
+    }
+
+    /// Install a decoded `queue` job (same end-of-track semantics as the
+    /// old synchronous `queue_file`: append behind live audio, take over
+    /// directly when idle).
+    fn install_queue(&self, path: PathBuf, cursor: PlaybackCursor, duration: Option<f64>) {
+        let label = path.display().to_string();
+        let mut xf = self.xfade.lock().unwrap();
+        xf.auto_len = (self.xfade_secs() * self.device_rate as f32) as usize;
+        if xf.current.as_ref().is_some_and(|c| !c.is_done()) || !xf.next.is_empty() {
+            xf.next.push_back(cursor);
+            tracing::info!("CpalEngine queued: {}", label);
+        } else {
+            xf.current = Some(cursor);
+            xf.pos = 0;
+            xf.len = 0;
+        }
+        drop(xf);
+        self.silence.lock().unwrap().reset();
+        *self.state.lock().unwrap() = PlayerState::Playing;
+        *self.current_track.lock().unwrap() = Some(TrackInfo {
+            path,
+            title: None,
+            artist: None,
+            duration_secs: duration,
+        });
+    }
+
+    /// A decode failed: park the transport back to `Stopped` (clearing the
+    /// announced track) unless something newer already took over.
+    fn fail_load(&self, path: &Path, gen: u64, was_live: bool, err: &str) {
+        tracing::warn!("Load failed for {}: {}", path.display(), err);
+        if self.load_gen.load(Ordering::SeqCst) != gen {
+            return;
+        }
+        self.loading.store(false, Ordering::SeqCst);
+        // A failed live handoff keeps the old deck (its label was retained
+        // at submit) — only an idle load parks the transport to `Stopped`.
+        if was_live {
+            return;
+        }
+        let mut st = self.state.lock().unwrap();
+        if *st == PlayerState::Buffering {
+            *st = PlayerState::Stopped;
+            *self.current_track.lock().unwrap() = None;
+        }
+    }
+}
+
+/// Worker loop: decode jobs FIFO, skipping anything superseded while
+/// queued and discarding anything superseded mid-decode — stale audio is
+/// never installed over a newer request. Returns false when the thread
+/// failed to spawn (callers fall back to synchronous decode).
+fn spawn_loader(shared: LoaderShared, rx: mpsc::Receiver<LoadJob>) -> bool {
+    let res = std::thread::Builder::new()
+        .name("crabboss-loader".into())
+        .spawn(move || {
+            while let Ok(job) = rx.recv() {
+                if job.gen() != shared.load_gen.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let (path, gain_db) = match &job {
+                    LoadJob::Play { path, gain_db, .. } => (path.clone(), *gain_db),
+                    LoadJob::Queue { path, gain_db, .. } => (path.clone(), *gain_db),
+                };
+                match decode_load(&path, gain_db, shared.device_rate) {
+                    Ok((cursor, duration)) => {
+                        let gen = job.gen();
+                        if gen != shared.load_gen.load(Ordering::SeqCst) {
+                            continue;
+                        }
+                        match job {
+                            LoadJob::Play { was_live, .. } => {
+                                shared.install_play(path, gen, cursor, duration, was_live);
+                            }
+                            LoadJob::Queue { .. } => {
+                                shared.install_queue(path, cursor, duration);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let (gen, was_live) = match &job {
+                            LoadJob::Play { gen, was_live, .. } => (*gen, *was_live),
+                            // Queues never own the transport state — a failed
+                            // queue must not park it.
+                            LoadJob::Queue { gen, .. } => (*gen, true),
+                        };
+                        shared.fail_load(&path, gen, was_live, &e.to_string());
+                    }
+                }
+            }
+        });
+    match res {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::error!("Failed to spawn decode loader thread: {e}");
+            false
+        }
+    }
+}
+
+/// Decode + normalize + resample one file for the loader thread.
+/// Pure function of (path, gain, rate): safe to run off the UI thread.
+fn decode_load(
+    path: &Path,
+    gain_db: f32,
+    device_rate: u32,
+) -> Result<(PlaybackCursor, Option<f64>)> {
+    let (mut samples, file_rate) = decode_to_stereo(path)?;
+    if gain_db != 0.0 {
+        let g = 10f32.powf(gain_db / 20.0);
+        for s in samples.iter_mut() {
+            *s *= g;
+        }
+        tracing::debug!(
+            "Loudness gain {gain_db:+.1} dB applied to {}",
+            path.display()
+        );
+    }
+    let samples = if file_rate != device_rate {
+        tracing::info!("Resampling {} Hz → {} Hz", file_rate, device_rate);
+        resample_stereo(samples, file_rate, device_rate)?
+    } else {
+        samples
+    };
+    let duration = read_duration(path);
+    Ok((
+        PlaybackCursor {
+            samples,
+            pos_frames: 0,
+        },
+        duration,
+    ))
+}
+
+fn read_duration(path: &Path) -> Option<f64> {
+    lofty::read_from_path(path).ok().map(|f| {
+        use lofty::file::AudioFile;
+        f.properties().duration().as_secs_f64()
+    })
+}
+
 /// Low-level engine. Keeps the cpal `Stream` alive; callback pulls
 /// decoded stereo samples through `Mixer`.
 pub struct CpalEngine {
@@ -157,6 +408,18 @@ pub struct CpalEngine {
     mic_live: Arc<AtomicBool>,
     mic_config: Arc<Mutex<MicConfig>>,
     mic_state: Arc<Mutex<MicState>>,
+    /// Background decode loader: `play`/`queue` only enqueue here and
+    /// return instantly, so the UI thread never waits on full-file decode
+    /// + sinc resample (seconds of frozen window on real songs).
+    load_tx: mpsc::Sender<LoadJob>,
+    /// Monotonic generation: every `play`/`stop` invalidates older jobs.
+    load_gen: Arc<AtomicU64>,
+    /// True while a `play` decode is in flight (resume target). See
+    /// [`LoaderShared::loading`].
+    loading: Arc<AtomicBool>,
+    /// False only when the loader thread failed to spawn — `play`/`queue`
+    /// then fall back to synchronous decode (blocks, but audio works).
+    loader_ok: bool,
 }
 
 impl CpalEngine {
@@ -182,6 +445,7 @@ impl CpalEngine {
         }));
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
         let current_track = Arc::new(Mutex::new(None));
+        let crossfade_secs = Arc::new(Mutex::new(3.0));
         let volume = Arc::new(Mutex::new(1.0));
         let mixer = Arc::new(Mutex::new(Mixer::default()));
         let silence = Arc::new(Mutex::new(SilenceMonitor::new(48000, 10.0)));
@@ -216,15 +480,34 @@ impl CpalEngine {
             }
         };
 
+        // Background decode loader (decoding needs no device — headless
+        // engines and tests get one too).
+        let load_gen = Arc::new(AtomicU64::new(0));
+        let loading = Arc::new(AtomicBool::new(false));
+        let (load_tx, load_rx) = mpsc::channel();
+        let loader_ok = spawn_loader(
+            LoaderShared {
+                xfade: xfade.clone(),
+                state: state.clone(),
+                current_track: current_track.clone(),
+                silence: silence.clone(),
+                crossfade_secs: crossfade_secs.clone(),
+                load_gen: load_gen.clone(),
+                loading: loading.clone(),
+                device_rate,
+            },
+            load_rx,
+        );
+
         Self {
             _stream: stream,
             device_rate,
             device_name,
-            xfade,
-            crossfade_secs: Arc::new(Mutex::new(3.0)),
-            silence,
-            state,
-            current_track,
+            xfade: xfade.clone(),
+            crossfade_secs: crossfade_secs.clone(),
+            silence: silence.clone(),
+            state: state.clone(),
+            current_track: current_track.clone(),
             volume,
             mixer,
             loudness_lookup: None,
@@ -238,6 +521,24 @@ impl CpalEngine {
             mic_live,
             mic_config,
             mic_state,
+            load_tx,
+            load_gen,
+            loading,
+            loader_ok,
+        }
+    }
+
+    /// Transport handles for the loader thread / sync fallback.
+    fn loader_shared(&self) -> LoaderShared {
+        LoaderShared {
+            xfade: self.xfade.clone(),
+            state: self.state.clone(),
+            current_track: self.current_track.clone(),
+            silence: self.silence.clone(),
+            crossfade_secs: self.crossfade_secs.clone(),
+            load_gen: self.load_gen.clone(),
+            loading: self.loading.clone(),
+            device_rate: self.device_rate,
         }
     }
 
@@ -248,10 +549,6 @@ impl CpalEngine {
     /// The device actually opened (may differ from the request on fallback).
     pub fn device_name(&self) -> String {
         self.device_name.clone()
-    }
-
-    fn xfade_secs(&self) -> f32 {
-        *self.crossfade_secs.lock().unwrap()
     }
 
     /// Push level + ducking prefs into the mixer's ducker (live, no
@@ -268,66 +565,47 @@ impl CpalEngine {
         );
     }
 
-    fn decode_resampled(&self, path: &Path) -> Result<PlaybackCursor> {
-        let (mut samples, file_rate) = decode_to_stereo(path)?;
-        // Loudness normalization: per-deck gain from the library analysis
-        // (ReplayGain-style toward the R128 target). Missing analysis → 0 dB.
-        let gain_db = self
-            .loudness_lookup
+    /// ReplayGain-style deck gain for a path (dB, clamped). Resolved on
+    /// the caller thread at submit time so the loader stays dependency-free.
+    fn gain_for(&self, path: &Path) -> f32 {
+        if !self.loudness_enabled.get() {
+            return 0.0;
+        }
+        self.loudness_lookup
             .as_ref()
             .and_then(|f| f(path))
             .unwrap_or(0.0)
-            .clamp(-MAX_GAIN_DB, MAX_GAIN_DB);
-        if gain_db != 0.0 {
-            let g = 10f32.powf(gain_db / 20.0);
-            for s in samples.iter_mut() {
-                *s *= g;
-            }
-            tracing::debug!(
-                "Loudness gain {gain_db:+.1} dB applied to {}",
-                path.display()
-            );
-        }
-        let samples = if file_rate != self.device_rate {
-            tracing::info!("Resampling {} Hz → {} Hz", file_rate, self.device_rate);
-            resample_stereo(samples, file_rate, self.device_rate)?
-        } else {
-            samples
-        };
-        Ok(PlaybackCursor {
-            samples,
-            pos_frames: 0,
-        })
+            .clamp(-MAX_GAIN_DB, MAX_GAIN_DB)
     }
 
     /// Queue a file to start at the current deck's end (insert-after).
-    /// Appends behind anything already pending.
+    /// Appends behind anything already pending. Async like `play`: the
+    /// job decodes on the loader thread, so Auto-DJ prefetch on the UI
+    /// tick never freezes the window either.
     pub fn queue_file(&self, path: &Path) -> Result<()> {
         if !path.exists() {
             return Err(CrabError::FileNotFound {
                 path: path.to_path_buf(),
             });
         }
-        let new = self.decode_resampled(path)?;
-        let mut xf = self.xfade.lock().unwrap();
-        xf.auto_len = (self.xfade_secs() * self.device_rate as f32) as usize;
-        if xf.current.as_ref().is_some_and(|c| !c.is_done()) || !xf.next.is_empty() {
-            xf.next.push_back(new);
-            tracing::info!("CpalEngine queued: {}", path.display());
-        } else {
-            xf.current = Some(new);
-            xf.pos = 0;
-            xf.len = 0;
+        let path = path.to_path_buf();
+        let gain_db = self.gain_for(&path);
+        if !self.loader_ok {
+            // Degraded path: decode inline (blocks, but audio still works).
+            let (cursor, duration) = decode_load(&path, gain_db, self.device_rate)?;
+            self.loader_shared().install_queue(path, cursor, duration);
+            return Ok(());
         }
-        drop(xf);
-        self.silence.lock().unwrap().reset();
-        *self.state.lock().unwrap() = PlayerState::Playing;
-        *self.current_track.lock().unwrap() = Some(TrackInfo {
-            path: path.to_path_buf(),
-            title: None,
-            artist: None,
-            duration_secs: self.read_duration(path),
-        });
+        // Queues keep their submit-time generation: a later `play`/`stop`
+        // supersedes them before they ever decode or install.
+        let job = LoadJob::Queue {
+            path,
+            gen: self.load_gen.load(Ordering::SeqCst),
+            gain_db,
+        };
+        self.load_tx
+            .send(job)
+            .map_err(|e| CrabError::Audio(format!("decode loader gone: {e}")))?;
         Ok(())
     }
 
@@ -584,13 +862,6 @@ impl CpalEngine {
         stream.play().map_err(|e| e.to_string())?;
         Ok((stream, name))
     }
-
-    fn read_duration(&self, path: &Path) -> Option<f64> {
-        lofty::read_from_path(path).ok().map(|f| {
-            use lofty::file::AudioFile;
-            f.properties().duration().as_secs_f64()
-        })
-    }
 }
 
 impl Default for CpalEngine {
@@ -606,45 +877,66 @@ impl Engine for CpalEngine {
                 path: path.to_path_buf(),
             });
         }
-        let duration = self.read_duration(path);
-        let new = self.decode_resampled(path)?;
-        let mut xf = self.xfade.lock().unwrap();
-        xf.auto_len = (self.xfade_secs() * self.device_rate as f32) as usize;
-        let live = *self.state.lock().unwrap() == PlayerState::Playing
-            && xf.current.as_ref().is_some_and(|c| !c.is_done());
-        if live {
-            // Crossfade: blend out of the current deck into the new one,
-            // replacing anything pending (immediate intent wins).
-            let remaining = xf
-                .current
-                .as_ref()
-                .map(|c| c.remaining_frames())
-                .unwrap_or(0);
-            let want = (self.xfade_secs() * self.device_rate as f32) as usize;
-            xf.len = want.min(remaining).min(new.remaining_frames()).max(1);
-            xf.pos = 0;
-            xf.next = VecDeque::from([new]);
-            tracing::info!(
-                "CpalEngine crossfading ({} frames): {}",
-                xf.len,
-                path.display()
-            );
-        } else {
-            xf.current = Some(new);
-            xf.next.clear();
-            xf.pos = 0;
-            xf.len = 0;
-            tracing::info!("CpalEngine playing: {}", path.display());
+        // Async handoff: decode on the loader thread; the UI thread returns
+        // in microseconds — full symphonia decode + sinc resample of a real
+        // song takes seconds. An idle play announces the track + enters
+        // `Buffering`; a live play keeps `Playing` (old deck sounds on, old
+        // label stays) until the new deck lands as a crossfade.
+        // Locks are taken sequentially (never nested) to match the audio
+        // callback's lock order.
+        let gen = self.load_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let live_state = *self.state.lock().unwrap();
+        let live_cursor = self
+            .xfade
+            .lock()
+            .unwrap()
+            .current
+            .as_ref()
+            .is_some_and(|c| !c.is_done());
+        let was_live = live_state == PlayerState::Playing && live_cursor;
+        let path = path.to_path_buf();
+        let gain_db = self.gain_for(&path);
+        if !self.loader_ok {
+            // Degraded path: decode inline first (today's old order), then
+            // install — blocks, but audio still works.
+            let (cursor, duration) = decode_load(&path, gain_db, self.device_rate)?;
+            self.loader_shared()
+                .install_play(path, gen, cursor, duration, was_live);
+            *self.state.lock().unwrap() = PlayerState::Playing;
+            return Ok(());
         }
-        drop(xf);
-        self.silence.lock().unwrap().reset();
-        *self.state.lock().unwrap() = PlayerState::Playing;
+        self.loading.store(true, Ordering::SeqCst);
+        if was_live {
+            // Live handoff: keep `Playing` so the callback keeps pulling the
+            // old deck through the decode — no on-air gap. Its label stays
+            // until the new deck lands (no 00:00 progress flicker).
+            self.silence.lock().unwrap().reset();
+            self.load_tx
+                .send(LoadJob::Play {
+                    path,
+                    gen,
+                    was_live,
+                    gain_db,
+                })
+                .map_err(|e| CrabError::Audio(format!("decode loader gone: {e}")))?;
+            return Ok(());
+        }
         *self.current_track.lock().unwrap() = Some(TrackInfo {
-            path: path.to_path_buf(),
+            path: path.clone(),
             title: None,
             artist: None,
-            duration_secs: duration,
+            duration_secs: None,
         });
+        *self.state.lock().unwrap() = PlayerState::Buffering;
+        self.silence.lock().unwrap().reset();
+        self.load_tx
+            .send(LoadJob::Play {
+                path,
+                gen,
+                was_live,
+                gain_db,
+            })
+            .map_err(|e| CrabError::Audio(format!("decode loader gone: {e}")))?;
         Ok(())
     }
 
@@ -653,13 +945,21 @@ impl Engine for CpalEngine {
     }
 
     fn resume(&self) {
-        // Only resume if there is something loaded.
+        // Only resume if there is something loaded — or still loading (a
+        // pause pressed mid-load returns to `Buffering`, so the landing deck
+        // advances instead of stranding the transport in `Paused`).
         if !self.xfade.lock().unwrap().is_done() {
             *self.state.lock().unwrap() = PlayerState::Playing;
+        } else if self.loading.load(Ordering::SeqCst) {
+            *self.state.lock().unwrap() = PlayerState::Buffering;
         }
     }
 
     fn stop(&self) {
+        // Invalidate anything still decoding — a late install must never
+        // resurrect playback after an explicit stop.
+        self.load_gen.fetch_add(1, Ordering::SeqCst);
+        self.loading.store(false, Ordering::SeqCst);
         let mut xf = self.xfade.lock().unwrap();
         xf.current = None;
         xf.next.clear();
@@ -676,6 +976,8 @@ impl Engine for CpalEngine {
             PlayerState::Playing => self.pause(),
             PlayerState::Paused => self.resume(),
             PlayerState::Stopped => {}
+            // Pausing mid-load sticks: the loader keeps `Paused` on install.
+            PlayerState::Buffering => self.pause(),
         }
     }
 
@@ -706,6 +1008,10 @@ impl Engine for CpalEngine {
     }
 
     fn is_finished(&self) -> bool {
+        // A decode in flight is not an EOF — Auto-DJ must not fire over it.
+        if *self.state.lock().unwrap() == PlayerState::Buffering {
+            return false;
+        }
         match *self.state.lock().unwrap() {
             PlayerState::Stopped => true,
             _ => self.xfade.lock().unwrap().is_done(),
@@ -1212,5 +1518,208 @@ mod tests {
         let heard: Vec<f32> = (0..3).map(|_| xf.pull().unwrap().0.l).collect();
         assert_eq!(heard, vec![1.0, 2.0, 3.0]);
         assert!(xf.is_done());
+    }
+
+    /// Minimal 16-bit mono PCM WAV (symphonia reads it natively) for
+    /// loader tests — real files through the real decode path.
+    fn write_test_wav(path: &std::path::Path, secs: f32, rate: u32) {
+        let n = (secs * rate as f32) as usize;
+        let data_bytes = (n * 2) as u32;
+        let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 2).to_le_bytes()); // byte rate
+        wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+        wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        for i in 0..n {
+            let t = i as f32 / rate as f32;
+            let s = (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.4;
+            wav.extend_from_slice(&((s * i16::MAX as f32) as i16).to_le_bytes());
+        }
+        std::fs::write(path, wav).unwrap();
+    }
+
+    fn loader_test_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("crabboss-load-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Spin until `cond` holds (the loader runs async) or time out.
+    fn wait_for(msg: &str, mut cond: impl FnMut() -> bool) {
+        let start = std::time::Instant::now();
+        while !cond() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "timed out waiting: {msg}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn play_announces_instantly_and_starts_after_decode() {
+        let dir = loader_test_dir("play");
+        let f = dir.join("a.wav");
+        write_test_wav(&f, 0.5, 44100);
+        let eng = CpalEngine::new();
+        eng.play(&f).unwrap();
+        // Returns at once: track announced, transport buffering (or
+        // already playing on a fast machine — never still stopped).
+        assert_eq!(eng.current_track().unwrap().path, f);
+        assert!(matches!(
+            eng.state(),
+            PlayerState::Buffering | PlayerState::Playing
+        ));
+        assert!(!eng.is_finished(), "in-flight decode is not an EOF");
+        // The decoded deck lands with no further calls.
+        wait_for("playback starts", || eng.state() == PlayerState::Playing);
+        let cur = eng.current_track().unwrap();
+        assert!((cur.duration_secs.unwrap_or(0.0) - 0.5).abs() < 0.1);
+        eng.stop();
+        assert_eq!(eng.state(), PlayerState::Stopped);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rapid_replay_supersedes_the_older_load() {
+        let dir = loader_test_dir("supersede");
+        let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+        write_test_wav(&a, 0.5, 44100);
+        write_test_wav(&b, 0.5, 44100);
+        let eng = CpalEngine::new();
+        eng.play(&a).unwrap();
+        eng.play(&b).unwrap();
+        // Whatever interleaving the loader hits, the latest pick wins.
+        wait_for("latest pick wins", || {
+            eng.state() == PlayerState::Playing && eng.current_track().is_some_and(|t| t.path == b)
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stop_during_load_never_resurrects_playback() {
+        let dir = loader_test_dir("stop");
+        let f = dir.join("a.wav");
+        write_test_wav(&f, 1.0, 44100);
+        let eng = CpalEngine::new();
+        eng.play(&f).unwrap();
+        eng.stop();
+        // Let any in-flight decode finish: the stale install must be
+        // discarded, never reviving playback after an explicit stop.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(eng.state(), PlayerState::Stopped);
+        assert!(eng.current_track().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn idle_queue_starts_playback_after_decode() {
+        let dir = loader_test_dir("queue");
+        let f = dir.join("q.wav");
+        write_test_wav(&f, 0.5, 48000);
+        let eng = CpalEngine::new();
+        eng.queue(&f).unwrap();
+        // Idle queue takes over directly (old `queue_file` semantics),
+        // just asynchronously.
+        wait_for("queued deck starts", || {
+            eng.state() == PlayerState::Playing && eng.current_track().is_some_and(|t| t.path == f)
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn live_play_keeps_old_deck_until_handoff() {
+        let dir = loader_test_dir("live");
+        let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+        write_test_wav(&a, 3.0, 44100);
+        write_test_wav(&b, 0.5, 44100);
+        let eng = CpalEngine::new();
+        eng.play(&a).unwrap();
+        wait_for("first deck live", || {
+            eng.state() == PlayerState::Playing && eng.current_track().is_some_and(|t| t.path == a)
+        });
+        // Live handoff: transport stays `Playing` with the old label — the
+        // callback keeps pulling the old deck, so there is no on-air gap.
+        eng.play(&b).unwrap();
+        assert_eq!(eng.state(), PlayerState::Playing);
+        assert!(!eng.is_finished(), "old deck still live through the decode");
+        // The latest pick still wins, landing as a crossfade.
+        wait_for("handoff lands", || {
+            eng.state() == PlayerState::Playing && eng.current_track().is_some_and(|t| t.path == b)
+        });
+        eng.stop();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn live_load_failure_keeps_old_deck_playing() {
+        let dir = loader_test_dir("livefail");
+        let (a, bad) = (dir.join("a.wav"), dir.join("bad.wav"));
+        write_test_wav(&a, 3.0, 44100);
+        std::fs::write(&bad, b"not audio at all").unwrap();
+        let eng = CpalEngine::new();
+        eng.play(&a).unwrap();
+        wait_for("first deck live", || {
+            eng.state() == PlayerState::Playing && eng.current_track().is_some_and(|t| t.path == a)
+        });
+        eng.play(&bad).unwrap();
+        assert_eq!(eng.state(), PlayerState::Playing);
+        // The failed decode never parks the transport mid-show.
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        assert_eq!(eng.state(), PlayerState::Playing);
+        assert!(eng.current_track().is_some_and(|t| t.path == a));
+        assert!(!eng.is_finished());
+        eng.stop();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pause_then_resume_mid_load_still_starts() {
+        let dir = loader_test_dir("resumeload");
+        let f = dir.join("a.wav");
+        write_test_wav(&f, 1.0, 48000);
+        let eng = CpalEngine::new();
+        eng.play(&f).unwrap();
+        eng.pause();
+        eng.resume();
+        // Either the deck already landed (Playing) or the resume re-armed
+        // the in-flight load (Buffering) — never stranded in Paused.
+        assert!(matches!(
+            eng.state(),
+            PlayerState::Playing | PlayerState::Buffering
+        ));
+        wait_for("deck lands after resume", || {
+            eng.state() == PlayerState::Playing && eng.current_track().is_some_and(|t| t.path == f)
+        });
+        eng.stop();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn loudness_toggle_gates_decode_gain() {
+        let dir = loader_test_dir("loudgate");
+        let mut eng = CpalEngine::new();
+        eng.set_loudness_lookup(Some(Box::new(|_: &Path| Some(6.0))));
+        // Default OFF: lookup installed but ignored.
+        assert!(!eng.loudness_enabled());
+        assert_eq!(eng.gain_for(Path::new("/m/a.mp3")), 0.0);
+        eng.set_loudness_enabled(true);
+        assert!(eng.loudness_enabled());
+        assert!((eng.gain_for(Path::new("/m/a.mp3")) - 6.0).abs() < 1e-6);
+        // Clamped to the shared ceiling, and OFF wins again afterwards.
+        eng.set_loudness_lookup(Some(Box::new(|_: &Path| Some(99.0))));
+        assert!((eng.gain_for(Path::new("/m/a.mp3")) - MAX_GAIN_DB).abs() < 1e-6);
+        eng.set_loudness_enabled(false);
+        assert_eq!(eng.gain_for(Path::new("/m/a.mp3")), 0.0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

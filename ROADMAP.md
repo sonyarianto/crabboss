@@ -110,6 +110,10 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       per-track LUFS + gain toward −23 LUFS into the library (responsive
       one-track-per-tick timer), gain badge per library row, applied at
       decode time on every cpal play path behind a Settings ON/OFF toggle
+- [x] Background decode loader: `play`/`queue` return instantly (idle play
+      announces + `Buffering`); live handoffs keep the old deck sounding
+      until the new deck lands as a crossfade, superseded/stopped loads are
+      discarded, pause-mid-load sticks for an explicit resume
 - [ ] Wire `library.search()` results into the Slint model (currently a no-op) — ✅ done (live list + search filter + tap-to-play)
 
 ### 1.2 Playlist Generator (real scope, not a checkbox)

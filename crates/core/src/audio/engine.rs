@@ -22,6 +22,11 @@ pub enum PlayerState {
     Stopped,
     Playing,
     Paused,
+    /// A `play` was accepted and the file is decoding on the background
+    /// loader — the UI thread is never blocked waiting for it. The audio
+    /// callback stays silent until the decoded deck lands (`Playing`),
+    /// and a mid-load `stop` supersedes it (back to `Stopped`).
+    Buffering,
 }
 
 /// Per-path loudness gain lookup (dB) used by normalization at decode time.
@@ -31,9 +36,16 @@ pub type LoudnessLookup = Box<dyn Fn(&Path) -> Option<f32>>;
 /// NOTE: no Send+Sync bound — cpal::Stream is !Send/!Sync; the UI owns
 /// the engine single-threaded (Rc/RefCell).
 pub trait Engine {
+    /// Start `path`, crossfading when something is already live.
+    /// Returns as soon as the file is handed to the background decode
+    /// loader — it must never block the caller on full-file decode +
+    /// resample. An idle play is announced via `current_track` (state
+    /// `Buffering`); a live play keeps `Playing` and its current label
+    /// until the decoded deck lands as a crossfade (`Playing`).
     fn play(&self, path: &Path) -> Result<()>;
     /// Queue for end-of-track start (insert-after-current). Default degrades
     /// to immediate `play`; `CpalEngine` blends it in at the boundary.
+    /// Same async contract as `play`: returns after enqueueing the job.
     fn queue(&self, path: &Path) -> Result<()> {
         self.play(path)
     }
