@@ -231,7 +231,7 @@ enum SettingsSection {
 impl SettingsSection {
     fn label(self) -> &'static str {
         match self {
-            SettingsSection::Station => "Station",
+            SettingsSection::Station => "Station Name",
             SettingsSection::AudioDevice => "Audio Device",
             SettingsSection::Playout => "Playout",
             SettingsSection::Equalizer => "Equalizer",
@@ -239,6 +239,28 @@ impl SettingsSection {
             SettingsSection::Streaming => "Streaming",
             SettingsSection::Microphone => "Microphone",
             SettingsSection::License => "License",
+        }
+    }
+
+    /// One-line subtitle shown under the section title.
+    fn description(self) -> &'static str {
+        match self {
+            SettingsSection::Station => "Station identity shown in the sidebar and dashboard.",
+            SettingsSection::AudioDevice => {
+                "Monitoring output. Applies on restart; falls back to the system default if unplugged."
+            }
+            SettingsSection::Playout => "Crossfade length and dead-air alarm threshold.",
+            SettingsSection::Equalizer => {
+                "12-band program EQ plus the brickwall limiter, applied live."
+            }
+            SettingsSection::Loudness => "ReplayGain-style normalization toward the target loudness.",
+            SettingsSection::Streaming => {
+                "Icecast source client: server, mount, encoder, and live status."
+            }
+            SettingsSection::Microphone => {
+                "Live input with voice-activated ducking of the music bed."
+            }
+            SettingsSection::License => "Offline license key and status.",
         }
     }
 }
@@ -2955,10 +2977,17 @@ fn view_settings(state: &App) -> Element<'_, Message> {
     let mic_state = state.player.mic_state();
 
     let mut devices = column![text("Output devices:").size(12)].spacing(4);
+    // Highlight what is actually sounding: the saved choice, or the live
+    // device when running on the system default (sel_device is empty then).
+    let active_output = if state.sel_device.is_empty() {
+        state.player.device_name()
+    } else {
+        state.sel_device.clone()
+    };
     for d in &state.output_devices {
         let name = d.clone();
         let entry = button(text(d).size(12)).on_press(Message::SettingsSelectDevice(name));
-        devices = devices.push(if *d == state.sel_device {
+        devices = devices.push(if *d == active_output {
             entry.style(iced::widget::button::primary)
         } else {
             entry
@@ -3018,9 +3047,11 @@ fn view_settings(state: &App) -> Element<'_, Message> {
         });
     }
 
-    let content: Element<'_, Message> = match state.settings_section {
+    let sec = state.settings_section;
+    let content: Element<'_, Message> = match sec {
         SettingsSection::Station => column![
-            text("Station").size(16),
+            text(sec.label()).size(16),
+            text(sec.description()).size(11),
             text_input("Station name", &state.settings.station_name)
                 .on_input(Message::StationName)
                 .padding(6),
@@ -3028,7 +3059,8 @@ fn view_settings(state: &App) -> Element<'_, Message> {
         .spacing(8)
         .into(),
         SettingsSection::AudioDevice => column![
-            text("Audio Device").size(16),
+            text(sec.label()).size(16),
+            text(sec.description()).size(11),
             text(format!(
                 "Engine: {} | Device: {}",
                 state.audio_engine,
@@ -3042,7 +3074,8 @@ fn view_settings(state: &App) -> Element<'_, Message> {
         .spacing(8)
         .into(),
         SettingsSection::Playout => column![
-            text("Playout").size(16),
+            text(sec.label()).size(16),
+            text(sec.description()).size(11),
             stepper(
                 format!("Crossfade: {:.1} s", s.crossfade_secs),
                 Message::XfadeDec,
@@ -3057,7 +3090,8 @@ fn view_settings(state: &App) -> Element<'_, Message> {
         .spacing(8)
         .into(),
         SettingsSection::Equalizer => column![
-            text("Equalizer & Limiter").size(16),
+            text(sec.label()).size(16),
+            text(sec.description()).size(11),
             row![
                 checkbox(s.eq_enabled)
                     .label("EQ enabled")
@@ -3075,7 +3109,8 @@ fn view_settings(state: &App) -> Element<'_, Message> {
         .spacing(8)
         .into(),
         SettingsSection::Loudness => column![
-            text("Loudness").size(16),
+            text(sec.label()).size(16),
+            text(sec.description()).size(11),
             row![checkbox(s.loudness_norm)
                 .label("Loudness normalize")
                 .on_toggle(|_| Message::LoudnessToggle),]
@@ -3089,7 +3124,8 @@ fn view_settings(state: &App) -> Element<'_, Message> {
         .spacing(8)
         .into(),
         SettingsSection::Streaming => column![
-            text("Streaming (Icecast)").size(16),
+            text(sec.label()).size(16),
+            text(sec.description()).size(11),
             row![
                 checkbox(stream_cfg.enabled)
                     .label("Stream enabled")
@@ -3136,7 +3172,8 @@ fn view_settings(state: &App) -> Element<'_, Message> {
         .spacing(8)
         .into(),
         SettingsSection::Microphone => column![
-            text("Microphone / line-in").size(16),
+            text(sec.label()).size(16),
+            text(sec.description()).size(11),
             row![
                 checkbox(mic_cfg.enabled)
                     .label("Mic enabled")
@@ -3194,7 +3231,8 @@ fn view_settings(state: &App) -> Element<'_, Message> {
         .spacing(8)
         .into(),
         SettingsSection::License => column![
-            text("License").size(16),
+            text(sec.label()).size(16),
+            text(sec.description()).size(11),
             text(format!("License: {}", state.license_status)).size(12),
             text(&state.license_error).size(11),
             row![
