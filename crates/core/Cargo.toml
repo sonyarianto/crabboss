@@ -14,7 +14,7 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 
 # Audio (cpal engine: device I/O; symphonia decode; rubato resample)
-cpal = "0.15"
+cpal = "0.18"
 symphonia = { version = "0.5", features = ["all"] }
 rubato = "0.15"
 rtrb = "0.3"
