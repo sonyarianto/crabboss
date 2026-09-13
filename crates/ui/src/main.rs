@@ -1,39 +1,35 @@
 //! CrabBoss — Radio Automation Software
 //!
-//! Desktop UI entry point using Slint.
+//! Desktop UI entry point using Iced (Elm architecture).
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Duration;
 
-use tracing_subscriber::{fmt, EnvFilter};
+use iced::{
+    widget::{
+        button, checkbox, column, container, progress_bar, row, scrollable, slider, text,
+        text_input,
+    },
+    Element, Length, Subscription, Task, Theme,
+};
 
-slint::include_modules!();
+use crabcore::audio::{
+    Engine, PlayerState, EQ_BAND_COUNT, EQ_CENTER_HZ, MAX_GAIN_DB, TARGET_MAX_LUFS, TARGET_MIN_LUFS,
+};
+use crabcore::library::{Library, Track, TrackKind};
+use crabcore::playlist::PlaylistManager;
 
-use crabcore::audio::{Engine, EQ_BAND_COUNT, MAX_GAIN_DB, TARGET_MAX_LUFS, TARGET_MIN_LUFS};
-use crabcore::library::TrackKind;
+// ---------------------------------------------------------------------------
+// Helpers (same behavior as before)
+// ---------------------------------------------------------------------------
 
-/// One analyzed track posted by the loudness worker thread back to the
-/// UI thread (which alone writes to SQLite).
 struct LoudnessDone {
     id: String,
     file_name: String,
     lufs: f32,
     gain_db: f32,
-}
-
-/// Application state shared between UI callbacks
-struct AppState {
-    player: Box<dyn Engine>,
-    library: crabcore::library::Library,
-    #[allow(dead_code)]
-    playlist_manager: crabcore::playlist::PlaylistManager,
-    #[allow(dead_code)]
-    current_track_index: usize,
-    /// True while the loudness background scan is in flight (single-flight guard).
-    loudness_scanning: Rc<RefCell<bool>>,
 }
 
 fn fmt_dur(d: Option<f64>) -> String {
@@ -47,6 +43,10 @@ fn kind_label(k: TrackKind) -> &'static str {
         TrackKind::Ad => "Ad",
         TrackKind::Music => "Music",
     }
+}
+
+fn track_label(t: &Track) -> String {
+    t.title.clone().unwrap_or_else(|| t.file_name.clone())
 }
 
 /// `--engine cpal` (only backend; `--engine rodio` warns and uses cpal).
@@ -65,235 +65,453 @@ fn engine_choice() -> String {
     choice.to_lowercase()
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging
-    fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+fn lin_to_dbfs(lin: f32) -> f32 {
+    20.0 * lin.max(0.001).log10()
+}
+
+fn stream_bitrate_step(current: u32, up: bool) -> u32 {
+    const LADDER: [u32; 16] = [
+        8, 16, 24, 32, 40, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+    ];
+    let idx = LADDER
+        .iter()
+        .position(|&b| b >= current)
+        .unwrap_or(LADDER.len() - 1);
+    match up {
+        true => LADDER[(idx + 1).min(LADDER.len() - 1)],
+        false => LADDER[idx.saturating_sub(1)],
+    }
+}
+
+fn duck_ms_step(ladder: &[f32], current: f32, up: bool) -> f32 {
+    let idx = ladder
+        .iter()
+        .position(|&b| b >= current)
+        .unwrap_or(ladder.len() - 1);
+    match up {
+        true => ladder[(idx + 1).min(ladder.len() - 1)],
+        false => ladder[idx.saturating_sub(1)],
+    }
+}
+
+const ATTACK_LADDER: [f32; 9] = [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0];
+const RELEASE_LADDER: [f32; 9] = [10.0, 25.0, 50.0, 100.0, 200.0, 400.0, 800.0, 1500.0, 3000.0];
+
+fn action_name(idx: usize) -> &'static str {
+    match idx {
+        0 => "play",
+        1 => "load",
+        2 => "generate",
+        4 => "queue",
+        _ => "command",
+    }
+}
+
+fn action_label(idx: usize) -> &'static str {
+    match idx {
+        0 => "play",
+        1 => "load",
+        2 => "generate",
+        3 => "command",
+        4 => "queue",
+        _ => "command",
+    }
+}
+
+fn report_range_bounds(idx: usize) -> (chrono::DateTime<chrono::Utc>, String) {
+    use chrono::{Duration as CDur, Local};
+    let now = Local::now();
+    let label = match idx {
+        0 => "Today",
+        2 => "Last 30 days",
+        3 => "All time",
+        _ => "Last 7 days",
+    }
+    .to_string();
+    let from = match idx {
+        0 => now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap(),
+        2 => now - CDur::days(30),
+        3 => now - CDur::days(365 * 20),
+        _ => now - CDur::days(7),
+    };
+    (from.with_timezone(&chrono::Utc), label)
+}
+
+fn eq_band_label(band: usize) -> String {
+    let hz = EQ_CENTER_HZ.get(band).copied().unwrap_or(0.0);
+    if hz >= 1000.0 {
+        format!("{:.1}k", hz / 1000.0)
+    } else {
+        format!("{:.0}", hz)
+    }
+}
+
+fn short_name(path: &str) -> String {
+    PathBuf::from(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Navigation + messages
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Screen {
+    #[default]
+    Home,
+    Playout,
+    Media,
+    Scheduler,
+    Carts,
+    Reports,
+    Ads,
+    Settings,
+}
+
+impl Screen {
+    fn label(self) -> &'static str {
+        match self {
+            Screen::Home => "Home",
+            Screen::Playout => "Playout",
+            Screen::Media => "Media",
+            Screen::Scheduler => "Scheduler",
+            Screen::Carts => "Carts",
+            Screen::Reports => "Reports",
+            Screen::Ads => "Ads",
+            Screen::Settings => "Settings",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Message {
+    Navigate(Screen),
+    Tick,
+    // Transport
+    Play,
+    Pause,
+    Stop,
+    Next,
+    Prev,
+    VolumeChanged(f32),
+    AutodjToggled(bool),
+    // Library
+    LibrarySearchChanged(String),
+    LibraryTrackSelected(usize),
+    LibraryTrackPlay(usize),
+    ImportFiles,
+    HealthCheck,
+    LoudnessScan,
+    // Scheduler
+    SchedulerMasterToggled(bool),
+    SchedulerToggleEvent(usize),
+    SchedulerDeleteEvent(usize),
+    SchedulerRunEvent(usize),
+    SchedulerNew,
+    SchedulerEdit(usize),
+    SchedulerEditorClose,
+    SchedName(String),
+    SchedTime(String),
+    SchedTarget(String),
+    SchedExpires(String),
+    SchedActionPrev,
+    SchedActionNext,
+    SchedDayChanged(usize, bool),
+    SchedulerSave,
+    // Carts
+    CartPlay(usize),
+    CartHotkey(usize),
+    CartDelete(usize),
+    CartAdd,
+    CartPlace(usize),
+    CartToggleAssign,
+    // Reports
+    ReportRangeChanged(usize),
+    ReportExport,
+    // Ads
+    AdsToggle(usize),
+    AdsDelete(usize),
+    AdsRun(usize),
+    AdsNew,
+    AdsEdit(usize),
+    AdsEditorClose,
+    AdName(String),
+    AdSpot(String),
+    AdIntro(String),
+    AdOutro(String),
+    AdStart(String),
+    AdEnd(String),
+    AdTime(String),
+    AdDayChanged(usize, bool),
+    AdsSave,
+    // Settings
+    SettingsRefreshDevices,
+    SettingsSelectDevice(String),
+    XfadeInc,
+    XfadeDec,
+    SilenceInc,
+    SilenceDec,
+    EqToggle,
+    EqInc(usize),
+    EqDec(usize),
+    EqReset,
+    LimiterInc,
+    LimiterDec,
+    LoudnessToggle,
+    LoudnessTargetInc,
+    LoudnessTargetDec,
+    StreamToggle,
+    StreamHost(String),
+    StreamPort(String),
+    StreamMount(String),
+    StreamPassword(String),
+    StreamBitrateInc,
+    StreamBitrateDec,
+    MicToggle,
+    MicRefreshDevices,
+    MicSelectDevice(String),
+    MicLevelInc,
+    MicLevelDec,
+    MicDuckToggle,
+    MicThresholdInc,
+    MicThresholdDec,
+    MicDepthInc,
+    MicDepthDec,
+    MicAttackInc,
+    MicAttackDec,
+    MicReleaseInc,
+    MicReleaseDec,
+    // License
+    LicenseKeyInput(String),
+    ActivateLicense,
+    ClearLicense,
+}
+
+// ---------------------------------------------------------------------------
+// App state (lives on the UI thread; the cpal engine is `!Send` by design)
+// ---------------------------------------------------------------------------
+
+struct App {
+    player: Box<dyn Engine>,
+    library: Library,
+    playlist_manager: PlaylistManager,
+    scheduler: crabcore::scheduler::SchedulerManager,
+    carts: crabcore::cart::CartManager,
+    ads: crabcore::ads::AdsManager,
+    settings: crabcore::settings::AppSettings,
+    settings_path: PathBuf,
+    license: crabcore::license::LicenseStore,
+
+    screen: Screen,
+    station_name: String,
+    audio_engine: String,
+
+    // Player UI
+    is_playing: bool,
+    now_title: String,
+    now_artist: String,
+    volume: f32,
+    autodj: bool,
+    up_next: String,
+    auto_continue: bool,
+    was_playing: bool,
+
+    // Library
+    lib_tracks: Vec<Track>,
+    lib_total: usize,
+    lib_search: String,
+    lib_selected: Option<usize>,
+    lib_status: String,
+
+    // Loudness background scan
+    scanning: bool,
+    scan_rx: Option<Receiver<LoudnessDone>>,
+    scan_done: usize,
+    scan_total: usize,
+
+    // Chunked import
+    import_active: bool,
+    import_pending: VecDeque<PathBuf>,
+    import_added: usize,
+    import_skipped: usize,
+    import_total: usize,
+
+    // Scheduler
+    sched_enabled: bool,
+    sched_events: Vec<crabcore::scheduler::ScheduledEvent>,
+    sched_warnings: Vec<String>,
+    sched_editor_open: bool,
+    sched_edit_idx: Option<usize>,
+    se_name: String,
+    se_time: String,
+    se_action: usize,
+    se_target: String,
+    se_expires: String,
+    se_days: [bool; 7],
+    sched_error: String,
+    fired: HashMap<String, String>,
+    fired_ads: HashMap<String, String>,
+
+    // Carts
+    cart_list: Vec<crabcore::cart::Cart>,
+    cart_status: String,
+    cart_assign: bool,
+
+    // Reports
+    report_entries: Vec<crabcore::report::PlayLogEntry>,
+    report_summary: String,
+    report_range: usize,
+
+    // Ads
+    ad_blocks: Vec<crabcore::ads::AdBlock>,
+    ads_editor_open: bool,
+    ads_edit_idx: Option<usize>,
+    ab_name: String,
+    ab_spot: String,
+    ab_intro: String,
+    ab_outro: String,
+    ab_start: String,
+    ab_end: String,
+    ab_time: String,
+    ab_days: [bool; 7],
+    ads_error: String,
+
+    // Settings UI caches
+    output_devices: Vec<String>,
+    sel_device: String,
+    device_note: String,
+    input_devices: Vec<String>,
+    mic_note: String,
+
+    // License UI
+    license_status: String,
+    license_error: String,
+    license_key: String,
+
+    // Home counts
+    track_count: usize,
+    playlist_count: usize,
+    upcoming_count: usize,
+
+    last_recovery: Option<String>,
+    tick_count: u64,
+}
+
+impl App {
+    // -- persistence -------------------------------------------------------
+    fn save_settings(&mut self) {
+        if let Err(e) = self.settings.save(&self.settings_path) {
+            tracing::warn!("Settings save failed: {e}");
+        }
+    }
+
+    fn refresh_library(&mut self) {
+        let tracks = if self.lib_search.trim().is_empty() {
+            self.library.get_all_tracks().unwrap_or_default()
+        } else {
+            self.library
+                .search(self.lib_search.trim())
+                .unwrap_or_default()
+        };
+        self.lib_total = self.library.get_all_tracks().unwrap_or_default().len();
+        self.lib_tracks = tracks;
+        self.track_count = self.lib_total;
+        if let Some(sel) = self.lib_selected {
+            if sel >= self.lib_tracks.len() {
+                self.lib_selected = None;
+            }
+        }
+    }
+
+    fn refresh_scheduler(&mut self) {
+        self.sched_events = self.scheduler.list_all().unwrap_or_default();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        self.sched_warnings = self
+            .scheduler
+            .expiry_warnings(&today, 3)
+            .unwrap_or_default();
+        self.upcoming_count = self.sched_events.iter().filter(|e| e.enabled).count();
+    }
+
+    fn refresh_carts(&mut self) {
+        self.cart_list = self.carts.list_all().unwrap_or_default();
+    }
+
+    fn play_cart(&mut self, i: usize) {
+        let cart = self.cart_list.get(i).cloned();
+        let Some(cart) = cart else { return };
+        let path = PathBuf::from(&cart.file_path);
+        if !path.is_file() {
+            tracing::warn!("Cart '{}' file missing: {}", cart.label, cart.file_path);
+            self.cart_status = format!("'{}' file missing", cart.label);
+            return;
+        }
+        let logged = self
+            .library
+            .find_by_path(&cart.file_path)
+            .ok()
+            .flatten()
+            .map(|t| (t.id, t.duration_secs));
+        match self.player.play(&path) {
+            Ok(()) => {
+                tracing::info!("Cart fired: {}", cart.label);
+                if let Some((id, dur)) = logged {
+                    let _ = self.library.record_play(&id, dur);
+                }
+                self.auto_continue = true;
+                self.is_playing = true;
+                self.now_title = cart.label.clone();
+                self.now_artist = "Cart".into();
+                self.cart_status = format!("Playing {}", cart.label);
+            }
+            Err(e) => tracing::error!("Cart play failed: {}", e),
+        }
+    }
+
+    fn refresh_ads(&mut self) {
+        self.ad_blocks = self.ads.list_all().unwrap_or_default();
+    }
+
+    fn refresh_report(&mut self) {
+        let (from, label) = report_range_bounds(self.report_range);
+        let to = chrono::Utc::now();
+        let entries = crabcore::report::play_report(
+            &self.library,
+            from,
+            to,
+            &[TrackKind::Jingle, TrackKind::Ad],
         )
-        .init();
-
-    tracing::info!("🦀 CrabBoss starting up...");
-
-    // Persisted prefs (settings.json next to the db).
-    let settings_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("settings.json");
-    let settings = Rc::new(RefCell::new(crabcore::settings::AppSettings::load(
-        &settings_path,
-    )));
-
-    // Audio engine: cpal is the sole backend since the rodio removal.
-    // The flag/env override stays as a deprecated no-op so old scripts
-    // and shortcuts keep working.
-    let engine_name = {
-        let choice = engine_choice();
-        if choice != "cpal" {
-            tracing::warn!("Unknown engine '{choice}', using cpal");
-        }
-        "cpal".to_string()
-    };
-    tracing::info!("Audio engine: cpal");
-    let mut player: Box<dyn Engine> = match settings.borrow().output_device.clone() {
-        Some(dev) => Box::new(crabcore::audio::CpalEngine::open_named(&dev)),
-        None => Box::new(crabcore::audio::CpalEngine::new()),
-    };
-    if !player.has_audio_device() {
-        tracing::warn!("⚠ Running without audio output (headless mode)");
-    }
-    // Apply persisted DSP prefs live (no-ops on backends without support).
-    player.set_crossfade_secs(settings.borrow().crossfade_secs);
-    player.set_silence_threshold_secs(settings.borrow().silence_threshold_secs);
-    player.set_eq_enabled(settings.borrow().eq_enabled);
-    for (band, gain) in settings.borrow().eq_gains_db.iter().enumerate() {
-        player.set_eq_band(band, *gain);
-    }
-    player.set_limiter_ceiling(settings.borrow().limiter_ceiling);
-    player.set_loudness_enabled(settings.borrow().loudness_norm);
-    // Streaming (Icecast): install config; auto-start when enabled.
-    player.set_stream_config(settings.borrow().stream.clone());
-    if settings.borrow().stream.enabled && engine_name == "cpal" {
-        if let Err(e) = player.stream_start() {
-            tracing::warn!("Stream auto-start failed: {e}");
-        }
-    }
-    // Mic/line-in: install config; auto-start when enabled.
-    player.set_mic_config(settings.borrow().mic.clone());
-    if settings.borrow().mic.enabled && engine_name == "cpal" {
-        if let Err(e) = player.mic_start() {
-            tracing::warn!("Mic auto-start failed: {e}");
-        }
-    }
-
-    // Initialize library (create db in current dir)
-    let db_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("crabboss.db");
-    let library =
-        crabcore::library::Library::open(&db_path).expect("Failed to open library database");
-
-    tracing::info!("Library loaded from: {}", db_path.display());
-
-    // Repair kind labels stored by older over-eager path rules
-    // (e.g. `Downloads/` mislabeled as ads) before seeding/stats.
-    match library.reclassify_all() {
-        Ok(0) => {}
-        Ok(n) => tracing::info!("Re-labeled {} tracks (kind repair)", n),
-        Err(e) => tracing::warn!("Kind repair scan failed: {}", e),
-    }
-
-    // Gain repair: rewrite stored gains toward the active Settings target
-    // (e.g. rows baked under the old −23 default move to −9). Pure SQL from
-    // the kept LUFS values — no re-analysis; sentinels/unanalyzed untouched.
-    match library.retarget_gains(settings.borrow().loudness_target_lufs) {
-        Ok(0) => {}
-        Ok(n) => tracing::info!("Re-targeted {n} loudness gains"),
-        Err(e) => tracing::warn!("Gain retarget failed: {e}"),
-    }
-
-    // Loudness normalization: per-path gain lookup on its own db connection
-    // (the main one moves into AppState below). Applies at decode time to
-    // every play path (library, carts, scheduler, Auto-DJ).
-    if engine_name == "cpal" {
-        let loudness_lib =
-            crabcore::library::Library::open(&db_path).expect("Failed to open loudness lookup db");
-        player.set_loudness_lookup(Some(Box::new(move |p| {
-            loudness_lib
-                .loudness_gain_by_path(&p.to_string_lossy())
-                .unwrap_or(None)
-        })));
-    }
-
-    // Scheduler store (shares the same crabboss.db file, separate connection)
-    let scheduler = Rc::new(RefCell::new(
-        crabcore::scheduler::SchedulerManager::open(&db_path)
-            .expect("Failed to open scheduler store"),
-    ));
-
-    // Seed a starter flow for a new station (only when empty)
-    if scheduler
-        .borrow()
-        .list_all()
-        .map(|v| v.is_empty())
-        .unwrap_or(false)
-    {
-        let _ = scheduler.borrow().create(
-            "Midnight generate",
-            "generate",
-            "Day",
-            "00:00",
-            "Daily",
-            None,
+        .unwrap_or_default();
+        let airtime: f64 = entries.iter().filter_map(|e| e.duration_secs).sum();
+        self.report_summary = format!(
+            "{}: {} plays - {:.0} min music airtime (jingles/ads excluded{})",
+            label,
+            entries.len(),
+            airtime / 60.0,
+            if entries.len() > 100 {
+                "; showing newest 100"
+            } else {
+                ""
+            }
         );
-        let _ = scheduler.borrow().create(
-            "Morning show",
-            "load",
-            "Morning.m3u",
-            "08:00",
-            "Daily",
-            None,
-        );
-        let _ = scheduler.borrow().create(
-            "Top-of-hour jingle",
-            "play",
-            "toth.mp3",
-            "09:00",
-            "Daily",
-            None,
-        );
-        tracing::info!("Seeded starter scheduler events");
+        self.report_entries = entries.into_iter().take(100).collect();
     }
 
-    // Count existing tracks
-    let track_count = library.get_all_tracks().unwrap_or_default().len();
-    tracing::info!("Library contains {} tracks", track_count);
-
-    // Playlist store (same db file, separate connection)
-    let playlist_manager =
-        crabcore::playlist::PlaylistManager::open(&db_path).expect("Failed to open playlists");
-    let playlist_count = playlist_manager.list_all().unwrap_or_default().len();
-
-    // Cart Wall store (same db file, separate connection)
-    let carts = Rc::new(RefCell::new(
-        crabcore::cart::CartManager::open(&db_path).expect("Failed to open cart store"),
-    ));
-
-    // Seed carts from jingles first, then music (only when empty)
-    if carts
-        .borrow()
-        .list_all()
-        .map(|v| v.is_empty())
-        .unwrap_or(false)
-    {
-        let jingles = library.list_by_kind(TrackKind::Jingle).unwrap_or_default();
-        let music = library.list_by_kind(TrackKind::Music).unwrap_or_default();
-        for t in jingles.iter().chain(music.iter()).take(4) {
-            let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
-            let _ = carts.borrow().create(&label, &t.file_path);
-        }
-        if track_count > 0 {
-            tracing::info!("Seeded cart wall from library");
-        }
+    fn refresh_counts(&mut self) {
+        self.track_count = self.library.get_all_tracks().unwrap_or_default().len();
+        self.playlist_count = self.playlist_manager.list_all().unwrap_or_default().len();
+        self.upcoming_count = self.sched_events.iter().filter(|e| e.enabled).count();
     }
 
-    // Ads store (same db file, separate connection)
-    let ads = Rc::new(RefCell::new(
-        crabcore::ads::AdsManager::open(&db_path).expect("Failed to open ads store"),
-    ));
-
-    // Build Slint UI
-    let ui = MainWindow::new().expect("Failed to create main window");
-
-    // License store (offline key, license.json next to db)
-    let license_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("license.json");
-    let license_store = Rc::new(RefCell::new(crabcore::license::LicenseStore::open(
-        &license_path,
-    )));
-
-    // Router initial state: Home, no login (license-key model instead).
-    ui.set_current_screen(1);
-    ui.set_station_name("CrabBoss FM".into());
-    ui.set_license_status(license_store.borrow().status().label().into());
-    ui.set_license_error("".into());
-    ui.set_audio_engine(engine_name.clone().into());
-    ui.set_audio_device(player.device_name().into());
-    ui.set_track_count(track_count as i32);
-    ui.set_playlist_count(playlist_count as i32);
-    ui.set_upcoming_count(0);
-
-    // Shared state
-    let loudness_scanning = Rc::new(RefCell::new(false));
-    let state = Rc::new(RefCell::new(AppState {
-        player,
-        library,
-        playlist_manager,
-        current_track_index: 0,
-        loudness_scanning: loudness_scanning.clone(),
-    }));
-
-    // Tracks currently shown in the library list (all or search-filtered);
-    // row indices from Slint resolve against this.
-    let last_shown: Rc<RefCell<Vec<crabcore::library::Track>>> = Rc::new(RefCell::new(Vec::new()));
-
-    // Loudness background scan handles: worker thread → channel → pump timer.
-    // (done, total) progress for the status line.
-    let scan_rx: Rc<RefCell<Option<mpsc::Receiver<LoudnessDone>>>> = Rc::new(RefCell::new(None));
-    let scan_progress: Rc<RefCell<(usize, usize)>> = Rc::new(RefCell::new((0, 0)));
-
-    // True while a chunked file import is draining (one file per timer
-    // tick); a second click while active is ignored, not stacked.
-    let import_active: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
-
-    // Auto-DJ continuity: true while the program feed owns playback
-    // (any program play sets it; manual Stop clears it; EOF restarts on it).
-    let auto_continue: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
-    ui.set_autodj_enabled(settings.borrow().autodj);
-    ui.set_up_next_title("".into());
-
-    // One-track rotation pick for the current daypart (Auto-DJ / Next).
-    fn autodj_pick(library: &crabcore::library::Library) -> Option<crabcore::library::Track> {
+    // -- Auto-DJ ------------------------------------------------------------
+    fn autodj_pick(&self) -> Option<Track> {
         let now = chrono::Local::now();
         let cfg = crabcore::playlist::GenConfig {
             target_tracks: 1,
@@ -301,155 +519,186 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             weekday: now.format("%a").to_string(),
             ..Default::default()
         };
-        crabcore::playlist::generate(library, &cfg)
+        crabcore::playlist::generate(&self.library, &cfg)
             .ok()
             .and_then(|mut v| v.pop())
     }
 
-    fn track_label(t: &crabcore::library::Track) -> String {
-        t.title.clone().unwrap_or_else(|| t.file_name.clone())
-    }
-
-    // -- Library: push tracks to UI (missing files get a ⚠ prefix) --
-    // `total` is the full library size; when a search filter is active
-    // (`shown < total`) the header reads "N of M tracks" so filtering is
-    // visibly working.
-    fn refresh_library(
-        ui: &MainWindow,
-        tracks: Vec<crabcore::library::Track>,
-        last_shown: &Rc<RefCell<Vec<crabcore::library::Track>>>,
-        total: usize,
-    ) {
-        let shown = tracks.len();
-        let rows: Vec<LibTrack> = tracks
-            .iter()
-            .map(|t| {
-                let missing = !PathBuf::from(&t.file_path).is_file();
-                let base = t.title.clone().unwrap_or_else(|| t.file_name.clone());
-                LibTrack {
-                    title: if missing {
-                        format!("⚠ {}", base)
-                    } else {
-                        base
-                    }
-                    .into(),
-                    artist: t.artist.clone().unwrap_or_default().into(),
-                    duration: fmt_dur(t.duration_secs).into(),
-                    kind: kind_label(t.kind).into(),
-                    gain: t
-                        .loudness_gain_db
-                        .map(|g| format!("{g:+.1} dB"))
-                        .unwrap_or_default()
-                        .into(),
-                }
-            })
-            .collect();
-        *last_shown.borrow_mut() = tracks;
-        let model = Rc::new(slint::VecModel::from(rows));
-        ui.set_library_tracks(model.into());
-        ui.set_library_count_label(
-            if shown == total {
-                format!("{} track{}", total, if total == 1 { "" } else { "s" })
-            } else {
-                format!("{shown} of {total} tracks")
-            }
-            .into(),
-        );
-    }
-    {
-        let tracks = state.borrow().library.get_all_tracks().unwrap_or_default();
-        let total = tracks.len();
-        refresh_library(&ui, tracks, &last_shown, total);
-    }
-    ui.set_library_status("".into());
-
-    // -- Library health: startup scan + on-demand --
-    fn run_health_check(
-        ui: &MainWindow,
-        state: &Rc<RefCell<AppState>>,
-        last_shown: &Rc<RefCell<Vec<crabcore::library::Track>>>,
-    ) {
-        let s = state.borrow();
-        // Repair stale kind labels first so the refreshed list shows them.
-        let fixed = s.library.reclassify_all().unwrap_or(0);
-        let missing = s.library.missing_files().unwrap_or_default();
-        let pending = s.library.count_missing_loudness().unwrap_or(0);
-        if !missing.is_empty() {
-            for t in &missing {
-                tracing::warn!("Missing file: {}", t.file_path);
-            }
-        }
-        if fixed > 0 {
-            tracing::info!("Health scan re-labeled {} tracks", fixed);
-        }
-        let mut parts = if missing.is_empty() {
-            vec!["✓ All files OK".to_string()]
-        } else {
-            vec![format!("⚠ {} files missing (see log)", missing.len())]
+    fn autodj_play_now(&mut self) {
+        let pick = self.autodj_pick();
+        let Some(pick) = pick else {
+            tracing::warn!("Auto-DJ: library is empty");
+            return;
         };
-        if fixed > 0 {
-            parts.push(format!("re-labeled {fixed}"));
+        let path = PathBuf::from(&pick.file_path);
+        if !path.is_file() {
+            tracing::warn!("Auto-DJ: file missing: {}", pick.file_path);
+            return;
         }
-        if pending > 0 {
-            parts.push(format!("🔊 {pending} to analyze"));
+        match self.player.play(&path) {
+            Ok(()) => {
+                let _ = self.library.record_play(&pick.id, pick.duration_secs);
+                let label = track_label(&pick);
+                tracing::info!("Auto-DJ playing: {}", label);
+                self.is_playing = true;
+                self.now_title = label;
+                self.now_artist = "Auto-DJ".into();
+                self.up_next.clear();
+            }
+            Err(e) => tracing::error!("Auto-DJ play failed: {}", e),
         }
-        ui.set_library_status(parts.join(" · ").into());
-        let tracks = s.library.get_all_tracks().unwrap_or_default();
-        ui.set_track_count(tracks.len() as i32);
-        drop(s);
-        let total = tracks.len();
-        refresh_library(ui, tracks, last_shown, total);
-    }
-    {
-        let s = state.borrow();
-        let n_missing = s.library.missing_files().unwrap_or_default().len();
-        let pending = s.library.count_missing_loudness().unwrap_or(0);
-        if n_missing > 0 || pending > 0 {
-            if n_missing > 0 {
-                tracing::warn!("Startup health scan: {} missing files", n_missing);
-            }
-            let mut parts = Vec::new();
-            if n_missing > 0 {
-                parts.push(format!("⚠ {} files missing (see log)", n_missing));
-            }
-            if pending > 0 {
-                parts.push(format!("🔊 {} to analyze", pending));
-            }
-            ui.set_library_status(parts.join(" · ").into());
-        }
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let last_shown = last_shown.clone();
-        ui.on_library_health_check(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                tracing::info!("Manual library health scan");
-                run_health_check(&ui, &state, &last_shown);
-            }
-        });
     }
 
-    // -- Loudness scan (background worker): analyze un-analyzed tracks on a
-    //    dedicated thread so the UI thread never blocks on full-file decode
-    //    (one track costs seconds — the old one-per-tick scan froze the
-    //    window for the whole per-track duration). The worker only reads
-    //    audio files and posts results over a channel; the pump timer below
-    //    stores them via `Library` on the UI thread (SQLite stays
-    //    single-threaded) and refreshes the table once, on completion. --
-    fn start_loudness_scan(
-        state: &Rc<RefCell<AppState>>,
-        ui: &MainWindow,
-        scan_rx: &Rc<RefCell<Option<mpsc::Receiver<LoudnessDone>>>>,
-        scan_progress: &Rc<RefCell<(usize, usize)>>,
-        target_lufs: f32,
-        announce_empty: bool,
-    ) {
-        if *state.borrow().loudness_scanning.borrow() {
-            return; // already running
+    // -- Scheduler / ads firing (shared by manual Run + auto-tick) ----------
+    fn fire_scheduled_event(&mut self, idx: usize) {
+        let event = match self.sched_events.get(idx).cloned() {
+            Some(e) => e,
+            None => return,
+        };
+        tracing::info!(
+            "Scheduler firing: {} [{} {}]",
+            event.name,
+            event.action_type,
+            event.target
+        );
+        match event.action_type.as_str() {
+            "generate" => {
+                let now = chrono::Local::now();
+                let cfg = crabcore::playlist::GenConfig {
+                    target_tracks: 10,
+                    hour: now.format("%H").to_string().parse().unwrap_or(12),
+                    weekday: now.format("%a").to_string(),
+                    ..Default::default()
+                };
+                let rotation =
+                    crabcore::playlist::generate(&self.library, &cfg).unwrap_or_default();
+                let n_music = rotation
+                    .iter()
+                    .filter(|t| t.kind == TrackKind::Music)
+                    .count();
+                let n_jingles = rotation
+                    .iter()
+                    .filter(|t| t.kind == TrackKind::Jingle)
+                    .count();
+                let pl_name = format!("{} {}", event.target, now.format("%H:%M"));
+                match self
+                    .playlist_manager
+                    .create(&pl_name, Some("Auto-generated rotation"))
+                {
+                    Ok(pl) => {
+                        for t in &rotation {
+                            let _ = self.playlist_manager.add_track(
+                                &pl.id,
+                                &t.id,
+                                t.kind == TrackKind::Jingle,
+                                t.kind == TrackKind::Ad,
+                            );
+                        }
+                        tracing::info!(
+                            "Generated playlist '{}' ({} music + {} jingles)",
+                            pl_name,
+                            n_music,
+                            n_jingles
+                        );
+                    }
+                    Err(e) => tracing::error!("Failed to persist rotation: {}", e),
+                }
+                self.playlist_count = self.playlist_manager.list_all().unwrap_or_default().len();
+                self.now_title = format!(
+                    "Generated '{}': {} music + {} jingles",
+                    event.target, n_music, n_jingles
+                );
+            }
+            "queue" => {
+                let path = PathBuf::from(&event.target);
+                if path.is_file() {
+                    match self.player.queue(&path) {
+                        Ok(()) => {
+                            self.auto_continue = true;
+                            self.now_title = format!("Queued after current: {}", event.target);
+                        }
+                        Err(e) => tracing::error!("Scheduler queue failed: {}", e),
+                    }
+                } else {
+                    tracing::warn!("Scheduler target not found on disk: {}", event.target);
+                    self.now_title = format!("Scheduled: {} (file missing)", event.target);
+                }
+            }
+            "load" | "play" => {
+                let path = PathBuf::from(&event.target);
+                if path.is_file() {
+                    let logged = self
+                        .library
+                        .find_by_path(&event.target)
+                        .ok()
+                        .flatten()
+                        .map(|t| (t.id, t.duration_secs));
+                    match self.player.play(&path) {
+                        Ok(()) => {
+                            if let Some((id, dur)) = logged {
+                                let _ = self.library.record_play(&id, dur);
+                            }
+                            self.auto_continue = true;
+                            self.is_playing = true;
+                            self.now_title = event.target.clone();
+                            self.now_artist = "Scheduler".into();
+                        }
+                        Err(e) => tracing::error!("Scheduler play failed: {}", e),
+                    }
+                } else {
+                    tracing::warn!("Scheduler target not found on disk: {}", event.target);
+                    self.now_title = format!("Scheduled: {} (file missing)", event.target);
+                }
+            }
+            other => {
+                tracing::info!("Scheduler command '{}' (no-op in MVP)", other);
+            }
         }
-        let jobs: Vec<(String, String, String)> = state
-            .borrow()
+    }
+
+    fn fire_ad_block(&mut self, idx: usize) {
+        let block = match self.ad_blocks.get(idx).cloned() {
+            Some(b) => b,
+            None => return,
+        };
+        if !PathBuf::from(&block.spot_path).is_file() {
+            tracing::warn!(
+                "Ad block '{}' skipped, spot missing: {}",
+                block.name,
+                block.spot_path
+            );
+            self.now_title = format!("Ad '{}': spot missing", block.name);
+            return;
+        }
+        tracing::info!("Ad break firing: {}", block.name);
+        let mut first = true;
+        for clip in block.chain() {
+            let r = if first {
+                self.player.play(&PathBuf::from(&clip))
+            } else {
+                self.player.queue(&PathBuf::from(&clip))
+            };
+            if let Err(e) = r {
+                tracing::error!("Ad clip failed ({}): {}", clip, e);
+                return;
+            }
+            first = false;
+        }
+        if let Some(t) = self.library.find_by_path(&block.spot_path).ok().flatten() {
+            let _ = self.library.record_play(&t.id, t.duration_secs);
+        }
+        self.auto_continue = true;
+        self.is_playing = true;
+        self.now_title = format!("AD: {}", block.name);
+        self.now_artist = "Ad break".into();
+    }
+
+    // -- Loudness scan -------------------------------------------------------
+    fn start_loudness_scan(&mut self, announce_empty: bool) {
+        if self.scanning {
+            return;
+        }
+        let jobs: Vec<(String, String, String)> = self
             .library
             .tracks_missing_loudness(usize::MAX)
             .unwrap_or_default()
@@ -458,29 +707,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect();
         if jobs.is_empty() {
             if announce_empty {
-                ui.set_library_status("✓ All tracks analyzed".into());
+                self.lib_status = "All tracks analyzed".into();
             }
             return;
         }
         let total = jobs.len();
-        // Bake gains toward the caller's snapshot (Settings target): rows
-        // stay consistent even if the user moves the stepper mid-scan.
-        let target_lufs = target_lufs.clamp(
-            crabcore::audio::TARGET_MIN_LUFS,
-            crabcore::audio::TARGET_MAX_LUFS,
-        );
-        *state.borrow().loudness_scanning.borrow_mut() = true;
-        *scan_progress.borrow_mut() = (0, total);
+        let target_lufs = self
+            .settings
+            .loudness_target_lufs
+            .clamp(TARGET_MIN_LUFS, TARGET_MAX_LUFS);
+        self.scanning = true;
+        self.scan_done = 0;
+        self.scan_total = total;
         let (tx, rx) = mpsc::channel();
-        *scan_rx.borrow_mut() = Some(rx);
-        ui.set_library_status(format!("🔊 Loudness scan starting… ({total} to go)").into());
+        self.scan_rx = Some(rx);
+        self.lib_status = format!("Loudness scan starting... ({total} to go)");
         tracing::info!("Loudness scan started ({total} tracks, background thread)");
         if std::thread::Builder::new()
             .name("loudness-scan".into())
             .spawn(move || {
                 for (id, path, file_name) in jobs {
                     let p = PathBuf::from(&path);
-                    // Missing files get a sentinel so they never wedge the queue.
                     let (lufs, gain_db) = if !p.is_file() {
                         (-70.0, 0.0)
                     } else {
@@ -504,823 +751,206 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         })
                         .is_err()
                     {
-                        break; // UI went away; stop promptly
+                        break;
                     }
                 }
             })
             .is_err()
         {
             tracing::error!("Loudness scan: failed to spawn worker thread");
-            *state.borrow().loudness_scanning.borrow_mut() = false;
-            *scan_rx.borrow_mut() = None;
-            ui.set_library_status("⚠ Loudness scan failed to start".into());
-        }
-    }
-    // Pump: drain worker results (100 ms, idle-cheap) and store them. --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let last_shown = last_shown.clone();
-        let scan_rx = scan_rx.clone();
-        let scan_progress = scan_progress.clone();
-        let tick = slint::Timer::default();
-        tick.start(
-            slint::TimerMode::Repeated,
-            std::time::Duration::from_millis(100),
-            move || {
-                if !*state.borrow().loudness_scanning.borrow() {
-                    return;
-                }
-                let Some(ui) = ui_weak.upgrade() else { return };
-                let (batch, worker_gone) = {
-                    let mut slot = scan_rx.borrow_mut();
-                    let Some(rx) = slot.as_mut() else { return };
-                    let mut batch = Vec::new();
-                    let mut worker_gone = false;
-                    loop {
-                        match rx.try_recv() {
-                            Ok(m) => batch.push(m),
-                            Err(mpsc::TryRecvError::Empty) => break,
-                            Err(mpsc::TryRecvError::Disconnected) => {
-                                worker_gone = true;
-                                break;
-                            }
-                        }
-                    }
-                    (batch, worker_gone)
-                };
-                if batch.is_empty() && !worker_gone {
-                    return;
-                }
-                {
-                    let s = state.borrow();
-                    for m in &batch {
-                        let _ = s.library.set_loudness(&m.id, m.lufs, m.gain_db);
-                        tracing::info!(
-                            "Loudness {}: {:.1} LUFS → {:+.1} dB",
-                            m.file_name,
-                            m.lufs,
-                            m.gain_db
-                        );
-                    }
-                }
-                let (done, total) = {
-                    let mut p = scan_progress.borrow_mut();
-                    p.0 += batch.len();
-                    *p
-                };
-                if done >= total || worker_gone {
-                    *state.borrow().loudness_scanning.borrow_mut() = false;
-                    *scan_rx.borrow_mut() = None;
-                    let tracks = state.borrow().library.get_all_tracks().unwrap_or_default();
-                    ui.set_track_count(tracks.len() as i32);
-                    ui.set_library_status(
-                        format!("✓ Loudness scan complete ({done} analyzed)").into(),
-                    );
-                    let total = tracks.len();
-                    refresh_library(&ui, tracks, &last_shown, total);
-                    tracing::info!("Loudness scan complete: {done}/{total} analyzed");
-                } else {
-                    ui.set_library_status(format!("🔊 Analyzing loudness… {done}/{total}").into());
-                }
-            },
-        );
-        std::mem::forget(tick);
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let scan_rx = scan_rx.clone();
-        let scan_progress = scan_progress.clone();
-        ui.on_loudness_scan(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let target = settings.borrow().loudness_target_lufs;
-                start_loudness_scan(&state, &ui, &scan_rx, &scan_progress, target, true);
-            }
-        });
-    }
-
-    // -- Scheduler: push events + expiry warnings to UI --
-    fn refresh_scheduler(ui: &MainWindow, scheduler: &crabcore::scheduler::SchedulerManager) {
-        use crabcore::scheduler::{mask_from_days, ExpiryStatus};
-        let events = scheduler.list_all().unwrap_or_default();
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let rows: Vec<SchedRow> = events
-            .iter()
-            .map(|e| {
-                let mask = mask_from_days(&e.days);
-                // Row badge: expiring within a week, last day, or expired.
-                let (valid, state) = match e.expiry_status(&today) {
-                    ExpiryStatus::Expired => ("⚠ expired".to_string(), 3),
-                    ExpiryStatus::ExpiresToday => ("⚠ last day".to_string(), 2),
-                    ExpiryStatus::Active(n) if n <= 7 => (format!("⏳ {}d", n), 1),
-                    _ => (String::new(), 0),
-                };
-                SchedRow {
-                    name: e.name.clone().into(),
-                    time: e.start_time.clone().into(),
-                    action: e.action_type.clone().into(),
-                    target: e.target.clone().into(),
-                    days: e.days.clone().into(),
-                    valid: valid.into(),
-                    valid_full: e.expires_on.clone().unwrap_or_default().into(),
-                    exp_state: state,
-                    enabled: e.enabled,
-                    mon: mask & 1 != 0,
-                    tue: mask & 2 != 0,
-                    wed: mask & 4 != 0,
-                    thu: mask & 8 != 0,
-                    fri: mask & 16 != 0,
-                    sat: mask & 32 != 0,
-                    sun: mask & 64 != 0,
-                }
-            })
-            .collect();
-        let model = Rc::new(slint::VecModel::from(rows));
-        ui.set_scheduler_events(model.into());
-        ui.set_upcoming_count(events.iter().filter(|e| e.enabled).count() as i32);
-        let warns = scheduler.expiry_warnings(&today, 3).unwrap_or_default();
-        let warn_model = Rc::new(slint::VecModel::from(
-            warns
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<slint::SharedString>>(),
-        ));
-        ui.set_scheduler_warnings(warn_model.into());
-    }
-    ui.set_scheduler_enabled(true);
-    ui.set_scheduler_show_editor(false);
-    ui.set_scheduler_error("".into());
-    refresh_scheduler(&ui, &scheduler.borrow());
-
-    // Shared firing logic: used by manual Run and the auto-tick timer.
-    fn fire_scheduled_event(
-        state: &Rc<RefCell<AppState>>,
-        ui_weak: &slint::Weak<MainWindow>,
-        event: &crabcore::scheduler::ScheduledEvent,
-        auto_continue: &Rc<RefCell<bool>>,
-    ) {
-        tracing::info!(
-            "Scheduler firing: {} [{} {}]",
-            event.name,
-            event.action_type,
-            event.target
-        );
-        let s = state.borrow();
-        match event.action_type.as_str() {
-            // generate <preset>: real rotation (rules + daypart + jingles),
-            // persisted as a playlist for the playout queue.
-            "generate" => {
-                let now = chrono::Local::now();
-                let cfg = crabcore::playlist::GenConfig {
-                    target_tracks: 10,
-                    hour: now.format("%H").to_string().parse().unwrap_or(12),
-                    weekday: now.format("%a").to_string(),
-                    ..Default::default()
-                };
-                let rotation = crabcore::playlist::generate(&s.library, &cfg).unwrap_or_default();
-                let n_music = rotation
-                    .iter()
-                    .filter(|t| t.kind == TrackKind::Music)
-                    .count();
-                let n_jingles = rotation
-                    .iter()
-                    .filter(|t| t.kind == TrackKind::Jingle)
-                    .count();
-                let pl_name = format!("{} {}", event.target, now.format("%H:%M"));
-                match s
-                    .playlist_manager
-                    .create(&pl_name, Some("Auto-generated rotation"))
-                {
-                    Ok(pl) => {
-                        for t in &rotation {
-                            let _ = s.playlist_manager.add_track(
-                                &pl.id,
-                                &t.id,
-                                t.kind == TrackKind::Jingle,
-                                t.kind == TrackKind::Ad,
-                            );
-                        }
-                        tracing::info!(
-                            "Generated playlist '{}' ({} music + {} jingles)",
-                            pl_name,
-                            n_music,
-                            n_jingles
-                        );
-                    }
-                    Err(e) => tracing::error!("Failed to persist rotation: {}", e),
-                }
-                drop(s);
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_playlist_count(
-                        state
-                            .borrow()
-                            .playlist_manager
-                            .list_all()
-                            .unwrap_or_default()
-                            .len() as i32,
-                    );
-                    ui.set_now_playing_title(
-                        format!(
-                            "Generated '{}': {} music + {} jingles",
-                            event.target, n_music, n_jingles
-                        )
-                        .into(),
-                    );
-                }
-            }
-            // queue <path>: insert after current track (blends at the
-            // boundary). Not logged until heard.
-            "queue" => {
-                let path = PathBuf::from(&event.target);
-                if path.is_file() {
-                    match s.player.queue(&path) {
-                        Ok(()) => {
-                            *auto_continue.borrow_mut() = true;
-                            drop(s);
-                            if let Some(ui) = ui_weak.upgrade() {
-                                ui.set_now_playing_title(
-                                    format!("Queued after current: {}", event.target).into(),
-                                );
-                            }
-                        }
-                        Err(e) => tracing::error!("Scheduler queue failed: {}", e),
-                    }
-                } else {
-                    tracing::warn!("Scheduler target not found on disk: {}", event.target);
-                    drop(s);
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_now_playing_title(
-                            format!("Scheduled: {} (file missing)", event.target).into(),
-                        );
-                    }
-                }
-            }
-            "load" | "play" => {
-                let path = PathBuf::from(&event.target);
-                if path.is_file() {
-                    let logged = s
-                        .library
-                        .find_by_path(&event.target)
-                        .ok()
-                        .flatten()
-                        .map(|t| (t.id, t.duration_secs));
-                    match s.player.play(&path) {
-                        Ok(()) => {
-                            if let Some((id, dur)) = logged {
-                                let _ = s.library.record_play(&id, dur);
-                            }
-                            *auto_continue.borrow_mut() = true;
-                            drop(s);
-                            if let Some(ui) = ui_weak.upgrade() {
-                                ui.set_is_playing(true);
-                                ui.set_now_playing_title(event.target.clone().into());
-                                ui.set_now_playing_artist("Scheduler".into());
-                            }
-                        }
-                        Err(e) => tracing::error!("Scheduler play failed: {}", e),
-                    }
-                } else {
-                    tracing::warn!("Scheduler target not found on disk: {}", event.target);
-                    drop(s);
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_now_playing_title(
-                            format!("Scheduled: {} (file missing)", event.target).into(),
-                        );
-                    }
-                }
-            }
-            other => {
-                tracing::info!("Scheduler command '{}' (no-op in MVP)", other);
-            }
+            self.scanning = false;
+            self.scan_rx = None;
+            self.lib_status = "Loudness scan failed to start".into();
         }
     }
 
-    // -- Navigate --
-    {
-        let ui_weak = ui.as_weak();
-        ui.on_navigate(move |screen: i32| {
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_current_screen(screen);
-            }
-        });
-    }
-
-    // -- Scheduler toggled (master on/off) --
-    {
-        ui.on_scheduler_toggled(move |enabled| {
-            tracing::info!("Scheduler master {}", if enabled { "ON" } else { "OFF" });
-        });
-    }
-
-    // -- Scheduler save (Add/Edit dialog) --
-    {
-        let ui_weak = ui.as_weak();
-        let scheduler = scheduler.clone();
-        ui.on_scheduler_save_event(
-            move |idx,
-                  name,
-                  time,
-                  action_idx,
-                  target,
-                  expires,
-                  mon,
-                  tue,
-                  wed,
-                  thu,
-                  fri,
-                  sat,
-                  sun| {
-                use crabcore::scheduler::days_from_mask;
-                let action = match action_idx {
-                    0 => "play",
-                    1 => "load",
-                    2 => "generate",
-                    4 => "queue",
-                    _ => "command",
-                };
-                let mut mask = 0u8;
-                if mon {
-                    mask |= 1;
-                }
-                if tue {
-                    mask |= 2;
-                }
-                if wed {
-                    mask |= 4;
-                }
-                if thu {
-                    mask |= 8;
-                }
-                if fri {
-                    mask |= 16;
-                }
-                if sat {
-                    mask |= 32;
-                }
-                if sun {
-                    mask |= 64;
-                }
-                let days = days_from_mask(mask);
-                let expires_str = expires.to_string();
-                let res = if idx < 0 {
-                    scheduler
-                        .borrow()
-                        .create(
-                            name.trim(),
-                            action,
-                            target.trim(),
-                            time.trim(),
-                            &days,
-                            Some(expires_str.trim()),
-                        )
-                        .map(|_| ())
-                } else {
-                    let ids: Vec<String> = scheduler
-                        .borrow()
-                        .list_all()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|e| e.id)
-                        .collect();
-                    match ids.get(idx as usize) {
-                        Some(id) => scheduler.borrow().update(
-                            id,
-                            name.trim(),
-                            action,
-                            target.trim(),
-                            time.trim(),
-                            &days,
-                            Some(expires_str.trim()),
-                        ),
-                        None => Err(crabcore::CrabError::Scheduler("event gone".into())),
-                    }
-                };
-                match res {
-                    Ok(()) => {
-                        tracing::info!("Scheduler saved: {} at {}", name, time);
-                        if let Some(ui) = ui_weak.upgrade() {
-                            ui.set_scheduler_error("".into());
-                            ui.set_scheduler_show_editor(false);
-                            refresh_scheduler(&ui, &scheduler.borrow());
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Scheduler save failed: {}", e);
-                        if let Some(ui) = ui_weak.upgrade() {
-                            ui.set_scheduler_error(format!("{}", e).into());
-                        }
-                    }
-                }
-            },
-        );
-    }
-
-    // -- Scheduler toggle event --
-    {
-        let ui_weak = ui.as_weak();
-        let scheduler = scheduler.clone();
-        ui.on_scheduler_toggle_event(move |idx| {
-            let ids: Vec<(String, bool)> = scheduler
-                .borrow()
-                .list_all()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|e| (e.id, e.enabled))
-                .collect();
-            if let Some((id, enabled)) = ids.get(idx as usize) {
-                if let Err(e) = scheduler.borrow().set_enabled(id, !enabled) {
-                    tracing::error!("Scheduler toggle failed: {}", e);
-                }
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                refresh_scheduler(&ui, &scheduler.borrow());
-            }
-        });
-    }
-
-    // -- Scheduler delete event --
-    {
-        let ui_weak = ui.as_weak();
-        let scheduler = scheduler.clone();
-        ui.on_scheduler_delete_event(move |idx| {
-            let ids: Vec<String> = scheduler
-                .borrow()
-                .list_all()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|e| e.id)
-                .collect();
-            if let Some(id) = ids.get(idx as usize) {
-                if let Err(e) = scheduler.borrow().delete(id) {
-                    tracing::error!("Scheduler delete failed: {}", e);
-                }
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                refresh_scheduler(&ui, &scheduler.borrow());
-            }
-        });
-    }
-
-    // -- Scheduler run event (wire generate / load to engine) --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let scheduler = scheduler.clone();
-        let auto_continue = auto_continue.clone();
-        ui.on_scheduler_run_event(move |idx| {
-            let event = scheduler
-                .borrow()
-                .list_all()
-                .unwrap_or_default()
-                .into_iter()
-                .nth(idx as usize);
-            let Some(event) = event else { return };
-            fire_scheduled_event(&state, &ui_weak, &event, &auto_continue);
-        });
-    }
-
-    // -- Ads: push blocks to UI --
-    fn short_name(path: &str) -> String {
-        PathBuf::from(path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default()
-    }
-
-    fn refresh_ads(ui: &MainWindow, ads: &crabcore::ads::AdsManager) {
-        use crabcore::scheduler::mask_from_days;
-        let blocks = ads.list_all().unwrap_or_default();
-        let rows: Vec<AdRow> = blocks
-            .iter()
-            .map(|b| {
-                let mask = mask_from_days(&b.days);
-                AdRow {
-                    name: b.name.clone().into(),
-                    time: b.play_time.clone().into(),
-                    dates: format!("{} → {}", b.start_date, b.end_date).into(),
-                    spot: short_name(&b.spot_path).into(),
-                    days: b.days.clone().into(),
-                    enabled: b.enabled,
-                    mon: mask & 1 != 0,
-                    tue: mask & 2 != 0,
-                    wed: mask & 4 != 0,
-                    thu: mask & 8 != 0,
-                    fri: mask & 16 != 0,
-                    sat: mask & 32 != 0,
-                    sun: mask & 64 != 0,
-                    spot_full: b.spot_path.clone().into(),
-                    intro_full: b.intro_path.clone().unwrap_or_default().into(),
-                    outro_full: b.outro_path.clone().unwrap_or_default().into(),
-                    start_full: b.start_date.to_string().into(),
-                    end_full: b.end_date.to_string().into(),
-                }
-            })
-            .collect();
-        let model = Rc::new(slint::VecModel::from(rows));
-        ui.set_ads_items(model.into());
-    }
-    ui.set_ads_show_editor(false);
-    ui.set_ads_error("".into());
-    refresh_ads(&ui, &ads.borrow());
-
-    // Shared break firing: intro now, spot + outro chained on the queue.
-    fn fire_ad_block(
-        state: &Rc<RefCell<AppState>>,
-        ui_weak: &slint::Weak<MainWindow>,
-        block: &crabcore::ads::AdBlock,
-        auto_continue: &Rc<RefCell<bool>>,
-    ) {
-        if !PathBuf::from(&block.spot_path).is_file() {
-            tracing::warn!(
-                "Ad block '{}' skipped, spot missing: {}",
-                block.name,
-                block.spot_path
-            );
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_now_playing_title(format!("Ad '{}': spot missing", block.name).into());
-            }
+    fn pump_loudness(&mut self) {
+        if !self.scanning {
             return;
         }
-        tracing::info!("Ad break firing: {}", block.name);
-        let s = state.borrow();
-        let mut first = true;
-        for clip in block.chain() {
-            let r = if first {
-                s.player.play(&PathBuf::from(&clip))
+        let (mut batch, mut worker_gone) = (Vec::new(), false);
+        if let Some(rx) = self.scan_rx.as_mut() {
+            loop {
+                match rx.try_recv() {
+                    Ok(m) => batch.push(m),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        worker_gone = true;
+                        break;
+                    }
+                }
+            }
+        } else {
+            return;
+        }
+        if batch.is_empty() && !worker_gone {
+            return;
+        }
+        for m in &batch {
+            let _ = self.library.set_loudness(&m.id, m.lufs, m.gain_db);
+            tracing::info!(
+                "Loudness {}: {:.1} LUFS -> {:+.1} dB",
+                m.file_name,
+                m.lufs,
+                m.gain_db
+            );
+        }
+        self.scan_done += batch.len();
+        if self.scan_done >= self.scan_total || worker_gone {
+            self.scanning = false;
+            self.scan_rx = None;
+            self.refresh_library();
+            self.lib_status = format!("Loudness scan complete ({} analyzed)", self.scan_done);
+            tracing::info!(
+                "Loudness scan complete: {}/{} analyzed",
+                self.scan_done,
+                self.scan_total
+            );
+        } else {
+            self.lib_status = format!(
+                "Analyzing loudness... {}/{}",
+                self.scan_done, self.scan_total
+            );
+        }
+    }
+
+    // -- Import pump (one file per tick so the UI never freezes) -------------
+    fn pump_import(&mut self) {
+        if !self.import_active {
+            return;
+        }
+        let Some(f) = self.import_pending.pop_front() else {
+            self.import_active = false;
+            self.refresh_library();
+            self.lib_status = if self.import_skipped > 0 {
+                format!(
+                    "Imported {}, skipped {}",
+                    self.import_added, self.import_skipped
+                )
             } else {
-                s.player.queue(&PathBuf::from(&clip))
+                format!("Imported {}", self.import_added)
             };
-            if let Err(e) = r {
-                tracing::error!("Ad clip failed ({}): {}", clip, e);
-                return;
+            tracing::info!(
+                "Import complete: {} added, {} skipped",
+                self.import_added,
+                self.import_skipped
+            );
+            if self.import_added > 0 {
+                self.start_loudness_scan(false);
             }
-            first = false;
+            return;
+        };
+        let done = self.import_total - self.import_pending.len();
+        match self.library.add_track(&f) {
+            Ok(t) => {
+                tracing::info!("Imported {} as {:?}", f.display(), t.kind);
+                self.import_added += 1;
+            }
+            Err(e) => {
+                tracing::warn!("Skipping {}: {}", f.display(), e);
+                self.import_skipped += 1;
+            }
         }
-        if let Some(t) = s.library.find_by_path(&block.spot_path).ok().flatten() {
-            let _ = s.library.record_play(&t.id, t.duration_secs);
-        }
-        *auto_continue.borrow_mut() = true;
-        drop(s);
-        if let Some(ui) = ui_weak.upgrade() {
-            ui.set_is_playing(true);
-            ui.set_now_playing_title(format!("AD: {}", block.name).into());
-            ui.set_now_playing_artist("Ad break".into());
-        }
+        self.lib_status = format!("Importing {done}/{}...", self.import_total);
     }
 
-    // -- Ads save (Add/Edit dialog) --
-    {
-        let ui_weak = ui.as_weak();
-        let ads = ads.clone();
-        ui.on_ads_save_block(
-            move |idx,
-                  name,
-                  spot,
-                  intro,
-                  outro,
-                  start,
-                  end,
-                  time,
-                  mon,
-                  tue,
-                  wed,
-                  thu,
-                  fri,
-                  sat,
-                  sun| {
-                use crabcore::scheduler::days_from_mask;
-                let mut mask = 0u8;
-                if mon {
-                    mask |= 1;
-                }
-                if tue {
-                    mask |= 2;
-                }
-                if wed {
-                    mask |= 4;
-                }
-                if thu {
-                    mask |= 8;
-                }
-                if fri {
-                    mask |= 16;
-                }
-                if sat {
-                    mask |= 32;
-                }
-                if sun {
-                    mask |= 64;
-                }
-                let days = days_from_mask(mask);
-                let res = if idx < 0 {
-                    ads.borrow()
-                        .create(
-                            name.trim(),
-                            spot.trim(),
-                            intro.trim(),
-                            outro.trim(),
-                            start.trim(),
-                            end.trim(),
-                            time.trim(),
-                            &days,
-                        )
-                        .map(|_| ())
-                } else {
-                    let ids: Vec<String> = ads
-                        .borrow()
-                        .list_all()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|b| b.id)
-                        .collect();
-                    match ids.get(idx as usize) {
-                        Some(id) => ads.borrow().update(
-                            id,
-                            name.trim(),
-                            spot.trim(),
-                            intro.trim(),
-                            outro.trim(),
-                            start.trim(),
-                            end.trim(),
-                            time.trim(),
-                            &days,
-                        ),
-                        None => Err(crabcore::CrabError::Scheduler("block gone".into())),
-                    }
-                };
-                match res {
-                    Ok(()) => {
-                        tracing::info!("Ad block saved: {} at {}", name, time);
-                        if let Some(ui) = ui_weak.upgrade() {
-                            ui.set_ads_error("".into());
-                            ui.set_ads_show_editor(false);
-                            refresh_ads(&ui, &ads.borrow());
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Ad block save failed: {}", e);
-                        if let Some(ui) = ui_weak.upgrade() {
-                            ui.set_ads_error(format!("{}", e).into());
-                        }
-                    }
-                }
-            },
-        );
-    }
+    // -- Periodic tick (progress, Auto-DJ, scheduler, silence) ---------------
+    fn on_tick(&mut self) {
+        self.tick_count += 1;
+        self.pump_loudness();
+        self.pump_import();
 
-    // -- Ads toggle / delete / run --
-    {
-        let ui_weak = ui.as_weak();
-        let ads = ads.clone();
-        ui.on_ads_toggle_block(move |idx| {
-            let ids: Vec<(String, bool)> = ads
-                .borrow()
-                .list_all()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|b| (b.id, b.enabled))
-                .collect();
-            if let Some((id, enabled)) = ids.get(idx as usize) {
-                if let Err(e) = ads.borrow().set_enabled(id, !enabled) {
-                    tracing::error!("Ad toggle failed: {}", e);
-                }
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                refresh_ads(&ui, &ads.borrow());
-            }
-        });
-    }
-    {
-        let ui_weak = ui.as_weak();
-        let ads = ads.clone();
-        ui.on_ads_delete_block(move |idx| {
-            let ids: Vec<String> = ads
-                .borrow()
-                .list_all()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|b| b.id)
-                .collect();
-            if let Some(id) = ids.get(idx as usize) {
-                if let Err(e) = ads.borrow().delete(id) {
-                    tracing::error!("Ad delete failed: {}", e);
-                }
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                refresh_ads(&ui, &ads.borrow());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let ads = ads.clone();
-        let auto_continue = auto_continue.clone();
-        ui.on_ads_run_block(move |idx| {
-            let block = ads
-                .borrow()
-                .list_all()
-                .unwrap_or_default()
-                .into_iter()
-                .nth(idx as usize);
-            let Some(block) = block else { return };
-            fire_ad_block(&state, &ui_weak, &block, &auto_continue);
-        });
-    }
+        let pos = self.player.position_secs();
+        let (dur, has_dur) = match self.player.current_track() {
+            Some(t) => (
+                t.duration_secs.unwrap_or(0.0),
+                t.duration_secs.unwrap_or(0.0) > 0.0,
+            ),
+            None => (0.0, false),
+        };
+        let playing = self.player.state() == PlayerState::Playing;
+        let finished = self.player.is_finished();
+        self.is_playing =
+            playing || self.player.state() == PlayerState::Buffering && self.auto_continue;
 
-    // -- Scheduler auto-tick: fire due events while master is ON --
-    // Runs on the UI thread (Slint Timer), so Engine/Library Rc access is safe.
-    // Dedupes per (event, minute) so a 15s tick fires each event once.
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let scheduler = scheduler.clone();
-        let ads = ads.clone();
-        let auto_continue = auto_continue.clone();
-        let fired: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
-        let fired_ads: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
-        let tick = slint::Timer::default();
-        tick.start(
-            slint::TimerMode::Repeated,
-            std::time::Duration::from_secs(15),
-            move || {
-                let Some(ui) = ui_weak.upgrade() else { return };
-                if !ui.get_scheduler_enabled() {
-                    return;
-                }
-                let now = chrono::Local::now();
-                let hhmm = now.format("%H:%M").to_string();
-                let weekday = now.format("%a").to_string();
-                let minute_key = now.format("%Y-%m-%d %H:%M").to_string();
-                let today = now.format("%Y-%m-%d").to_string();
-                let due = scheduler
-                    .borrow()
-                    .due_events(&today, &hhmm, &weekday)
-                    .unwrap_or_default();
-                let mut fired = fired.borrow_mut();
-                for event in due {
-                    let already = fired
-                        .get(&event.id)
+        // Stream now-playing metadata (cheap, lock-free).
+        if let Some(t) = self.player.current_track() {
+            let label = t.title.clone().unwrap_or_else(|| {
+                t.path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            });
+            self.player.set_stream_title(&label);
+        }
+        let _ = (pos, dur, has_dur);
+
+        // Scheduler + ads auto-fire (dedupe per event/minute).
+        if self.sched_enabled {
+            let now = chrono::Local::now();
+            let hhmm = now.format("%H:%M").to_string();
+            let weekday = now.format("%a").to_string();
+            let minute_key = now.format("%Y-%m-%d %H:%M").to_string();
+            let today = now.format("%Y-%m-%d").to_string();
+            let due: Vec<(String, usize)> = self
+                .scheduler
+                .due_events(&today, &hhmm, &weekday)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|e| {
+                    let already = self
+                        .fired
+                        .get(&e.id)
                         .map(|m| m == &minute_key)
                         .unwrap_or(false);
                     if already {
-                        continue;
+                        return None;
                     }
-                    fired.insert(event.id.clone(), minute_key.clone());
-                    fire_scheduled_event(&state, &ui_weak, &event, &auto_continue);
-                }
-                drop(fired);
-                // Ad blocks (validity window + weekday aware), same dedupe.
-                let due_ads = ads
-                    .borrow()
-                    .due_blocks(now.date_naive(), &hhmm, &weekday)
-                    .unwrap_or_default();
-                if !due_ads.is_empty() {
-                    let mut fired_ads = fired_ads.borrow_mut();
-                    for block in due_ads {
-                        let already = fired_ads
-                            .get(&block.id)
+                    self.sched_events
+                        .iter()
+                        .position(|s| s.id == e.id)
+                        .map(|idx| (e.id.clone(), idx))
+                })
+                .collect();
+            for (id, idx) in due {
+                self.fired.insert(id, minute_key.clone());
+                self.fire_scheduled_event(idx);
+            }
+            if let Ok(date) = chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d") {
+                let due_ads: Vec<(String, usize)> = self
+                    .ads
+                    .due_blocks(date, &hhmm, &weekday)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|b| {
+                        let already = self
+                            .fired_ads
+                            .get(&b.id)
                             .map(|m| m == &minute_key)
                             .unwrap_or(false);
                         if already {
-                            continue;
+                            return None;
                         }
-                        fired_ads.insert(block.id.clone(), minute_key.clone());
-                        fire_ad_block(&state, &ui_weak, &block, &auto_continue);
-                    }
+                        self.ad_blocks
+                            .iter()
+                            .position(|a| a.id == b.id)
+                            .map(|idx| (b.id.clone(), idx))
+                    })
+                    .collect();
+                for (id, idx) in due_ads {
+                    self.fired_ads.insert(id, minute_key.clone());
+                    self.fire_ad_block(idx);
                 }
-            },
-        );
-        // App-lifetime timer: intentionally never stopped.
-        std::mem::forget(tick);
-    }
+            }
+        }
 
-    // -- Silence monitor: every 5s, recover dead air with a filler track --
-    // Metering lives in CpalEngine's mix bus.
-    // Recovery is rate-limited to once per minute to avoid storms.
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let auto_continue = auto_continue.clone();
-        let last_recovery: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-        let tick = slint::Timer::default();
-        tick.start(
-            slint::TimerMode::Repeated,
-            std::time::Duration::from_secs(5),
-            move || {
-                let s = state.borrow();
-                if !s.player.silence_alarm() {
-                    return;
-                }
-                let minute = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
-                if last_recovery.borrow().as_ref() == Some(&minute) {
-                    return;
-                }
-                *last_recovery.borrow_mut() = Some(minute);
-                let current = s.player.current_track().map(|t| t.path);
-                let filler = s
+        // Silence monitor: recover dead air with a filler track (max 1/min).
+        if self.player.silence_alarm() {
+            let minute = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+            if self.last_recovery.as_ref() != Some(&minute) {
+                self.last_recovery = Some(minute);
+                let current = self.player.current_track().map(|t| t.path);
+                let filler = self
                     .library
                     .list_by_kind(TrackKind::Music)
                     .unwrap_or_default()
@@ -1332,1383 +962,428 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match filler {
                     Some(t) => {
                         tracing::error!(
-                            "SILENCE DETECTED — auto-recovering with filler: {}",
+                            "SILENCE DETECTED - auto-recovering with filler: {}",
                             t.file_path
                         );
                         let path = PathBuf::from(&t.file_path);
                         let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
-                        match s.player.play(&path) {
+                        match self.player.play(&path) {
                             Ok(()) => {
-                                let _ = s.library.record_play(&t.id, t.duration_secs);
-                                *auto_continue.borrow_mut() = true;
-                                drop(s);
-                                if let Some(ui) = ui_weak.upgrade() {
-                                    ui.set_is_playing(true);
-                                    ui.set_now_playing_title(
-                                        format!("⚠ Recovered: {}", label).into(),
-                                    );
-                                    ui.set_now_playing_artist("Silence detector".into());
-                                }
+                                let _ = self.library.record_play(&t.id, t.duration_secs);
+                                self.auto_continue = true;
+                                self.is_playing = true;
+                                self.now_title = format!("Recovered: {}", label);
+                                self.now_artist = "Silence detector".into();
                             }
                             Err(e) => tracing::error!("Filler play failed: {}", e),
                         }
                     }
                     None => {
-                        tracing::error!("SILENCE DETECTED — no playable filler in library");
-                        drop(s);
-                        if let Some(ui) = ui_weak.upgrade() {
-                            ui.set_now_playing_title("⚠ SILENCE — no filler available".into());
-                        }
+                        tracing::error!("SILENCE DETECTED - no playable filler in library");
+                        self.now_title = "SILENCE - no filler available".into();
                     }
                 }
-            },
-        );
-        std::mem::forget(tick);
-    }
+            }
+        }
 
-    // -- Cart Wall: push pads to UI (with live per-pad progress) --
-    fn refresh_carts(
-        ui: &MainWindow,
-        carts: &crabcore::cart::CartManager,
-        library: &crabcore::library::Library,
-        live: Option<(String, f32)>, // (path, 0..1 progress) of the playing pad
-    ) {
-        let kinds: HashMap<String, TrackKind> = library
-            .get_all_tracks()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|t| (t.file_path, t.kind))
-            .collect();
-        let all = carts.list_all().unwrap_or_default();
-        let rows: Vec<CartRow> = all
-            .iter()
-            .map(|c| {
-                let file_name = PathBuf::from(&c.file_path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let kind_label = match kinds.get(&c.file_path) {
-                    Some(TrackKind::Jingle) => "Jingle",
-                    Some(TrackKind::Ad) => "Ad",
-                    _ => "Music",
-                };
-                let progress = live
-                    .as_ref()
-                    .filter(|(p, _)| p == &c.file_path)
-                    .map(|(_, x)| *x)
-                    .unwrap_or(0.0);
-                CartRow {
-                    label: c.label.clone().into(),
-                    sub: format!("{} • {}", kind_label, file_name).into(),
-                    has_file: PathBuf::from(&c.file_path).is_file(),
-                    progress,
-                    playing: live
-                        .as_ref()
-                        .map(|(p, _)| p == &c.file_path)
-                        .unwrap_or(false),
-                }
-            })
-            .collect();
-        let model = Rc::new(slint::VecModel::from(rows));
-        ui.set_cart_items(model.into());
-    }
-    ui.set_cart_status("".into());
-    ui.set_cart_assign_mode(false);
-    ui.set_cart_armed(false);
-    ui.set_cart_armed_label("".into());
-    refresh_carts(&ui, &carts.borrow(), &state.borrow().library, None);
-
-    // -- Cart play (instant) --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let carts = carts.clone();
-        let auto_continue = auto_continue.clone();
-        ui.on_cart_play(move |idx| {
-            let cart = carts
-                .borrow()
-                .list_all()
-                .unwrap_or_default()
-                .into_iter()
-                .nth(idx as usize);
-            let Some(cart) = cart else { return };
-            let path = PathBuf::from(&cart.file_path);
+        // Auto-DJ continuity + prefetch.
+        if !self.autodj || !self.auto_continue {
+            self.was_playing = playing;
+            return;
+        }
+        let eof_transition = finished && (playing || self.was_playing);
+        self.was_playing = playing;
+        if eof_transition {
+            self.autodj_play_now();
+            return;
+        }
+        if !playing {
+            return;
+        }
+        let pending = self.player.pending_count();
+        let has_queue = self.player.has_queue();
+        let dur_opt = if has_dur { Some(dur) } else { None };
+        if !crabcore::audio::needs_prefetch(pos, dur_opt, pending, has_queue, 8.0) {
+            return;
+        }
+        let pick = self.autodj_pick();
+        if let Some(pick) = pick {
+            let path = PathBuf::from(&pick.file_path);
             if !path.is_file() {
-                tracing::warn!("Cart '{}' file missing: {}", cart.label, cart.file_path);
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_cart_status(format!("⚠ '{}' file missing", cart.label).into());
-                }
                 return;
             }
-            let s = state.borrow();
-            let logged = s
-                .library
-                .find_by_path(&cart.file_path)
-                .ok()
-                .flatten()
-                .map(|t| (t.id, t.duration_secs));
-            match s.player.play(&path) {
+            match self.player.queue(&path) {
                 Ok(()) => {
-                    tracing::info!("Cart fired: {}", cart.label);
-                    if let Some((id, dur)) = logged {
-                        let _ = s.library.record_play(&id, dur);
-                    }
-                    *auto_continue.borrow_mut() = true;
-                    drop(s);
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_is_playing(true);
-                        ui.set_now_playing_title(cart.label.clone().into());
-                        ui.set_now_playing_artist("Cart".into());
-                        ui.set_cart_status(format!("▶ {}", cart.label).into());
-                    }
+                    let label = track_label(&pick);
+                    tracing::info!("Auto-DJ queued: {}", label);
+                    self.up_next = label;
                 }
-                Err(e) => tracing::error!("Cart play failed: {}", e),
+                Err(e) => tracing::warn!("Auto-DJ queue failed: {}", e),
             }
-        });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boot (startup sequence: settings, engine, stores, seeds)
+// ---------------------------------------------------------------------------
+
+fn boot() -> (App, Task<Message>) {
+    use tracing_subscriber::EnvFilter;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .try_init();
+
+    tracing::info!("CrabBoss starting up...");
+
+    let settings_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join("settings.json");
+    let mut settings = crabcore::settings::AppSettings::load(&settings_path);
+
+    let engine_name = {
+        let choice = engine_choice();
+        if choice != "cpal" {
+            tracing::warn!("Unknown engine '{choice}', using cpal");
+        }
+        "cpal".to_string()
+    };
+    tracing::info!("Audio engine: cpal");
+    let mut player: Box<dyn Engine> = match settings.output_device.clone() {
+        Some(dev) => Box::new(crabcore::audio::CpalEngine::open_named(&dev)),
+        None => Box::new(crabcore::audio::CpalEngine::new()),
+    };
+    if !player.has_audio_device() {
+        tracing::warn!("Running without audio output (headless mode)");
+    }
+    player.set_crossfade_secs(settings.crossfade_secs);
+    player.set_silence_threshold_secs(settings.silence_threshold_secs);
+    player.set_eq_enabled(settings.eq_enabled);
+    for (band, gain) in settings.eq_gains_db.iter().enumerate() {
+        player.set_eq_band(band, *gain);
+    }
+    player.set_limiter_ceiling(settings.limiter_ceiling);
+    player.set_loudness_enabled(settings.loudness_norm);
+    player.set_stream_config(settings.stream.clone());
+    if settings.stream.enabled {
+        if let Err(e) = player.stream_start() {
+            tracing::warn!("Stream auto-start failed: {e}");
+        }
+    }
+    player.set_mic_config(settings.mic.clone());
+    if settings.mic.enabled {
+        if let Err(e) = player.mic_start() {
+            tracing::warn!("Mic auto-start failed: {e}");
+        }
     }
 
-    // -- Cart delete --
+    let db_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join("crabboss.db");
+    let library = Library::open(&db_path).expect("Failed to open library database");
+    tracing::info!("Library loaded from: {}", db_path.display());
+
+    match library.reclassify_all() {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Re-labeled {} tracks (kind repair)", n),
+        Err(e) => tracing::warn!("Kind repair scan failed: {}", e),
+    }
+    match library.retarget_gains(settings.loudness_target_lufs) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Re-targeted {n} loudness gains"),
+        Err(e) => tracing::warn!("Gain retarget failed: {e}"),
+    }
     {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let carts = carts.clone();
-        ui.on_cart_delete(move |idx| {
-            let ids: Vec<String> = carts
-                .borrow()
-                .list_all()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|c| c.id)
-                .collect();
-            if let Some(id) = ids.get(idx as usize) {
-                if let Err(e) = carts.borrow().delete(id) {
-                    tracing::error!("Cart delete failed: {}", e);
-                }
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                let s = state.borrow();
-                refresh_carts(&ui, &carts.borrow(), &s.library, None);
-            }
-        });
+        let loudness_lib = Library::open(&db_path).expect("Failed to open loudness lookup db");
+        player.set_loudness_lookup(Some(Box::new(move |p| {
+            loudness_lib
+                .loudness_gain_by_path(&p.to_string_lossy())
+                .unwrap_or(None)
+        })));
     }
 
-    // -- Cart add: next jingle first, then any track not on a pad (max 8) --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let carts = carts.clone();
-        ui.on_cart_add(move || {
-            let existing: Vec<String> = carts
-                .borrow()
-                .list_all()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|c| c.file_path)
-                .collect();
-            if existing.len() >= 8 {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_cart_status("Cart wall is full (8)".into());
-                }
-                return;
-            }
-            let s = state.borrow();
-            let tracks = s.library.get_all_tracks().unwrap_or_default();
-            let next = tracks
-                .iter()
-                .find(|t| t.kind == TrackKind::Jingle && !existing.contains(&t.file_path))
-                .or_else(|| tracks.iter().find(|t| !existing.contains(&t.file_path)));
-            match next {
-                Some(t) => {
-                    let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
-                    if let Err(e) = carts.borrow().create(&label, &t.file_path) {
-                        tracing::error!("Cart add failed: {}", e);
-                    }
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_cart_status(format!("Loaded '{}'", label).into());
-                        refresh_carts(&ui, &carts.borrow(), &s.library, None);
-                    }
-                }
-                None => {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_cart_status("Import tracks first".into());
-                    }
-                }
-            }
-        });
-    }
-
-    // -- Cart place: put the armed library track on a specific pad --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let carts = carts.clone();
-        let last_shown = last_shown.clone();
-        ui.on_cart_place(move |slot| {
-            let slot: i32 = slot;
-            let armed_idx = ui_weak
-                .upgrade()
-                .map(|ui| ui.get_library_selected_index())
-                .unwrap_or(-1);
-            let track = (armed_idx >= 0)
-                .then(|| last_shown.borrow().get(armed_idx as usize).cloned())
-                .flatten();
-            let Some(track) = track else {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_cart_status("No library track armed — tap one first".into());
-                }
-                return;
-            };
-            let label = track
-                .title
-                .clone()
-                .unwrap_or_else(|| track.file_name.clone());
-            if let Err(e) = carts.borrow().assign_at(slot, &label, &track.file_path) {
-                tracing::error!("Cart place failed: {}", e);
-                return;
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                let s = state.borrow();
-                ui.set_cart_assign_mode(false);
-                ui.set_cart_armed(false);
-                ui.set_cart_status(format!("🎯 '{}' → pad {}", label, slot + 1).into());
-                refresh_carts(&ui, &carts.borrow(), &s.library, None);
-            }
-        });
-    }
-
-    // -- Cart assign mode toggle --
-    {
-        let ui_weak = ui.as_weak();
-        ui.on_cart_toggle_assign(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let on = !ui.get_cart_assign_mode();
-                ui.set_cart_assign_mode(on);
-                ui.set_cart_armed(on && ui.get_library_selected_index() >= 0);
-                ui.set_cart_status(if on {
-                    "Assign: tap a track in the Library, then tap a pad".into()
-                } else {
-                    "".into()
-                });
-            }
-        });
-    }
-
-    // -- Activate license --
-    {
-        let ui_weak = ui.as_weak();
-        let license_store = license_store.clone();
-        ui.on_activate_license(move |key| {
-            let mut store = license_store.borrow_mut();
-            match store.activate(&key, "Station") {
-                Ok(info) => {
-                    tracing::info!("License activated: {}", info.key);
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_license_status(store.status().label().into());
-                        ui.set_license_error("".into());
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Invalid license '{}': {}", key, e);
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_license_error(format!("Invalid key: {}", e).into());
-                    }
-                }
-            }
-        });
-    }
-
-    // -- Clear license --
-    {
-        let ui_weak = ui.as_weak();
-        let license_store = license_store.clone();
-        ui.on_clear_license(move || {
-            let mut store = license_store.borrow_mut();
-            store.clear().ok();
-            tracing::info!("License cleared");
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_license_status(store.status().label().into());
-                ui.set_license_error("".into());
-            }
-        });
-    }
-
-    // -- Settings: device list, selection, live DSP prefs --
-    fn push_devices(ui: &MainWindow) {
-        let devs = crabcore::audio::CpalEngine::list_output_devices();
-        let model = Rc::new(slint::VecModel::from(
-            devs.into_iter()
-                .map(|d| d.into())
-                .collect::<Vec<slint::SharedString>>(),
-        ));
-        ui.set_settings_devices(model.into());
-    }
-    fn settings_labels(ui: &MainWindow, settings: &crabcore::settings::AppSettings) {
-        ui.set_settings_xfade(format!("{:.1} s", settings.crossfade_secs).into());
-        ui.set_settings_silence(format!("{:.0} s", settings.silence_threshold_secs).into());
-        ui.set_settings_eq_on(settings.eq_enabled);
-        ui.set_settings_eq_gains(
-            settings
-                .eq_gains_db
-                .map(|g| format!("{g:+.0}").into())
-                .into(),
+    let scheduler = crabcore::scheduler::SchedulerManager::open(&db_path)
+        .expect("Failed to open scheduler store");
+    if scheduler.list_all().map(|v| v.is_empty()).unwrap_or(false) {
+        let _ = scheduler.create(
+            "Midnight generate",
+            "generate",
+            "Day",
+            "00:00",
+            "Daily",
+            None,
         );
-        ui.set_settings_limiter(
-            format!("{:.1} dBFS", lin_to_dbfs(settings.limiter_ceiling)).into(),
+        let _ = scheduler.create(
+            "Morning show",
+            "load",
+            "Morning.m3u",
+            "08:00",
+            "Daily",
+            None,
         );
-        ui.set_settings_loudness_on(settings.loudness_norm);
-        ui.set_settings_loudness_target(
-            format!("{:.0} LUFS", settings.loudness_target_lufs).into(),
+        let _ = scheduler.create(
+            "Top-of-hour jingle",
+            "play",
+            "toth.mp3",
+            "09:00",
+            "Daily",
+            None,
         );
+        tracing::info!("Seeded starter scheduler events");
     }
-    fn lin_to_dbfs(lin: f32) -> f32 {
-        20.0 * lin.max(0.001).log10()
+
+    let track_count = library.get_all_tracks().unwrap_or_default().len();
+    tracing::info!("Library contains {} tracks", track_count);
+
+    let playlist_manager = PlaylistManager::open(&db_path).expect("Failed to open playlists");
+    let playlist_count = playlist_manager.list_all().unwrap_or_default().len();
+
+    let carts = crabcore::cart::CartManager::open(&db_path).expect("Failed to open cart store");
+    if carts.list_all().map(|v| v.is_empty()).unwrap_or(false) {
+        let jingles = library.list_by_kind(TrackKind::Jingle).unwrap_or_default();
+        let music = library.list_by_kind(TrackKind::Music).unwrap_or_default();
+        for t in jingles.iter().chain(music.iter()).take(4) {
+            let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
+            let _ = carts.create(&label, &t.file_path);
+        }
+        if track_count > 0 {
+            tracing::info!("Seeded cart wall from library");
+        }
     }
-    fn stream_labels(ui: &MainWindow, player: &dyn crabcore::audio::Engine) {
-        let cfg = player.stream_config();
-        let state = player.stream_state();
-        ui.set_settings_stream_enabled(cfg.enabled);
-        ui.set_settings_stream_status(state.label().into());
-        let stats = player.stream_stats();
-        ui.set_settings_stream_stats(if state.is_live() {
-            format!(
-                "{} · {:.1} MB · {}s",
-                cfg.bitrate_kbps,
-                stats.bytes_sent as f64 / 1_048_576.0,
-                stats.stream_secs
-            )
-            .into()
+
+    let ads = crabcore::ads::AdsManager::open(&db_path).expect("Failed to open ads store");
+
+    let license_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join("license.json");
+    let license = crabcore::license::LicenseStore::open(&license_path);
+
+    let volume = {
+        let v = player.volume();
+        if v <= 0.0 || v > 1.5 {
+            0.8
         } else {
-            "".into()
-        });
-        ui.set_settings_stream_host(cfg.host.into());
-        ui.set_settings_stream_port(cfg.port.to_string().into());
-        ui.set_settings_stream_mount(cfg.mount.into());
-        // Never echo the stored password back to the input field.
-        ui.set_settings_stream_password(
-            if cfg.password.is_empty() {
-                ""
-            } else {
-                "••••••"
-            }
-            .into(),
-        );
-        ui.set_settings_stream_bitrate(format!("{} kbps", cfg.bitrate_kbps).into());
-    }
-    fn push_input_devices(ui: &MainWindow) {
-        let devs = crabcore::audio::CpalEngine::list_input_devices();
-        let model = Rc::new(slint::VecModel::from(
-            devs.into_iter()
-                .map(|d| d.into())
-                .collect::<Vec<slint::SharedString>>(),
-        ));
-        ui.set_settings_mic_devices(model.into());
-    }
-    fn mic_labels(ui: &MainWindow, player: &dyn crabcore::audio::Engine) {
-        let cfg = player.mic_config();
-        let st = player.mic_state();
-        ui.set_settings_mic_enabled(cfg.enabled);
-        ui.set_settings_mic_status(st.label().into());
-        ui.set_settings_mic_meter(if st.is_live() {
-            let duck = if player.mic_ducking() {
-                " · ▼ ducking"
-            } else {
-                ""
-            };
-            format!("{:.1} dBFS{}", player.mic_level_db(), duck).into()
-        } else {
-            "".into()
-        });
-        ui.set_settings_mic_device(cfg.device.clone().unwrap_or_default().into());
-        ui.set_settings_mic_level(format!("{:.0}%", cfg.level * 100.0).into());
-        ui.set_settings_mic_duck_on(cfg.duck_enabled);
-        ui.set_settings_mic_threshold(format!("{:+.0} dB", cfg.duck_threshold_db).into());
-        ui.set_settings_mic_depth(format!("-{:.0} dB", cfg.duck_depth_db).into());
-        ui.set_settings_mic_attack(format!("{:.0} ms", cfg.attack_ms).into());
-        ui.set_settings_mic_release(format!("{:.0} ms", cfg.release_ms).into());
-    }
-    push_devices(&ui);
-    ui.set_settings_device(
-        settings
-            .borrow()
-            .output_device
-            .clone()
-            .unwrap_or_default()
-            .into(),
-    );
-    ui.set_settings_device_note("".into());
-    settings_labels(&ui, &settings.borrow());
-    stream_labels(&ui, state.borrow().player.as_ref());
-    push_input_devices(&ui);
-    ui.set_settings_mic_device_note("".into());
-    mic_labels(&ui, state.borrow().player.as_ref());
-    {
-        let ui_weak = ui.as_weak();
-        ui.on_settings_refresh_devices(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                push_devices(&ui);
-            }
-        });
-    }
-    {
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_select_device(move |name| {
-            let name = name.to_string();
-            settings.borrow_mut().output_device = Some(name.clone());
-            if settings.borrow().save(&settings_path).is_ok() {
-                tracing::info!("Output device set to '{}' (restart to apply)", name);
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_settings_device(name.into());
-                ui.set_settings_device_note("Restart CrabBoss to apply the new device".into());
-            }
-        });
-    }
-    // Stepper helper: adjust, clamp, persist, apply live, relabel.
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_xfade_inc(move || {
-            let mut s = settings.borrow_mut();
-            s.crossfade_secs = (s.crossfade_secs + 0.5).clamp(0.0, 30.0);
-            let _ = s.save(&settings_path);
-            state.borrow().player.set_crossfade_secs(s.crossfade_secs);
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &s);
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_xfade_dec(move || {
-            let mut s = settings.borrow_mut();
-            s.crossfade_secs = (s.crossfade_secs - 0.5).clamp(0.0, 30.0);
-            let _ = s.save(&settings_path);
-            state.borrow().player.set_crossfade_secs(s.crossfade_secs);
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &s);
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_silence_inc(move || {
-            let mut s = settings.borrow_mut();
-            s.silence_threshold_secs = (s.silence_threshold_secs + 1.0).clamp(1.0, 120.0);
-            let _ = s.save(&settings_path);
-            state
-                .borrow()
-                .player
-                .set_silence_threshold_secs(s.silence_threshold_secs);
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &s);
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_silence_dec(move || {
-            let mut s = settings.borrow_mut();
-            s.silence_threshold_secs = (s.silence_threshold_secs - 1.0).clamp(1.0, 120.0);
-            let _ = s.save(&settings_path);
-            state
-                .borrow()
-                .player
-                .set_silence_threshold_secs(s.silence_threshold_secs);
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &s);
-            }
-        });
-    }
-
-    // EQ + limiter (cpal engine DSP): one toggle, band nudges in a loop,
-    // limiter ceiling stepper — persist, apply live, relabel.
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_eq_toggle(move || {
-            let mut s = settings.borrow_mut();
-            s.eq_enabled = !s.eq_enabled;
-            let _ = s.save(&settings_path);
-            state.borrow().player.set_eq_enabled(s.eq_enabled);
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &settings.borrow());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_loudness_toggle(move || {
-            let mut s = settings.borrow_mut();
-            s.loudness_norm = !s.loudness_norm;
-            let _ = s.save(&settings_path);
-            state.borrow().player.set_loudness_enabled(s.loudness_norm);
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &settings.borrow());
-            }
-        });
-    }
-    // Loudness target stepper (RadioBOSS-style, −23…−6 LUFS): persist,
-    // rewrite stored gains instantly (kept LUFS, no re-analysis), relabel
-    // the stepper and refresh the Gain badges.
-    fn retarget_and_refresh(
-        state: &Rc<RefCell<AppState>>,
-        ui: &MainWindow,
-        last_shown: &Rc<RefCell<Vec<crabcore::library::Track>>>,
-        target: f32,
-    ) {
-        match state.borrow().library.retarget_gains(target) {
-            Ok(n) => tracing::info!("Re-targeted {n} loudness gains to {target:.0} LUFS"),
-            Err(e) => tracing::warn!("Gain retarget failed: {e}"),
+            v.clamp(0.0, 1.0)
         }
-        let tracks = state.borrow().library.get_all_tracks().unwrap_or_default();
-        let total = tracks.len();
-        refresh_library(ui, tracks, last_shown, total);
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let last_shown = last_shown.clone();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_loudness_target_inc(move || {
-            let mut s = settings.borrow_mut();
-            s.loudness_target_lufs =
-                (s.loudness_target_lufs + 1.0).clamp(TARGET_MIN_LUFS, TARGET_MAX_LUFS);
-            let _ = s.save(&settings_path);
-            let target = s.loudness_target_lufs;
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &settings.borrow());
-                retarget_and_refresh(&state, &ui, &last_shown, target);
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let last_shown = last_shown.clone();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_loudness_target_dec(move || {
-            let mut s = settings.borrow_mut();
-            s.loudness_target_lufs =
-                (s.loudness_target_lufs - 1.0).clamp(TARGET_MIN_LUFS, TARGET_MAX_LUFS);
-            let _ = s.save(&settings_path);
-            let target = s.loudness_target_lufs;
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &settings.borrow());
-                retarget_and_refresh(&state, &ui, &last_shown, target);
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_eq_inc(move |band| {
-            let band = band as usize;
-            if band >= EQ_BAND_COUNT {
-                return;
-            }
-            let mut s = settings.borrow_mut();
-            s.eq_gains_db[band] = (s.eq_gains_db[band] + 1.0).clamp(-12.0, 12.0);
-            let _ = s.save(&settings_path);
-            state.borrow().player.set_eq_band(band, s.eq_gains_db[band]);
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &s);
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_eq_dec(move |band| {
-            let band = band as usize;
-            if band >= EQ_BAND_COUNT {
-                return;
-            }
-            let mut s = settings.borrow_mut();
-            s.eq_gains_db[band] = (s.eq_gains_db[band] - 1.0).clamp(-12.0, 12.0);
-            let _ = s.save(&settings_path);
-            state.borrow().player.set_eq_band(band, s.eq_gains_db[band]);
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &s);
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_eq_reset(move || {
-            let mut s = settings.borrow_mut();
-            s.eq_gains_db = [0.0; EQ_BAND_COUNT];
-            let _ = s.save(&settings_path);
-            for (band, gain) in s.eq_gains_db.iter().enumerate() {
-                state.borrow().player.set_eq_band(band, *gain);
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &s);
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_limiter_inc(move || {
-            let mut s = settings.borrow_mut();
-            s.limiter_ceiling = (s.limiter_ceiling * 1.122).clamp(0.1, 1.0);
-            let _ = s.save(&settings_path);
-            state.borrow().player.set_limiter_ceiling(s.limiter_ceiling);
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &s);
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_limiter_dec(move || {
-            let mut s = settings.borrow_mut();
-            s.limiter_ceiling = (s.limiter_ceiling / 1.122).clamp(0.1, 1.0);
-            let _ = s.save(&settings_path);
-            state.borrow().player.set_limiter_ceiling(s.limiter_ceiling);
-            if let Some(ui) = ui_weak.upgrade() {
-                settings_labels(&ui, &s);
-            }
-        });
-    }
+    };
+    let autodj = settings.autodj;
+    let sel_device = settings.output_device.clone().unwrap_or_default();
+    let output_devices = crabcore::audio::CpalEngine::list_output_devices();
+    let input_devices = crabcore::audio::CpalEngine::list_input_devices();
+    // Silence unused-mut warning on settings: boot owns it, App takes it below.
+    settings.autodj = autodj;
 
-    // -- Streaming (Icecast): toggle, field commits, bitrate stepper --
+    let mut app = App {
+        player,
+        library,
+        playlist_manager,
+        scheduler,
+        carts,
+        ads,
+        settings,
+        settings_path,
+        license,
+        screen: Screen::Home,
+        station_name: "CrabBoss FM".into(),
+        audio_engine: engine_name,
+        is_playing: false,
+        now_title: "No track loaded".into(),
+        now_artist: String::new(),
+        volume,
+        autodj,
+        up_next: String::new(),
+        auto_continue: false,
+        was_playing: false,
+        lib_tracks: Vec::new(),
+        lib_total: 0,
+        lib_search: String::new(),
+        lib_selected: None,
+        lib_status: String::new(),
+        scanning: false,
+        scan_rx: None,
+        scan_done: 0,
+        scan_total: 0,
+        import_active: false,
+        import_pending: VecDeque::new(),
+        import_added: 0,
+        import_skipped: 0,
+        import_total: 0,
+        sched_enabled: true,
+        sched_events: Vec::new(),
+        sched_warnings: Vec::new(),
+        sched_editor_open: false,
+        sched_edit_idx: None,
+        se_name: String::new(),
+        se_time: "09:00".into(),
+        se_action: 0,
+        se_target: String::new(),
+        se_expires: String::new(),
+        se_days: [true; 7],
+        sched_error: String::new(),
+        fired: HashMap::new(),
+        fired_ads: HashMap::new(),
+        cart_list: Vec::new(),
+        cart_status: String::new(),
+        cart_assign: false,
+        report_entries: Vec::new(),
+        report_summary: String::new(),
+        report_range: 1,
+        ad_blocks: Vec::new(),
+        ads_editor_open: false,
+        ads_edit_idx: None,
+        ab_name: String::new(),
+        ab_spot: String::new(),
+        ab_intro: String::new(),
+        ab_outro: String::new(),
+        ab_start: chrono::Local::now().format("%Y-%m-%d").to_string(),
+        ab_end: (chrono::Local::now() + chrono::Duration::days(30))
+            .format("%Y-%m-%d")
+            .to_string(),
+        ab_time: "09:00".into(),
+        ab_days: [true; 7],
+        ads_error: String::new(),
+        output_devices,
+        sel_device,
+        device_note: String::new(),
+        input_devices,
+        mic_note: String::new(),
+        license_status: String::new(),
+        license_error: String::new(),
+        license_key: String::new(),
+        track_count,
+        playlist_count,
+        upcoming_count: 0,
+        last_recovery: None,
+        tick_count: 0,
+    };
+    app.license_status = app.license.status().label().to_string();
+    app.refresh_library();
+    app.refresh_scheduler();
+    app.refresh_carts();
+    app.refresh_ads();
+    app.refresh_report();
+    app.refresh_counts();
+
+    // Health hint on startup.
     {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_stream_toggle(move || {
-            let mut s = settings.borrow_mut();
-            s.stream.enabled = !s.stream.enabled;
-            let _ = s.save(&settings_path);
-            state
-                .borrow_mut()
-                .player
-                .set_stream_config(s.stream.clone());
-            if s.stream.enabled {
-                if let Err(e) = state.borrow_mut().player.stream_start() {
-                    tracing::warn!("Stream start failed: {e}");
-                }
-            } else {
-                state.borrow_mut().player.stream_stop();
+        let n_missing = app.library.missing_files().unwrap_or_default().len();
+        let pending = app.library.count_missing_loudness().unwrap_or(0);
+        if n_missing > 0 || pending > 0 {
+            let mut parts = Vec::new();
+            if n_missing > 0 {
+                parts.push(format!("{} files missing (see log)", n_missing));
             }
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                stream_labels(&ui, state.borrow().player.as_ref());
+            if pending > 0 {
+                parts.push(format!("{} to analyze", pending));
             }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_stream_host_committed(move |text| {
-            let mut s = settings.borrow_mut();
-            s.stream.host = text.to_string();
-            let _ = s.save(&settings_path);
-            state
-                .borrow_mut()
-                .player
-                .set_stream_config(s.stream.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                stream_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_stream_port_committed(move |text| {
-            let mut s = settings.borrow_mut();
-            s.stream.port = text.to_string().parse().unwrap_or(s.stream.port);
-            let _ = s.save(&settings_path);
-            state
-                .borrow_mut()
-                .player
-                .set_stream_config(s.stream.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                stream_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_stream_mount_committed(move |text| {
-            let mut s = settings.borrow_mut();
-            s.stream.mount = text.to_string();
-            let _ = s.save(&settings_path);
-            state
-                .borrow_mut()
-                .player
-                .set_stream_config(s.stream.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                stream_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_stream_password_committed(move |text| {
-            let mut s = settings.borrow_mut();
-            // The UI shows •••••• as a placeholder; empty input keeps
-            // the stored password (type it again to change it).
-            let t = text.to_string();
-            if t != "••••••" && !t.is_empty() {
-                s.stream.password = t;
-            }
-            let _ = s.save(&settings_path);
-            state
-                .borrow_mut()
-                .player
-                .set_stream_config(s.stream.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                stream_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    fn stream_bitrate_step(current: u32, up: bool) -> u32 {
-        const LADDER: [u32; 16] = [
-            8, 16, 24, 32, 40, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
-        ];
-        let idx = LADDER
-            .iter()
-            .position(|&b| b >= current)
-            .unwrap_or(LADDER.len() - 1);
-        match up {
-            true => LADDER[(idx + 1).min(LADDER.len() - 1)],
-            false => LADDER[idx.saturating_sub(1)],
+            app.lib_status = parts.join(" - ");
+        }
+        if pending > 0 {
+            tracing::info!("Auto-starting loudness scan ({pending} pending)");
+            app.start_loudness_scan(false);
         }
     }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_stream_bitrate_inc(move || {
-            let mut s = settings.borrow_mut();
-            s.stream.bitrate_kbps = stream_bitrate_step(s.stream.bitrate_kbps, true);
-            let _ = s.save(&settings_path);
-            state
-                .borrow_mut()
-                .player
-                .set_stream_config(s.stream.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                stream_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_stream_bitrate_dec(move || {
-            let mut s = settings.borrow_mut();
-            s.stream.bitrate_kbps = stream_bitrate_step(s.stream.bitrate_kbps, false);
-            let _ = s.save(&settings_path);
-            state
-                .borrow_mut()
-                .player
-                .set_stream_config(s.stream.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                stream_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
 
-    // -- Microphone / line-in: toggle, device picker, level, ducking --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_toggle(move || {
-            let mut s = settings.borrow_mut();
-            s.mic.enabled = !s.mic.enabled;
-            let _ = s.save(&settings_path);
-            state.borrow_mut().player.set_mic_config(s.mic.clone());
-            if s.mic.enabled {
-                if let Err(e) = state.borrow_mut().player.mic_start() {
-                    tracing::warn!("Mic start failed: {e}");
-                }
-            } else {
-                state.borrow_mut().player.mic_stop();
-            }
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let ui_weak = ui.as_weak();
-        ui.on_settings_mic_refresh_devices(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                push_input_devices(&ui);
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_select_device(move |name| {
-            let name = name.to_string();
-            settings.borrow_mut().mic.device = Some(name.clone());
-            if settings.borrow().save(&settings_path).is_ok() {
-                tracing::info!("Mic input set to '{name}' (switches live)");
-            }
-            // Live-restarts the input when running (engine compares devices).
-            state
-                .borrow_mut()
-                .player
-                .set_mic_config(settings.borrow().mic.clone());
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
-                ui.set_settings_mic_device_note("Input switched live — no restart needed".into());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_level_inc(move || {
-            let mut s = settings.borrow_mut();
-            s.mic.level = (s.mic.level + 0.05).clamp(0.0, 1.5);
-            let _ = s.save(&settings_path);
-            state.borrow_mut().player.set_mic_config(s.mic.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_level_dec(move || {
-            let mut s = settings.borrow_mut();
-            s.mic.level = (s.mic.level - 0.05).clamp(0.0, 1.5);
-            let _ = s.save(&settings_path);
-            state.borrow_mut().player.set_mic_config(s.mic.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_duck_toggle(move || {
-            let mut s = settings.borrow_mut();
-            s.mic.duck_enabled = !s.mic.duck_enabled;
-            let _ = s.save(&settings_path);
-            state.borrow_mut().player.set_mic_config(s.mic.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    fn duck_ms_step(ladder: &[f32], current: f32, up: bool) -> f32 {
-        let idx = ladder
-            .iter()
-            .position(|&b| b >= current)
-            .unwrap_or(ladder.len() - 1);
-        match up {
-            true => ladder[(idx + 1).min(ladder.len() - 1)],
-            false => ladder[idx.saturating_sub(1)],
+    tracing::info!("CrabBoss UI ready (Iced)");
+    (app, Task::none())
+}
+
+// ---------------------------------------------------------------------------
+// Update
+// ---------------------------------------------------------------------------
+
+fn update(state: &mut App, message: Message) -> Task<Message> {
+    match message {
+        Message::Navigate(s) => {
+            state.screen = s;
         }
-    }
-    const ATTACK_LADDER: [f32; 9] = [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0];
-    const RELEASE_LADDER: [f32; 9] = [10.0, 25.0, 50.0, 100.0, 200.0, 400.0, 800.0, 1500.0, 3000.0];
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_threshold_inc(move || {
-            let mut s = settings.borrow_mut();
-            s.mic.duck_threshold_db = (s.mic.duck_threshold_db + 3.0).clamp(-60.0, 0.0);
-            let _ = s.save(&settings_path);
-            state.borrow_mut().player.set_mic_config(s.mic.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
+        Message::Tick => {
+            state.on_tick();
+        }
+        // -- Transport ------------------------------------------------------
+        Message::Play => {
+            if state.player.state() == PlayerState::Paused {
+                state.player.resume();
             }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_threshold_dec(move || {
-            let mut s = settings.borrow_mut();
-            s.mic.duck_threshold_db = (s.mic.duck_threshold_db - 3.0).clamp(-60.0, 0.0);
-            let _ = s.save(&settings_path);
-            state.borrow_mut().player.set_mic_config(s.mic.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_depth_inc(move || {
-            let mut s = settings.borrow_mut();
-            s.mic.duck_depth_db = (s.mic.duck_depth_db + 3.0).clamp(0.0, 24.0);
-            let _ = s.save(&settings_path);
-            state.borrow_mut().player.set_mic_config(s.mic.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_depth_dec(move || {
-            let mut s = settings.borrow_mut();
-            s.mic.duck_depth_db = (s.mic.duck_depth_db - 3.0).clamp(0.0, 24.0);
-            let _ = s.save(&settings_path);
-            state.borrow_mut().player.set_mic_config(s.mic.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_attack_inc(move || {
-            let mut s = settings.borrow_mut();
-            s.mic.attack_ms = duck_ms_step(&ATTACK_LADDER, s.mic.attack_ms, true);
-            let _ = s.save(&settings_path);
-            state.borrow_mut().player.set_mic_config(s.mic.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_attack_dec(move || {
-            let mut s = settings.borrow_mut();
-            s.mic.attack_ms = duck_ms_step(&ATTACK_LADDER, s.mic.attack_ms, false);
-            let _ = s.save(&settings_path);
-            state.borrow_mut().player.set_mic_config(s.mic.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_release_inc(move || {
-            let mut s = settings.borrow_mut();
-            s.mic.release_ms = duck_ms_step(&RELEASE_LADDER, s.mic.release_ms, true);
-            let _ = s.save(&settings_path);
-            state.borrow_mut().player.set_mic_config(s.mic.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_settings_mic_release_dec(move || {
-            let mut s = settings.borrow_mut();
-            s.mic.release_ms = duck_ms_step(&RELEASE_LADDER, s.mic.release_ms, false);
-            let _ = s.save(&settings_path);
-            state.borrow_mut().player.set_mic_config(s.mic.clone());
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                mic_labels(&ui, state.borrow().player.as_ref());
-            }
-        });
-    }
-
-    // -- Play --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        ui.on_play(move || {
-            let s = state.borrow();
-            if s.player.state() == crabcore::audio::PlayerState::Paused {
-                s.player.resume();
-            }
-            drop(s);
-
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_is_playing(true);
-            }
-        });
-    }
-
-    // -- Pause --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        ui.on_pause(move || {
-            let s = state.borrow();
-            s.player.pause();
-            drop(s);
-
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_is_playing(false);
-            }
-        });
-    }
-
-    // -- Stop --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let auto_continue = auto_continue.clone();
-        ui.on_stop(move || {
-            let s = state.borrow();
-            s.player.stop();
-            drop(s);
-            *auto_continue.borrow_mut() = false;
-
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_is_playing(false);
-                ui.set_now_playing_title("No track loaded".into());
-                ui.set_now_playing_artist("".into());
-                ui.set_current_time("00:00".into());
-                ui.set_total_time("00:00".into());
-                ui.set_player_progress(0.0);
-            }
-        });
-    }
-
-    // -- Set Volume --
-    {
-        let state = state.clone();
-        ui.on_set_volume(move |vol| {
-            let s = state.borrow();
-            s.player.set_volume(vol);
-        });
-    }
-
-    // -- Next: skip to a fresh rotation pick now --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let auto_continue = auto_continue.clone();
-        ui.on_next(move || {
-            *auto_continue.borrow_mut() = true;
-            if let Some(ui) = ui_weak.upgrade() {
-                autodj_play_now(&state, &ui);
-            }
-        });
-    }
-
-    // -- Prev: replay the current track from the top --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let auto_continue = auto_continue.clone();
-        ui.on_prev(move || {
-            let s = state.borrow();
-            let cur = s.player.current_track().map(|t| t.path);
-            let Some(path) = cur else { return };
-            match s.player.play(&path) {
-                Ok(()) => {
-                    *auto_continue.borrow_mut() = true;
-                    drop(s);
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_is_playing(true);
-                        ui.set_current_time("00:00".into());
-                        ui.set_player_progress(0.0);
+            state.is_playing = true;
+        }
+        Message::Pause => {
+            state.player.pause();
+            state.is_playing = false;
+        }
+        Message::Stop => {
+            state.player.stop();
+            state.auto_continue = false;
+            state.is_playing = false;
+            state.now_title = "No track loaded".into();
+            state.now_artist.clear();
+            state.up_next.clear();
+        }
+        Message::Next => {
+            state.auto_continue = true;
+            state.autodj_play_now();
+        }
+        Message::Prev => {
+            if let Some(cur) = state.player.current_track().map(|t| t.path) {
+                match state.player.play(&cur) {
+                    Ok(()) => {
+                        state.auto_continue = true;
+                        state.is_playing = true;
                     }
-                }
-                Err(e) => tracing::error!("Prev failed: {}", e),
-            }
-        });
-    }
-
-    // -- Auto-DJ toggle (persisted; value already flipped via binding) --
-    {
-        let ui_weak = ui.as_weak();
-        let settings = settings.clone();
-        let settings_path = settings_path.clone();
-        ui.on_autodj_toggled(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let en = ui.get_autodj_enabled();
-                settings.borrow_mut().autodj = en;
-                let _ = settings.borrow().save(&settings_path);
-                tracing::info!("Auto-DJ {}", if en { "ON" } else { "OFF" });
-                if !en {
-                    ui.set_up_next_title("".into());
+                    Err(e) => tracing::error!("Prev failed: {}", e),
                 }
             }
-        });
-    }
-
-    // Play one rotation pick now (Auto-DJ / Next / EOF recovery).
-    fn autodj_play_now(state: &Rc<RefCell<AppState>>, ui: &MainWindow) {
-        let s = state.borrow();
-        let pick = autodj_pick(&s.library);
-        let Some(pick) = pick else {
-            tracing::warn!("Auto-DJ: library is empty");
-            return;
-        };
-        let path = PathBuf::from(&pick.file_path);
-        if !path.is_file() {
-            tracing::warn!("Auto-DJ: file missing: {}", pick.file_path);
-            return;
         }
-        match s.player.play(&path) {
-            Ok(()) => {
-                let _ = s.library.record_play(&pick.id, pick.duration_secs);
-                let label = track_label(&pick);
-                let total = fmt_dur(pick.duration_secs);
-                tracing::info!("Auto-DJ playing: {}", label);
-                drop(s);
-                ui.set_is_playing(true);
-                ui.set_now_playing_title(label.into());
-                ui.set_now_playing_artist("Auto-DJ".into());
-                ui.set_total_time(total.into());
-                ui.set_up_next_title("".into());
-            }
-            Err(e) => tracing::error!("Auto-DJ play failed: {}", e),
+        Message::VolumeChanged(v) => {
+            state.volume = v.clamp(0.0, 1.0);
+            state.player.set_volume(state.volume);
         }
-    }
-
-    // -- 1s tick: live progress + Auto-DJ feed --
-    // Progress labels move; the feed prefetches ahead and restarts natural
-    // EOFs while Auto-DJ owns it. Restart fires only on a genuine
-    // Playing → finished transition — a bare idle Stopped must never
-    // self-start (e.g. right after an import fills the library).
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let auto_continue = auto_continue.clone();
-        let tick_was_playing: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
-        let tick = slint::Timer::default();
-        tick.start(
-            slint::TimerMode::Repeated,
-            std::time::Duration::from_secs(1),
-            move || {
-                let Some(ui) = ui_weak.upgrade() else { return };
-                let s = state.borrow();
-                let pos = s.player.position_secs();
-                let (dur, has_dur) = match s.player.current_track() {
-                    Some(t) => (
-                        t.duration_secs.unwrap_or(0.0),
-                        t.duration_secs.unwrap_or(0.0) > 0.0,
-                    ),
-                    None => (0.0, false),
-                };
-                let playing = s.player.state() == crabcore::audio::PlayerState::Playing;
-                let finished = s.player.is_finished();
-                drop(s);
-                ui.set_current_time(fmt_dur(Some(pos)).into());
-                ui.set_total_time(if has_dur {
-                    fmt_dur(Some(dur)).into()
-                } else {
-                    "00:00".into()
-                });
-                ui.set_player_progress(if has_dur {
-                    (pos / dur).clamp(0.0, 1.0) as f32
-                } else {
-                    0.0
-                });
-                // Live per-pad cart progress: highlight the pad whose file is
-                // the current track; clear all bars when nothing plays.
-                {
-                    let carts = carts.borrow();
-                    let s = state.borrow();
-                    let live = match s.player.current_track() {
-                        Some(t) if playing && t.duration_secs.unwrap_or(0.0) > 0.0 => {
-                            let frac =
-                                ((pos / t.duration_secs.unwrap_or(1.0)) as f32).clamp(0.0, 1.0);
-                            Some((t.path.to_string_lossy().to_string(), frac))
-                        }
-                        _ => None,
-                    };
-                    let prior: Vec<String> = carts
-                        .list_all()
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|c| c.file_path.clone())
-                        .collect();
-                    let has_progress = live.is_some()
-                        && prior
-                            .iter()
-                            .any(|p| live.as_ref().map(|(lp, _)| lp == p).unwrap_or(false));
-                    if has_progress || ui.get_cart_had_progress() {
-                        refresh_carts(&ui, &carts, &s.library, live);
-                        ui.set_cart_had_progress(has_progress);
+        Message::AutodjToggled(en) => {
+            state.autodj = en;
+            state.settings.autodj = en;
+            state.save_settings();
+            tracing::info!("Auto-DJ {}", if en { "ON" } else { "OFF" });
+            if !en {
+                state.up_next.clear();
+            }
+        }
+        // -- Library ---------------------------------------------------------
+        Message::LibrarySearchChanged(q) => {
+            state.lib_search = q;
+            state.lib_selected = None;
+            state.refresh_library();
+        }
+        Message::LibraryTrackSelected(i) => {
+            state.lib_selected = Some(i);
+        }
+        Message::LibraryTrackPlay(i) => {
+            let track = state.lib_tracks.get(i).cloned();
+            if let Some(track) = track {
+                let path = PathBuf::from(&track.file_path);
+                tracing::info!("Playing track: {:?}", path);
+                match state.player.play(&path) {
+                    Ok(()) => {
+                        let _ = state.library.record_play(&track.id, track.duration_secs);
+                        state.auto_continue = true;
+                        state.lib_selected = Some(i);
+                        state.is_playing = true;
+                        state.now_title = track
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| track.file_name.clone());
+                        state.now_artist = track.artist.clone().unwrap_or_default();
                     }
+                    Err(e) => tracing::error!("Failed to play: {}", e),
                 }
-                // Streaming status + now-playing metadata (cheap, lock-free).
-                // Mic meter + duck indicator ride along (mixer lock only).
-                {
-                    let s = state.borrow();
-                    stream_labels(&ui, s.player.as_ref());
-                    mic_labels(&ui, s.player.as_ref());
-                    if let Some(t) = s.player.current_track() {
-                        let label = t.title.clone().unwrap_or_else(|| {
-                            t.path
-                                .file_name()
-                                .map(|f| f.to_string_lossy().to_string())
-                                .unwrap_or_default()
-                        });
-                        s.player.set_stream_title(&label);
-                    }
-                }
-                if !ui.get_autodj_enabled() || !*auto_continue.borrow() {
-                    // Still track the transport so a later re-enable sees a
-                    // fresh edge instead of a stale "was playing".
-                    *tick_was_playing.borrow_mut() = playing;
-                    return;
-                }
-                let s = state.borrow();
-                // Genuine EOF: the transport just fell out of Playing with
-                // nothing left. Idle Stopped (never played, stopped long
-                // ago) is NOT an EOF — manual Stop also clears the flag.
-                let eof_transition = finished && (playing || *tick_was_playing.borrow());
-                *tick_was_playing.borrow_mut() = playing;
-                if eof_transition {
-                    drop(s);
-                    autodj_play_now(&state, &ui);
-                    return;
-                }
-                if !playing {
-                    return;
-                }
-                // Prefetch the handoff before the current track runs out.
-                let pending = s.player.pending_count();
-                let has_queue = s.player.has_queue();
-                let dur_opt = if has_dur { Some(dur) } else { None };
-                let due = crabcore::audio::needs_prefetch(pos, dur_opt, pending, has_queue, 8.0);
-                if !due {
-                    return;
-                }
-                let pick = autodj_pick(&s.library);
-                match pick {
-                    Some(pick) => {
-                        let path = PathBuf::from(&pick.file_path);
-                        if !path.is_file() {
-                            return;
-                        }
-                        match s.player.queue(&path) {
-                            Ok(()) => {
-                                let label = track_label(&pick);
-                                tracing::info!("Auto-DJ queued: {}", label);
-                                drop(s);
-                                ui.set_up_next_title(label.into());
-                            }
-                            Err(e) => tracing::warn!("Auto-DJ queue failed: {}", e),
-                        }
-                    }
-                    None => drop(s),
-                }
-            },
-        );
-        std::mem::forget(tick);
-    }
-
-    // -- Import Files (native dialog, multi-select audio) --
-    // The dialog returns immediately; files import one per timer tick so
-    // 10+ tracks never freeze the window (each add_track parses tags via
-    // lofty + writes SQLite, tens-to-hundreds of ms on the UI thread).
-    // Progress shows live in the status label; the list refreshes at the
-    // end. The timer idles (flag check only) once the queue drains. --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let last_shown = last_shown.clone();
-        let import_active = import_active.clone();
-        let settings = settings.clone();
-        let scan_rx = scan_rx.clone();
-        let scan_progress = scan_progress.clone();
-        ui.on_import_files(move || {
+            }
+        }
+        Message::ImportFiles => {
+            if state.import_active {
+                state.lib_status = "Import already running...".into();
+                return Task::none();
+            }
             let files = rfd::FileDialog::new()
                 .set_title("Import audio files")
                 .add_filter(
@@ -2718,270 +1393,285 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ],
                 )
                 .pick_files();
-            let Some(files) = files else { return };
-            if files.is_empty() {
-                return;
-            }
-            if *import_active.borrow() {
-                tracing::warn!("Import already running; ignoring {} files", files.len());
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_library_status("Import already running…".into());
-                }
-                return;
-            }
-            *import_active.borrow_mut() = true;
-            let total = files.len();
-            let pending = Rc::new(RefCell::new(std::collections::VecDeque::from(files)));
-            let added = Rc::new(RefCell::new(0usize));
-            let skipped = Rc::new(RefCell::new(0usize));
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_library_status(format!("Importing 0/{total}…").into());
-            }
-            tracing::info!("Importing {total} files…");
-            let state = state.clone();
-            let ui_weak = ui_weak.clone();
-            let last_shown = last_shown.clone();
-            let import_active = import_active.clone();
-            let settings = settings.clone();
-            let scan_rx = scan_rx.clone();
-            let scan_progress = scan_progress.clone();
-            let tick = slint::Timer::default();
-            tick.start(
-                slint::TimerMode::Repeated,
-                std::time::Duration::from_millis(50),
-                move || {
-                    if !*import_active.borrow() {
-                        return; // import not active
-                    }
-                    let Some(ui) = ui_weak.upgrade() else { return };
-                    let next = pending.borrow_mut().pop_front();
-                    let Some(f) = next else {
-                        // Queue drained: finish up.
-                        *import_active.borrow_mut() = false;
-                        let s = state.borrow();
-                        let tracks = s.library.get_all_tracks().unwrap_or_default();
-                        drop(s);
-                        let (added, skipped) = (*added.borrow(), *skipped.borrow());
-                        ui.set_track_count(tracks.len() as i32);
-                        ui.set_library_status(
-                            if skipped > 0 {
-                                format!("Imported {added}, skipped {skipped}")
-                            } else {
-                                format!("Imported {added}")
-                            }
-                            .into(),
-                        );
-                        let total = tracks.len();
-                        refresh_library(&ui, tracks, &last_shown, total);
-                        tracing::info!("Import complete: {added} added, {skipped} skipped");
-                        // New tracks still need loudness analysis — hand them
-                        // to the background scanner (no freeze, no-op when
-                        // nothing is pending or a scan already runs).
-                        if added > 0 {
-                            let target = settings.borrow().loudness_target_lufs;
-                            start_loudness_scan(
-                                &state,
-                                &ui,
-                                &scan_rx,
-                                &scan_progress,
-                                target,
-                                false,
-                            );
-                        }
-                        return;
-                    };
-                    let done = total - pending.borrow().len();
-                    let s = state.borrow();
-                    match s.library.add_track(&f) {
-                        Ok(t) => {
-                            tracing::info!("Imported {} as {:?}", f.display(), t.kind);
-                            *added.borrow_mut() += 1;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Skipping {}: {}", f.display(), e);
-                            *skipped.borrow_mut() += 1;
-                        }
-                    }
-                    drop(s);
-                    ui.set_library_status(format!("Importing {done}/{total}…").into());
-                },
-            );
-            std::mem::forget(tick);
-        });
-    }
-
-    // -- Library Search (live filter) --
-    {
-        let state = state.clone();
-        let last_shown = last_shown.clone();
-        let ui_weak = ui.as_weak();
-        ui.on_library_search_changed(move |query| {
-            let s = state.borrow();
-            // Total first (empty query reuses it — no double query).
-            let all = s.library.get_all_tracks().unwrap_or_default();
-            let total = all.len();
-            let tracks = if query.trim().is_empty() {
-                all
-            } else {
-                s.library.search(query.trim()).unwrap_or_default()
+            let Some(files) = files else {
+                return Task::none();
             };
-            drop(s);
-            if let Some(ui) = ui_weak.upgrade() {
-                tracing::info!(
-                    "Library search {:?}: {} shown of {total}",
-                    query.to_string(),
-                    tracks.len()
-                );
-                refresh_library(&ui, tracks, &last_shown, total);
+            if files.is_empty() {
+                return Task::none();
             }
-        });
-    }
-
-    // -- Library Track Play Button (explicit ▶ per row; row click only selects) --
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        let last_shown = last_shown.clone();
-        let auto_continue = auto_continue.clone();
-        ui.on_library_track_play_pressed(move |index: i32| {
-            let shown = last_shown.borrow();
-            let track = shown.get(index as usize).cloned();
-            drop(shown);
-            let Some(track) = track else { return };
-            let s = state.borrow();
-            let path = PathBuf::from(&track.file_path);
-            tracing::info!("Playing track: {:?}", path);
-
-            match s.player.play(&path) {
-                Ok(()) => {
-                    let _ = s.library.record_play(&track.id, track.duration_secs);
-                    *auto_continue.borrow_mut() = true;
-                    if let Some(ui) = ui_weak.upgrade() {
-                        let title = track
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| track.file_name.clone());
-                        let artist = track.artist.clone().unwrap_or_default();
-                        let dur = fmt_dur(track.duration_secs);
-
-                        ui.set_is_playing(true);
-                        ui.set_now_playing_title(title.into());
-                        ui.set_now_playing_artist(artist.into());
-                        ui.set_total_time(dur.into());
+            tracing::info!("Importing {} files...", files.len());
+            state.import_active = true;
+            state.import_total = files.len();
+            state.import_added = 0;
+            state.import_skipped = 0;
+            state.import_pending = VecDeque::from(files);
+            state.lib_status = format!("Importing 0/{}...", state.import_total);
+        }
+        Message::HealthCheck => {
+            tracing::info!("Manual library health scan");
+            let fixed = state.library.reclassify_all().unwrap_or(0);
+            let missing = state.library.missing_files().unwrap_or_default();
+            let pending = state.library.count_missing_loudness().unwrap_or(0);
+            for t in &missing {
+                tracing::warn!("Missing file: {}", t.file_path);
+            }
+            let mut parts = if missing.is_empty() {
+                vec!["All files OK".to_string()]
+            } else {
+                vec![format!("{} files missing (see log)", missing.len())]
+            };
+            if fixed > 0 {
+                parts.push(format!("re-labeled {fixed}"));
+            }
+            if pending > 0 {
+                parts.push(format!("{} to analyze", pending));
+            }
+            state.lib_status = parts.join(" - ");
+            state.refresh_library();
+        }
+        Message::LoudnessScan => {
+            let target = state.settings.loudness_target_lufs;
+            state.start_loudness_scan(true);
+            let _ = target;
+        }
+        // -- Scheduler -------------------------------------------------------
+        Message::SchedulerMasterToggled(en) => {
+            state.sched_enabled = en;
+            tracing::info!("Scheduler master {}", if en { "ON" } else { "OFF" });
+        }
+        Message::SchedulerToggleEvent(i) => {
+            let ids: Vec<(String, bool)> = state
+                .sched_events
+                .iter()
+                .map(|e| (e.id.clone(), e.enabled))
+                .collect();
+            if let Some((id, enabled)) = ids.get(i) {
+                if let Err(e) = state.scheduler.set_enabled(id, !enabled) {
+                    tracing::error!("Scheduler toggle failed: {}", e);
+                }
+            }
+            state.refresh_scheduler();
+        }
+        Message::SchedulerDeleteEvent(i) => {
+            if let Some(e) = state.sched_events.get(i) {
+                let id = e.id.clone();
+                if let Err(e) = state.scheduler.delete(&id) {
+                    tracing::error!("Scheduler delete failed: {}", e);
+                }
+            }
+            state.refresh_scheduler();
+        }
+        Message::SchedulerRunEvent(i) => {
+            state.fire_scheduled_event(i);
+        }
+        Message::SchedulerNew => {
+            state.sched_edit_idx = None;
+            state.se_name.clear();
+            state.se_time = "09:00".into();
+            state.se_action = 0;
+            state.se_target.clear();
+            state.se_expires.clear();
+            state.se_days = [true; 7];
+            state.sched_error.clear();
+            state.sched_editor_open = true;
+        }
+        Message::SchedulerEdit(i) => {
+            if let Some(e) = state.sched_events.get(i).cloned() {
+                state.sched_edit_idx = Some(i);
+                state.se_name = e.name;
+                state.se_time = e.start_time;
+                state.se_action = match e.action_type.as_str() {
+                    "play" => 0,
+                    "load" => 1,
+                    "generate" => 2,
+                    "queue" => 4,
+                    _ => 3,
+                };
+                state.se_target = e.target;
+                state.se_expires = e.expires_on.unwrap_or_default();
+                let mask = crabcore::scheduler::mask_from_days(&e.days);
+                for b in 0..7 {
+                    state.se_days[b] = mask & (1 << b) != 0;
+                }
+                if mask == 127 {
+                    state.se_days = [true; 7];
+                }
+                state.sched_error.clear();
+                state.sched_editor_open = true;
+            }
+        }
+        Message::SchedulerEditorClose => {
+            state.sched_editor_open = false;
+            state.sched_error.clear();
+        }
+        Message::SchedName(v) => state.se_name = v,
+        Message::SchedTime(v) => state.se_time = v,
+        Message::SchedTarget(v) => state.se_target = v,
+        Message::SchedExpires(v) => state.se_expires = v,
+        Message::SchedActionPrev => {
+            state.se_action = state.se_action.saturating_sub(1);
+        }
+        Message::SchedActionNext => {
+            state.se_action = (state.se_action + 1).min(4);
+        }
+        Message::SchedDayChanged(i, v) => {
+            if i < 7 {
+                state.se_days[i] = v;
+            }
+        }
+        Message::SchedulerSave => {
+            use crabcore::scheduler::days_from_mask;
+            let mut mask = 0u8;
+            for (i, on) in state.se_days.iter().enumerate() {
+                if *on {
+                    mask |= 1 << i;
+                }
+            }
+            let days = days_from_mask(mask);
+            let action = action_name(state.se_action);
+            let expires = state.se_expires.trim().to_string();
+            let res = match state.sched_edit_idx {
+                None => state
+                    .scheduler
+                    .create(
+                        state.se_name.trim(),
+                        action,
+                        state.se_target.trim(),
+                        state.se_time.trim(),
+                        &days,
+                        Some(expires.trim()),
+                    )
+                    .map(|_| ()),
+                Some(idx) => {
+                    let id = state.sched_events.get(idx).map(|e| e.id.clone());
+                    match id {
+                        Some(id) => state.scheduler.update(
+                            &id,
+                            state.se_name.trim(),
+                            action,
+                            state.se_target.trim(),
+                            state.se_time.trim(),
+                            &days,
+                            Some(expires.trim()),
+                        ),
+                        None => Err(crabcore::CrabError::Scheduler("event gone".into())),
                     }
+                }
+            };
+            match res {
+                Ok(()) => {
+                    tracing::info!("Scheduler saved: {}", state.se_name);
+                    state.sched_error.clear();
+                    state.sched_editor_open = false;
+                    state.refresh_scheduler();
                 }
                 Err(e) => {
-                    tracing::error!("Failed to play: {}", e);
+                    tracing::warn!("Scheduler save failed: {}", e);
+                    state.sched_error = format!("{}", e);
                 }
             }
-        });
-    }
-
-    // -- Reports: range query (jingles/ads excluded), newest first --
-    fn report_range_bounds(idx: i32) -> (chrono::DateTime<chrono::Utc>, String) {
-        use chrono::{Duration, Local};
-        let now = Local::now();
-        let label = match idx {
-            0 => "Today",
-            2 => "Last 30 days",
-            3 => "All time",
-            _ => "Last 7 days",
         }
-        .to_string();
-        let from = match idx {
-            0 => now
-                .date_naive()
-                .and_hms_opt(0, 0, 0)
-                .unwrap()
-                .and_local_timezone(Local)
-                .unwrap(),
-            2 => now - Duration::days(30),
-            3 => now - Duration::days(365 * 20),
-            _ => now - Duration::days(7),
-        };
-        (from.with_timezone(&chrono::Utc), label)
-    }
-
-    fn refresh_report(ui: &MainWindow, state: &Rc<RefCell<AppState>>, range_idx: i32) {
-        use crabcore::library::TrackKind;
-        let (from, label) = report_range_bounds(range_idx);
-        let to = chrono::Utc::now();
-        let s = state.borrow();
-        let entries = crabcore::report::play_report(
-            &s.library,
-            from,
-            to,
-            &[TrackKind::Jingle, TrackKind::Ad],
-        )
-        .unwrap_or_default();
-        drop(s);
-        let airtime: f64 = entries.iter().filter_map(|e| e.duration_secs).sum();
-        let rows: Vec<ReportRow> = entries
-            .iter()
-            .take(100)
-            .map(|e| ReportRow {
-                time: e.played_at.format("%d/%m %H:%M").to_string().into(),
-                title: e.title.clone().into(),
-                artist: e.artist.clone().into(),
-                kind: e.kind.as_str().into(),
-            })
-            .collect();
-        let model = Rc::new(slint::VecModel::from(rows));
-        ui.set_report_entries(model.into());
-        ui.set_report_summary(
-            format!(
-                "{}: {} plays • {:.0} min music airtime (jingles/ads excluded{})",
-                label,
-                entries.len(),
-                airtime / 60.0,
-                if entries.len() > 100 {
-                    "; showing newest 100"
-                } else {
-                    ""
-                }
-            )
-            .into(),
-        );
-    }
-    refresh_report(&ui, &state, 1);
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        ui.on_report_range_changed(move |idx| {
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_report_range(idx);
-                refresh_report(&ui, &state, idx);
+        // -- Carts ------------------------------------------------------------
+        Message::CartPlay(i) => {
+            state.play_cart(i);
+        }
+        Message::CartHotkey(i) => {
+            // Scoped like the old FocusScope hotkeys: only on the Carts
+            // screen, and never while an editor dialog is open (typing
+            // "1".."8" into a field must not fire pads).
+            if state.screen != Screen::Carts || state.sched_editor_open || state.ads_editor_open {
+                return Task::none();
             }
-        });
-    }
-    {
-        let state = state.clone();
-        let ui_weak = ui.as_weak();
-        ui.on_report_export(move || {
+            state.play_cart(i);
+        }
+        Message::CartDelete(i) => {
+            if let Some(c) = state.cart_list.get(i) {
+                let id = c.id.clone();
+                if let Err(e) = state.carts.delete(&id) {
+                    tracing::error!("Cart delete failed: {}", e);
+                }
+            }
+            state.refresh_carts();
+        }
+        Message::CartAdd => {
+            let existing: Vec<String> = state
+                .cart_list
+                .iter()
+                .map(|c| c.file_path.clone())
+                .collect();
+            if existing.len() >= 8 {
+                state.cart_status = "Cart wall is full (8)".into();
+                return Task::none();
+            }
+            let tracks = state.library.get_all_tracks().unwrap_or_default();
+            let next = tracks
+                .iter()
+                .find(|t| t.kind == TrackKind::Jingle && !existing.contains(&t.file_path))
+                .or_else(|| tracks.iter().find(|t| !existing.contains(&t.file_path)));
+            match next {
+                Some(t) => {
+                    let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
+                    if let Err(e) = state.carts.create(&label, &t.file_path) {
+                        tracing::error!("Cart add failed: {}", e);
+                    }
+                    state.cart_status = format!("Loaded '{}'", label);
+                    state.refresh_carts();
+                }
+                None => {
+                    state.cart_status = "Import tracks first".into();
+                }
+            }
+        }
+        Message::CartPlace(slot) => {
+            let track = state
+                .lib_selected
+                .and_then(|i| state.lib_tracks.get(i).cloned());
+            let Some(track) = track else {
+                state.cart_status = "No library track armed - tap one first".into();
+                return Task::none();
+            };
+            let label = track
+                .title
+                .clone()
+                .unwrap_or_else(|| track.file_name.clone());
+            if let Err(e) = state.carts.assign_at(slot as i32, &label, &track.file_path) {
+                tracing::error!("Cart place failed: {}", e);
+                return Task::none();
+            }
+            state.cart_assign = false;
+            state.cart_status = format!("'{}' -> pad {}", label, slot + 1);
+            state.refresh_carts();
+        }
+        Message::CartToggleAssign => {
+            state.cart_assign = !state.cart_assign;
+            state.cart_status = if state.cart_assign {
+                "Assign: select a track in Media, then tap a pad".into()
+            } else {
+                String::new()
+            };
+        }
+        // -- Reports -----------------------------------------------------------
+        Message::ReportRangeChanged(i) => {
+            state.report_range = i.min(3);
+            state.refresh_report();
+        }
+        Message::ReportExport => {
             let path = rfd::FileDialog::new()
                 .set_title("Export play report (CSV)")
                 .set_file_name("crabboss-report.csv")
                 .add_filter("CSV", &["csv"])
                 .save_file();
-            let Some(path) = path else { return };
-            let (from, _) = report_range_bounds(
-                ui_weak
-                    .upgrade()
-                    .map(|ui| ui.get_report_range())
-                    .unwrap_or(1),
-            );
-            let s = state.borrow();
+            let Some(path) = path else {
+                return Task::none();
+            };
+            let (from, _) = report_range_bounds(state.report_range);
             let entries = crabcore::report::play_report(
-                &s.library,
+                &state.library,
                 from,
                 chrono::Utc::now(),
-                &[
-                    crabcore::library::TrackKind::Jingle,
-                    crabcore::library::TrackKind::Ad,
-                ],
+                &[TrackKind::Jingle, TrackKind::Ad],
             )
             .unwrap_or_default();
-            drop(s);
             match std::fs::write(&path, crabcore::report::to_csv(&entries)) {
                 Ok(()) => {
                     tracing::info!(
@@ -2989,46 +1679,1268 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         path.display(),
                         entries.len()
                     );
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_report_summary(
-                            format!("Exported {} rows to {}", entries.len(), path.display()).into(),
-                        );
-                    }
+                    state.report_summary =
+                        format!("Exported {} rows to {}", entries.len(), path.display());
                 }
                 Err(e) => tracing::error!("Report export failed: {}", e),
             }
-        });
-    }
-
-    tracing::info!("🦀 CrabBoss UI ready — launching window");
-    // Start maximized. NOTE: do NOT call `set_maximized(true)` here before
-    // `run()` — on Windows the window is then created in a half-maximized
-    // state (maximized caption, small size stuck top-left) and any later
-    // `set_maximized(true)` is a no-op. Instead queue it into the event
-    // loop: `run()` shows the window first, so the closure lands on a real,
-    // normal window and the false→true transition applies for real.
-    {
-        let ui_weak = ui.as_weak();
-        if let Err(e) = slint::invoke_from_event_loop(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.window().set_maximized(true);
+        }
+        // -- Ads ----------------------------------------------------------------
+        Message::AdsToggle(i) => {
+            let ids: Vec<(String, bool)> = state
+                .ad_blocks
+                .iter()
+                .map(|b| (b.id.clone(), b.enabled))
+                .collect();
+            if let Some((id, enabled)) = ids.get(i) {
+                if let Err(e) = state.ads.set_enabled(id, !enabled) {
+                    tracing::error!("Ad toggle failed: {}", e);
+                }
             }
-        }) {
-            tracing::warn!("Could not queue maximize request: {e}");
+            state.refresh_ads();
+        }
+        Message::AdsDelete(i) => {
+            if let Some(b) = state.ad_blocks.get(i) {
+                let id = b.id.clone();
+                if let Err(e) = state.ads.delete(&id) {
+                    tracing::error!("Ad delete failed: {}", e);
+                }
+            }
+            state.refresh_ads();
+        }
+        Message::AdsRun(i) => {
+            state.fire_ad_block(i);
+        }
+        Message::AdsNew => {
+            state.ads_edit_idx = None;
+            state.ab_name.clear();
+            state.ab_spot.clear();
+            state.ab_intro.clear();
+            state.ab_outro.clear();
+            state.ab_start = chrono::Local::now().format("%Y-%m-%d").to_string();
+            state.ab_end = (chrono::Local::now() + chrono::Duration::days(30))
+                .format("%Y-%m-%d")
+                .to_string();
+            state.ab_time = "09:00".into();
+            state.ab_days = [true; 7];
+            state.ads_error.clear();
+            state.ads_editor_open = true;
+        }
+        Message::AdsEdit(i) => {
+            if let Some(b) = state.ad_blocks.get(i).cloned() {
+                state.ads_edit_idx = Some(i);
+                state.ab_name = b.name;
+                state.ab_spot = b.spot_path;
+                state.ab_intro = b.intro_path.unwrap_or_default();
+                state.ab_outro = b.outro_path.unwrap_or_default();
+                state.ab_start = b.start_date.to_string();
+                state.ab_end = b.end_date.to_string();
+                state.ab_time = b.play_time;
+                let mask = crabcore::scheduler::mask_from_days(&b.days);
+                for d in 0..7 {
+                    state.ab_days[d] = mask & (1 << d) != 0;
+                }
+                if mask == 127 {
+                    state.ab_days = [true; 7];
+                }
+                state.ads_error.clear();
+                state.ads_editor_open = true;
+            }
+        }
+        Message::AdsEditorClose => {
+            state.ads_editor_open = false;
+            state.ads_error.clear();
+        }
+        Message::AdName(v) => state.ab_name = v,
+        Message::AdSpot(v) => state.ab_spot = v,
+        Message::AdIntro(v) => state.ab_intro = v,
+        Message::AdOutro(v) => state.ab_outro = v,
+        Message::AdStart(v) => state.ab_start = v,
+        Message::AdEnd(v) => state.ab_end = v,
+        Message::AdTime(v) => state.ab_time = v,
+        Message::AdDayChanged(i, v) => {
+            if i < 7 {
+                state.ab_days[i] = v;
+            }
+        }
+        Message::AdsSave => {
+            use crabcore::scheduler::days_from_mask;
+            let mut mask = 0u8;
+            for (i, on) in state.ab_days.iter().enumerate() {
+                if *on {
+                    mask |= 1 << i;
+                }
+            }
+            let days = days_from_mask(mask);
+            let res = match state.ads_edit_idx {
+                None => state
+                    .ads
+                    .create(
+                        state.ab_name.trim(),
+                        state.ab_spot.trim(),
+                        state.ab_intro.trim(),
+                        state.ab_outro.trim(),
+                        state.ab_start.trim(),
+                        state.ab_end.trim(),
+                        state.ab_time.trim(),
+                        &days,
+                    )
+                    .map(|_| ()),
+                Some(idx) => {
+                    let id = state.ad_blocks.get(idx).map(|b| b.id.clone());
+                    match id {
+                        Some(id) => state.ads.update(
+                            &id,
+                            state.ab_name.trim(),
+                            state.ab_spot.trim(),
+                            state.ab_intro.trim(),
+                            state.ab_outro.trim(),
+                            state.ab_start.trim(),
+                            state.ab_end.trim(),
+                            state.ab_time.trim(),
+                            &days,
+                        ),
+                        None => Err(crabcore::CrabError::Scheduler("block gone".into())),
+                    }
+                }
+            };
+            match res {
+                Ok(()) => {
+                    tracing::info!("Ad block saved: {}", state.ab_name);
+                    state.ads_error.clear();
+                    state.ads_editor_open = false;
+                    state.refresh_ads();
+                }
+                Err(e) => {
+                    tracing::warn!("Ad block save failed: {}", e);
+                    state.ads_error = format!("{}", e);
+                }
+            }
+        }
+        // -- Settings ------------------------------------------------------------
+        Message::SettingsRefreshDevices => {
+            state.output_devices = crabcore::audio::CpalEngine::list_output_devices();
+        }
+        Message::SettingsSelectDevice(name) => {
+            state.settings.output_device = Some(name.clone());
+            state.save_settings();
+            tracing::info!("Output device set to '{}' (restart to apply)", name);
+            state.sel_device = name;
+            state.device_note = "Restart CrabBoss to apply the new device".into();
+        }
+        Message::XfadeInc => {
+            state.settings.crossfade_secs = (state.settings.crossfade_secs + 0.5).clamp(0.0, 30.0);
+            state
+                .player
+                .set_crossfade_secs(state.settings.crossfade_secs);
+            state.save_settings();
+        }
+        Message::XfadeDec => {
+            state.settings.crossfade_secs = (state.settings.crossfade_secs - 0.5).clamp(0.0, 30.0);
+            state
+                .player
+                .set_crossfade_secs(state.settings.crossfade_secs);
+            state.save_settings();
+        }
+        Message::SilenceInc => {
+            state.settings.silence_threshold_secs =
+                (state.settings.silence_threshold_secs + 1.0).clamp(1.0, 120.0);
+            state
+                .player
+                .set_silence_threshold_secs(state.settings.silence_threshold_secs);
+            state.save_settings();
+        }
+        Message::SilenceDec => {
+            state.settings.silence_threshold_secs =
+                (state.settings.silence_threshold_secs - 1.0).clamp(1.0, 120.0);
+            state
+                .player
+                .set_silence_threshold_secs(state.settings.silence_threshold_secs);
+            state.save_settings();
+        }
+        Message::EqToggle => {
+            state.settings.eq_enabled = !state.settings.eq_enabled;
+            state.player.set_eq_enabled(state.settings.eq_enabled);
+            state.save_settings();
+        }
+        Message::EqInc(band) => {
+            if band < EQ_BAND_COUNT {
+                state.settings.eq_gains_db[band] =
+                    (state.settings.eq_gains_db[band] + 1.0).clamp(-12.0, 12.0);
+                state
+                    .player
+                    .set_eq_band(band, state.settings.eq_gains_db[band]);
+                state.save_settings();
+            }
+        }
+        Message::EqDec(band) => {
+            if band < EQ_BAND_COUNT {
+                state.settings.eq_gains_db[band] =
+                    (state.settings.eq_gains_db[band] - 1.0).clamp(-12.0, 12.0);
+                state
+                    .player
+                    .set_eq_band(band, state.settings.eq_gains_db[band]);
+                state.save_settings();
+            }
+        }
+        Message::EqReset => {
+            state.settings.eq_gains_db = [0.0; EQ_BAND_COUNT];
+            for (band, gain) in state.settings.eq_gains_db.iter().enumerate() {
+                state.player.set_eq_band(band, *gain);
+            }
+            state.save_settings();
+        }
+        Message::LimiterInc => {
+            state.settings.limiter_ceiling =
+                (state.settings.limiter_ceiling * 1.122).clamp(0.1, 1.0);
+            state
+                .player
+                .set_limiter_ceiling(state.settings.limiter_ceiling);
+            state.save_settings();
+        }
+        Message::LimiterDec => {
+            state.settings.limiter_ceiling =
+                (state.settings.limiter_ceiling / 1.122).clamp(0.1, 1.0);
+            state
+                .player
+                .set_limiter_ceiling(state.settings.limiter_ceiling);
+            state.save_settings();
+        }
+        Message::LoudnessToggle => {
+            state.settings.loudness_norm = !state.settings.loudness_norm;
+            state
+                .player
+                .set_loudness_enabled(state.settings.loudness_norm);
+            state.save_settings();
+        }
+        Message::LoudnessTargetInc => {
+            state.settings.loudness_target_lufs =
+                (state.settings.loudness_target_lufs + 1.0).clamp(TARGET_MIN_LUFS, TARGET_MAX_LUFS);
+            let target = state.settings.loudness_target_lufs;
+            state.save_settings();
+            match state.library.retarget_gains(target) {
+                Ok(n) => tracing::info!("Re-targeted {n} loudness gains to {target:.0} LUFS"),
+                Err(e) => tracing::warn!("Gain retarget failed: {e}"),
+            }
+            state.refresh_library();
+        }
+        Message::LoudnessTargetDec => {
+            state.settings.loudness_target_lufs =
+                (state.settings.loudness_target_lufs - 1.0).clamp(TARGET_MIN_LUFS, TARGET_MAX_LUFS);
+            let target = state.settings.loudness_target_lufs;
+            state.save_settings();
+            match state.library.retarget_gains(target) {
+                Ok(n) => tracing::info!("Re-targeted {n} loudness gains to {target:.0} LUFS"),
+                Err(e) => tracing::warn!("Gain retarget failed: {e}"),
+            }
+            state.refresh_library();
+        }
+        Message::StreamToggle => {
+            state.settings.stream.enabled = !state.settings.stream.enabled;
+            state.save_settings();
+            state
+                .player
+                .set_stream_config(state.settings.stream.clone());
+            if state.settings.stream.enabled {
+                if let Err(e) = state.player.stream_start() {
+                    tracing::warn!("Stream start failed: {e}");
+                }
+            } else {
+                state.player.stream_stop();
+            }
+        }
+        Message::StreamHost(v) => {
+            state.settings.stream.host = v;
+            state.save_settings();
+            state
+                .player
+                .set_stream_config(state.settings.stream.clone());
+        }
+        Message::StreamPort(v) => {
+            if let Ok(p) = v.trim().parse::<u16>() {
+                state.settings.stream.port = p;
+                state.save_settings();
+                state
+                    .player
+                    .set_stream_config(state.settings.stream.clone());
+            }
+        }
+        Message::StreamMount(v) => {
+            state.settings.stream.mount = v;
+            state.save_settings();
+            state
+                .player
+                .set_stream_config(state.settings.stream.clone());
+        }
+        Message::StreamPassword(v) => {
+            if v != "••••••" && !v.is_empty() {
+                state.settings.stream.password = v;
+                state.save_settings();
+                state
+                    .player
+                    .set_stream_config(state.settings.stream.clone());
+            }
+        }
+        Message::StreamBitrateInc => {
+            state.settings.stream.bitrate_kbps =
+                stream_bitrate_step(state.settings.stream.bitrate_kbps, true);
+            state.save_settings();
+            state
+                .player
+                .set_stream_config(state.settings.stream.clone());
+        }
+        Message::StreamBitrateDec => {
+            state.settings.stream.bitrate_kbps =
+                stream_bitrate_step(state.settings.stream.bitrate_kbps, false);
+            state.save_settings();
+            state
+                .player
+                .set_stream_config(state.settings.stream.clone());
+        }
+        Message::MicToggle => {
+            state.settings.mic.enabled = !state.settings.mic.enabled;
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+            if state.settings.mic.enabled {
+                if let Err(e) = state.player.mic_start() {
+                    tracing::warn!("Mic start failed: {e}");
+                }
+            } else {
+                state.player.mic_stop();
+            }
+        }
+        Message::MicRefreshDevices => {
+            state.input_devices = crabcore::audio::CpalEngine::list_input_devices();
+        }
+        Message::MicSelectDevice(name) => {
+            state.settings.mic.device = Some(name);
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+            state.mic_note = "Input switched live - no restart needed".into();
+        }
+        Message::MicLevelInc => {
+            state.settings.mic.level = (state.settings.mic.level + 0.05).clamp(0.0, 1.5);
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+        }
+        Message::MicLevelDec => {
+            state.settings.mic.level = (state.settings.mic.level - 0.05).clamp(0.0, 1.5);
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+        }
+        Message::MicDuckToggle => {
+            state.settings.mic.duck_enabled = !state.settings.mic.duck_enabled;
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+        }
+        Message::MicThresholdInc => {
+            state.settings.mic.duck_threshold_db =
+                (state.settings.mic.duck_threshold_db + 3.0).clamp(-60.0, 0.0);
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+        }
+        Message::MicThresholdDec => {
+            state.settings.mic.duck_threshold_db =
+                (state.settings.mic.duck_threshold_db - 3.0).clamp(-60.0, 0.0);
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+        }
+        Message::MicDepthInc => {
+            state.settings.mic.duck_depth_db =
+                (state.settings.mic.duck_depth_db + 3.0).clamp(0.0, 24.0);
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+        }
+        Message::MicDepthDec => {
+            state.settings.mic.duck_depth_db =
+                (state.settings.mic.duck_depth_db - 3.0).clamp(0.0, 24.0);
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+        }
+        Message::MicAttackInc => {
+            state.settings.mic.attack_ms =
+                duck_ms_step(&ATTACK_LADDER, state.settings.mic.attack_ms, true);
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+        }
+        Message::MicAttackDec => {
+            state.settings.mic.attack_ms =
+                duck_ms_step(&ATTACK_LADDER, state.settings.mic.attack_ms, false);
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+        }
+        Message::MicReleaseInc => {
+            state.settings.mic.release_ms =
+                duck_ms_step(&RELEASE_LADDER, state.settings.mic.release_ms, true);
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+        }
+        Message::MicReleaseDec => {
+            state.settings.mic.release_ms =
+                duck_ms_step(&RELEASE_LADDER, state.settings.mic.release_ms, false);
+            state.save_settings();
+            state.player.set_mic_config(state.settings.mic.clone());
+        }
+        // -- License ----------------------------------------------------------
+        Message::LicenseKeyInput(v) => {
+            state.license_key = v;
+        }
+        Message::ActivateLicense => {
+            let key = state.license_key.clone();
+            match state.license.activate(&key, "Station") {
+                Ok(info) => {
+                    tracing::info!("License activated: {}", info.key);
+                    state.license_status = state.license.status().label().to_string();
+                    state.license_error.clear();
+                }
+                Err(e) => {
+                    tracing::warn!("Invalid license '{}': {}", key, e);
+                    state.license_error = format!("Invalid key: {}", e);
+                }
+            }
+        }
+        Message::ClearLicense => {
+            state.license.clear().ok();
+            tracing::info!("License cleared");
+            state.license_status = state.license.status().label().to_string();
+            state.license_error.clear();
         }
     }
-    // Auto-start the loudness scan for anything still pending (e.g. tracks
-    // imported in a previous session whose scan never finished) — background
-    // thread, so startup stays instant. Quiet when there is nothing to do.
-    {
-        let pending = state.borrow().library.count_missing_loudness().unwrap_or(0);
-        if pending > 0 {
-            tracing::info!("Auto-starting loudness scan ({pending} pending)");
-            let target = settings.borrow().loudness_target_lufs;
-            start_loudness_scan(&state, &ui, &scan_rx, &scan_progress, target, false);
-        }
-    }
-    ui.run()?;
+    Task::none()
+}
 
-    Ok(())
+// ---------------------------------------------------------------------------
+// View
+// ---------------------------------------------------------------------------
+
+fn cart_hotkey(key: iced::keyboard::Key, _: iced::keyboard::Modifiers) -> Option<Message> {
+    use iced::keyboard::Key;
+    match key {
+        Key::Character(c) => match c.as_str() {
+            "1" => Some(Message::CartHotkey(0)),
+            "2" => Some(Message::CartHotkey(1)),
+            "3" => Some(Message::CartHotkey(2)),
+            "4" => Some(Message::CartHotkey(3)),
+            "5" => Some(Message::CartHotkey(4)),
+            "6" => Some(Message::CartHotkey(5)),
+            "7" => Some(Message::CartHotkey(6)),
+            "8" => Some(Message::CartHotkey(7)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn subscription(_: &App) -> Subscription<Message> {
+    Subscription::batch(vec![
+        iced::time::every(Duration::from_millis(200)).map(|_| Message::Tick),
+        iced::keyboard::on_key_press(cart_hotkey),
+    ])
+}
+
+fn view(state: &App) -> Element<'_, Message> {
+    let nav = {
+        let mut r = row![].spacing(6).padding(8);
+        for s in [
+            Screen::Home,
+            Screen::Playout,
+            Screen::Media,
+            Screen::Scheduler,
+            Screen::Carts,
+            Screen::Reports,
+            Screen::Ads,
+            Screen::Settings,
+        ] {
+            let label = if s == state.screen {
+                format!("[{}]", s.label())
+            } else {
+                s.label().to_string()
+            };
+            r = r.push(button(text(label).size(13)).on_press(Message::Navigate(s)));
+        }
+        r.push(iced::widget::horizontal_space())
+            .push(text(format!("{} | {}", state.station_name, state.audio_engine)).size(12))
+    };
+
+    let body: Element<'_, Message> = match state.screen {
+        Screen::Home => view_home(state),
+        Screen::Playout => view_playout(state),
+        Screen::Media => view_library_page(state),
+        Screen::Scheduler => view_scheduler(state),
+        Screen::Carts => view_carts(state),
+        Screen::Reports => view_reports(state),
+        Screen::Ads => view_ads(state),
+        Screen::Settings => view_settings(state),
+    };
+
+    column![nav, body].into()
+}
+
+fn view_home(state: &App) -> Element<'_, Message> {
+    let status = if state.is_playing {
+        format!("ON AIR: {} - {}", state.now_title, state.now_artist)
+    } else {
+        "Off air".to_string()
+    };
+    let stats = row![
+        container(column![
+            text(format!("{}", state.track_count)).size(22),
+            text("Tracks").size(11),
+        ])
+        .padding(12)
+        .width(Length::Fill),
+        container(column![
+            text(format!("{}", state.playlist_count)).size(22),
+            text("Playlists").size(11),
+        ])
+        .padding(12)
+        .width(Length::Fill),
+        container(column![
+            text(format!("{}", state.upcoming_count)).size(22),
+            text("Scheduled").size(11),
+        ])
+        .padding(12)
+        .width(Length::Fill),
+    ]
+    .spacing(12);
+    let actions = row![
+        button(text("Open Playout").size(14)).on_press(Message::Navigate(Screen::Playout)),
+        button(text("Media Manager").size(14)).on_press(Message::Navigate(Screen::Media)),
+        button(text("Scheduler").size(14)).on_press(Message::Navigate(Screen::Scheduler)),
+        button(text("Cart Wall").size(14)).on_press(Message::Navigate(Screen::Carts)),
+    ]
+    .spacing(12);
+    scrollable(
+        column![
+            text(format!("{} CrabBoss FM", state.station_name)).size(20),
+            text(status).size(12),
+            stats,
+            text("Quick Actions").size(14),
+            actions,
+            text(format!(
+                "Engine: {} | Device: {}",
+                state.audio_engine,
+                state.player.device_name()
+            ))
+            .size(11),
+            text(format!("License: {}", state.license_status)).size(11),
+        ]
+        .spacing(12)
+        .padding(16),
+    )
+    .into()
+}
+
+fn player_progress(state: &App) -> (String, String, f32) {
+    let pos = state.player.position_secs();
+    let (dur, has_dur) = match state.player.current_track() {
+        Some(t) => (
+            t.duration_secs.unwrap_or(0.0),
+            t.duration_secs.unwrap_or(0.0) > 0.0,
+        ),
+        None => (0.0, false),
+    };
+    let cur = fmt_dur(Some(pos));
+    let tot = if has_dur {
+        fmt_dur(Some(dur))
+    } else {
+        "00:00".into()
+    };
+    let frac = if has_dur {
+        (pos / dur).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
+    (cur, tot, frac)
+}
+
+fn view_player_panel(state: &App) -> Element<'_, Message> {
+    let (cur, tot, frac) = player_progress(state);
+    let play_label = if state.is_playing { "Pause" } else { "Play" };
+    let play_msg = if state.is_playing {
+        Message::Pause
+    } else {
+        Message::Play
+    };
+    column![
+        text(&state.now_title).size(14),
+        text(&state.now_artist).size(12),
+        text(format!("{} / {}", cur, tot)).size(12),
+        progress_bar(0.0..=1.0, frac),
+        row![
+            button(text("Prev").size(13)).on_press(Message::Prev),
+            button(text(play_label).size(13)).on_press(play_msg),
+            button(text("Stop").size(13)).on_press(Message::Stop),
+            button(text("Next").size(13)).on_press(Message::Next),
+        ]
+        .spacing(8),
+        row![
+            text(format!("Vol {:.0}%", state.volume * 100.0)).size(12),
+            slider(0.0..=1.0, state.volume, Message::VolumeChanged).width(Length::Fill),
+        ]
+        .spacing(8),
+        row![
+            checkbox("Auto-DJ", state.autodj).on_toggle(Message::AutodjToggled),
+            text(if state.up_next.is_empty() {
+                String::new()
+            } else {
+                format!("Up next: {}", state.up_next)
+            })
+            .size(11),
+        ]
+        .spacing(8),
+    ]
+    .spacing(8)
+    .padding(12)
+    .into()
+}
+
+fn view_library_panel(state: &App) -> Element<'_, Message> {
+    let shown = state.lib_tracks.len();
+    let count_label = if shown == state.lib_total {
+        format!(
+            "{} track{}",
+            state.lib_total,
+            if state.lib_total == 1 { "" } else { "s" }
+        )
+    } else {
+        format!("{shown} of {} tracks", state.lib_total)
+    };
+    let header = row![
+        text(format!("Library - {}", count_label)).size(14),
+        iced::widget::horizontal_space(),
+        button(text("Health").size(12)).on_press(Message::HealthCheck),
+        button(text("Loudness").size(12)).on_press(Message::LoudnessScan),
+        button(text("+ Import").size(12)).on_press(Message::ImportFiles),
+    ]
+    .spacing(6);
+
+    let search = text_input("Search tracks...", &state.lib_search)
+        .on_input(Message::LibrarySearchChanged)
+        .padding(8);
+
+    let mut list = column![].spacing(2);
+    if state.lib_tracks.is_empty() {
+        list = list.push(text("Import audio files to get started").size(12));
+    } else {
+        for (i, t) in state.lib_tracks.iter().take(500).enumerate() {
+            let missing = !PathBuf::from(&t.file_path).is_file();
+            let base = t.title.clone().unwrap_or_else(|| t.file_name.clone());
+            let title = if missing {
+                format!("! {}", base)
+            } else if Some(i) == state.lib_selected {
+                format!("> {}", base)
+            } else {
+                base
+            };
+            let artist = t.artist.clone().unwrap_or_default();
+            let dur = fmt_dur(t.duration_secs);
+            let gain = t
+                .loudness_gain_db
+                .map(|g| format!("{g:+.1} dB"))
+                .unwrap_or_default();
+            list = list.push(
+                row![
+                    button(text("Play").size(11)).on_press(Message::LibraryTrackPlay(i)),
+                    button(
+                        text(format!(
+                            "{} | {} | {} | {} | {}",
+                            kind_label(t.kind),
+                            title,
+                            artist,
+                            dur,
+                            gain
+                        ))
+                        .size(12)
+                    )
+                    .on_press(Message::LibraryTrackSelected(i)),
+                ]
+                .spacing(6),
+            );
+        }
+        if shown > 500 {
+            list = list.push(text(format!("... showing 500 of {shown} (refine search)")).size(11));
+        }
+    }
+
+    column![
+        header,
+        search,
+        text(&state.lib_status).size(11),
+        scrollable(list).height(Length::Fill),
+    ]
+    .spacing(6)
+    .padding(8)
+    .into()
+}
+
+fn view_library_page(state: &App) -> Element<'_, Message> {
+    view_library_panel(state)
+}
+
+fn view_playout(state: &App) -> Element<'_, Message> {
+    row![
+        container(view_player_panel(state)).width(Length::Fixed(300.0)),
+        container(view_library_panel(state)).width(Length::Fill),
+    ]
+    .spacing(8)
+    .padding(8)
+    .into()
+}
+
+fn view_scheduler(state: &App) -> Element<'_, Message> {
+    let mut list = column![].spacing(4);
+    for (i, e) in state.sched_events.iter().enumerate() {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let badge = match e.expiry_status(&today) {
+            crabcore::scheduler::ExpiryStatus::Expired => "expired",
+            crabcore::scheduler::ExpiryStatus::ExpiresToday => "last day",
+            crabcore::scheduler::ExpiryStatus::Active(n) if n <= 7 => "expiring",
+            _ => "",
+        };
+        list = list.push(
+            column![
+                text(format!(
+                    "{} | {} | {} -> {} | {} {} {}",
+                    e.name,
+                    e.start_time,
+                    e.action_type,
+                    e.target,
+                    e.days,
+                    if e.enabled { "[on]" } else { "[off]" },
+                    badge
+                ))
+                .size(12),
+                row![
+                    button(text(if e.enabled { "Disable" } else { "Enable" }).size(11))
+                        .on_press(Message::SchedulerToggleEvent(i)),
+                    button(text("Run").size(11)).on_press(Message::SchedulerRunEvent(i)),
+                    button(text("Edit").size(11)).on_press(Message::SchedulerEdit(i)),
+                    button(text("Del").size(11)).on_press(Message::SchedulerDeleteEvent(i)),
+                ]
+                .spacing(6),
+            ]
+            .spacing(2),
+        );
+    }
+    let mut col = column![row![
+        text("Scheduler").size(16),
+        iced::widget::horizontal_space(),
+        checkbox("Enabled", state.sched_enabled).on_toggle(Message::SchedulerMasterToggled),
+        button(text("+ New").size(12)).on_press(Message::SchedulerNew),
+    ]
+    .spacing(8),]
+    .spacing(8)
+    .padding(12);
+    if !state.sched_warnings.is_empty() {
+        col = col.push(text(state.sched_warnings.join(" | ")).size(11));
+    }
+    col = col.push(scrollable(list).height(Length::Fill));
+    if state.sched_editor_open {
+        let day_names: [Element<'_, Message>; 7] = [
+            checkbox("Mon", state.se_days[0])
+                .on_toggle(|b| Message::SchedDayChanged(0, b))
+                .into(),
+            checkbox("Tue", state.se_days[1])
+                .on_toggle(|b| Message::SchedDayChanged(1, b))
+                .into(),
+            checkbox("Wed", state.se_days[2])
+                .on_toggle(|b| Message::SchedDayChanged(2, b))
+                .into(),
+            checkbox("Thu", state.se_days[3])
+                .on_toggle(|b| Message::SchedDayChanged(3, b))
+                .into(),
+            checkbox("Fri", state.se_days[4])
+                .on_toggle(|b| Message::SchedDayChanged(4, b))
+                .into(),
+            checkbox("Sat", state.se_days[5])
+                .on_toggle(|b| Message::SchedDayChanged(5, b))
+                .into(),
+            checkbox("Sun", state.se_days[6])
+                .on_toggle(|b| Message::SchedDayChanged(6, b))
+                .into(),
+        ];
+        let mut day_row = row![].spacing(8);
+        for d in day_names {
+            day_row = day_row.push(d);
+        }
+        col = col.push(
+            column![
+                text(if state.sched_edit_idx.is_none() {
+                    "New event"
+                } else {
+                    "Edit event"
+                })
+                .size(14),
+                text_input("Name", &state.se_name)
+                    .on_input(Message::SchedName)
+                    .padding(6),
+                row![
+                    text_input("HH:MM", &state.se_time)
+                        .on_input(Message::SchedTime)
+                        .padding(6),
+                    button(text("<").size(12)).on_press(Message::SchedActionPrev),
+                    text(format!("action: {}", action_label(state.se_action))).size(12),
+                    button(text(">").size(12)).on_press(Message::SchedActionNext),
+                ]
+                .spacing(6),
+                text_input("Target (file / playlist / preset)", &state.se_target)
+                    .on_input(Message::SchedTarget)
+                    .padding(6),
+                text_input(
+                    "Valid until YYYY-MM-DD (empty = forever)",
+                    &state.se_expires
+                )
+                .on_input(Message::SchedExpires)
+                .padding(6),
+                day_row,
+                text(&state.sched_error).size(11),
+                row![
+                    button(text("Save").size(12)).on_press(Message::SchedulerSave),
+                    button(text("Cancel").size(12)).on_press(Message::SchedulerEditorClose),
+                ]
+                .spacing(8),
+            ]
+            .spacing(6)
+            .padding(8),
+        );
+    }
+    col.into()
+}
+
+fn view_carts(state: &App) -> Element<'_, Message> {
+    let kinds: HashMap<&str, TrackKind> = state
+        .lib_tracks
+        .iter()
+        .map(|t| (t.file_path.as_str(), t.kind))
+        .collect();
+    let live_path = state
+        .player
+        .current_track()
+        .map(|t| t.path.to_string_lossy().to_string());
+    let mut grid = column![].spacing(6);
+    for (i, c) in state.cart_list.iter().enumerate() {
+        let kind = kinds
+            .get(c.file_path.as_str())
+            .map(|k| kind_label(*k))
+            .unwrap_or("Music");
+        let exists = PathBuf::from(&c.file_path).is_file();
+        let playing = live_path.as_deref() == Some(c.file_path.as_str()) && state.is_playing;
+        let (pos, frac) = if playing {
+            let p = state.player.position_secs();
+            let d = state
+                .player
+                .current_track()
+                .and_then(|t| t.duration_secs)
+                .unwrap_or(1.0)
+                .max(0.01);
+            (p, (p / d).clamp(0.0, 1.0) as f32)
+        } else {
+            (0.0, 0.0)
+        };
+        let _ = pos;
+        grid = grid.push(
+            column![
+                row![
+                    text(format!(
+                        "Pad {}: {} [{}] {}{}",
+                        i + 1,
+                        c.label,
+                        kind,
+                        short_name(&c.file_path),
+                        if exists { "" } else { " (missing)" }
+                    ))
+                    .size(12)
+                    .width(Length::Fill),
+                    button(text("Play").size(11)).on_press(Message::CartPlay(i)),
+                    button(text("Del").size(11)).on_press(Message::CartDelete(i)),
+                ]
+                .spacing(6),
+                progress_bar(0.0..=1.0, frac),
+                row![button(text("Place here").size(11)).on_press(Message::CartPlace(i)),]
+                    .spacing(6),
+            ]
+            .spacing(2),
+        );
+    }
+    column![
+        row![
+            text("Cart Wall").size(16),
+            iced::widget::horizontal_space(),
+            button(text(if state.cart_assign {
+                "Assign: ON"
+            } else {
+                "Assign"
+            }))
+            .on_press(Message::CartToggleAssign),
+            button(text("+ Add").size(12)).on_press(Message::CartAdd),
+        ]
+        .spacing(8),
+        text(&state.cart_status).size(11),
+        text("Tip: select a track in Media, enable Assign, then Place on a pad.").size(11),
+        scrollable(grid).height(Length::Fill),
+    ]
+    .spacing(8)
+    .padding(12)
+    .into()
+}
+
+fn view_reports(state: &App) -> Element<'_, Message> {
+    const RANGES: [&str; 4] = ["Today", "Last 7 days", "Last 30 days", "All time"];
+    let mut range_row = row![text("Range:").size(12)].spacing(6);
+    for (i, name) in RANGES.iter().enumerate() {
+        let label = if i == state.report_range {
+            format!("[{}]", name)
+        } else {
+            name.to_string()
+        };
+        range_row =
+            range_row.push(button(text(label).size(12)).on_press(Message::ReportRangeChanged(i)));
+    }
+    range_row = range_row.push(iced::widget::horizontal_space());
+    range_row = range_row.push(button(text("Export CSV").size(12)).on_press(Message::ReportExport));
+    let mut list = column![].spacing(2);
+    for e in &state.report_entries {
+        list = list.push(
+            text(format!(
+                "{} | {} - {} [{}]",
+                e.played_at.format("%d/%m %H:%M"),
+                e.title,
+                e.artist,
+                e.kind.as_str()
+            ))
+            .size(12),
+        );
+    }
+    column![
+        text("Reports").size(16),
+        range_row,
+        text(&state.report_summary).size(11),
+        scrollable(list).height(Length::Fill),
+    ]
+    .spacing(8)
+    .padding(12)
+    .into()
+}
+
+fn view_ads(state: &App) -> Element<'_, Message> {
+    let mut list = column![].spacing(4);
+    for (i, b) in state.ad_blocks.iter().enumerate() {
+        list = list.push(
+            column![
+                text(format!(
+                    "{} | {} | {} -> {} | {} {}",
+                    b.name,
+                    b.play_time,
+                    b.start_date,
+                    b.end_date,
+                    short_name(&b.spot_path),
+                    if b.enabled { "[on]" } else { "[off]" }
+                ))
+                .size(12),
+                text(format!("days: {}", b.days)).size(11),
+                row![
+                    button(text(if b.enabled { "Disable" } else { "Enable" }).size(11))
+                        .on_press(Message::AdsToggle(i)),
+                    button(text("Run").size(11)).on_press(Message::AdsRun(i)),
+                    button(text("Edit").size(11)).on_press(Message::AdsEdit(i)),
+                    button(text("Del").size(11)).on_press(Message::AdsDelete(i)),
+                ]
+                .spacing(6),
+            ]
+            .spacing(2),
+        );
+    }
+    let mut col = column![row![
+        text("Ads").size(16),
+        iced::widget::horizontal_space(),
+        button(text("+ New block").size(12)).on_press(Message::AdsNew),
+    ]
+    .spacing(8),]
+    .spacing(8)
+    .padding(12);
+    col = col.push(scrollable(list).height(Length::Shrink));
+    if state.ads_editor_open {
+        let mut day_row = row![].spacing(8);
+        day_row = day_row
+            .push(checkbox("Mon", state.ab_days[0]).on_toggle(|b| Message::AdDayChanged(0, b)));
+        day_row = day_row
+            .push(checkbox("Tue", state.ab_days[1]).on_toggle(|b| Message::AdDayChanged(1, b)));
+        day_row = day_row
+            .push(checkbox("Wed", state.ab_days[2]).on_toggle(|b| Message::AdDayChanged(2, b)));
+        day_row = day_row
+            .push(checkbox("Thu", state.ab_days[3]).on_toggle(|b| Message::AdDayChanged(3, b)));
+        day_row = day_row
+            .push(checkbox("Fri", state.ab_days[4]).on_toggle(|b| Message::AdDayChanged(4, b)));
+        day_row = day_row
+            .push(checkbox("Sat", state.ab_days[5]).on_toggle(|b| Message::AdDayChanged(5, b)));
+        day_row = day_row
+            .push(checkbox("Sun", state.ab_days[6]).on_toggle(|b| Message::AdDayChanged(6, b)));
+        col = col.push(
+            column![
+                text("Ad block").size(14),
+                text_input("Name", &state.ab_name)
+                    .on_input(Message::AdName)
+                    .padding(6),
+                text_input("Spot path (audio file)", &state.ab_spot)
+                    .on_input(Message::AdSpot)
+                    .padding(6),
+                text_input("Intro path (optional)", &state.ab_intro)
+                    .on_input(Message::AdIntro)
+                    .padding(6),
+                text_input("Outro path (optional)", &state.ab_outro)
+                    .on_input(Message::AdOutro)
+                    .padding(6),
+                row![
+                    text_input("Start YYYY-MM-DD", &state.ab_start)
+                        .on_input(Message::AdStart)
+                        .padding(6),
+                    text_input("End YYYY-MM-DD", &state.ab_end)
+                        .on_input(Message::AdEnd)
+                        .padding(6),
+                    text_input("HH:MM", &state.ab_time)
+                        .on_input(Message::AdTime)
+                        .padding(6),
+                ]
+                .spacing(6),
+                day_row,
+                text(&state.ads_error).size(11),
+                row![
+                    button(text("Save").size(12)).on_press(Message::AdsSave),
+                    button(text("Cancel").size(12)).on_press(Message::AdsEditorClose),
+                ]
+                .spacing(8),
+            ]
+            .spacing(6),
+        );
+    }
+    col.into()
+}
+
+fn stepper(label: String, dec: Message, inc: Message) -> Element<'static, Message> {
+    row![
+        button(text("-").size(12)).on_press(dec),
+        text(label).size(12),
+        button(text("+").size(12)).on_press(inc),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn view_settings(state: &App) -> Element<'_, Message> {
+    let s = &state.settings;
+    let stream_cfg = state.player.stream_config();
+    let stream_state = state.player.stream_state();
+    let stream_stats = state.player.stream_stats();
+    let mic_cfg = state.player.mic_config();
+    let mic_state = state.player.mic_state();
+
+    let mut devices = column![text("Output devices:").size(12)].spacing(4);
+    for d in &state.output_devices {
+        let label = if *d == state.sel_device {
+            format!("[{}]", d)
+        } else {
+            d.clone()
+        };
+        let name = d.clone();
+        devices = devices
+            .push(button(text(label).size(12)).on_press(Message::SettingsSelectDevice(name)));
+    }
+
+    let mut inputs = column![text("Input devices:").size(12)].spacing(4);
+    let cur_mic = mic_cfg.device.clone().unwrap_or_default();
+    for d in &state.input_devices {
+        let label = if *d == cur_mic {
+            format!("[{}]", d)
+        } else {
+            d.clone()
+        };
+        let name = d.clone();
+        inputs = inputs.push(button(text(label).size(12)).on_press(Message::MicSelectDevice(name)));
+    }
+
+    let mut eq = column![text("12-band EQ:").size(12)].spacing(2);
+    for band in 0..EQ_BAND_COUNT {
+        eq = eq.push(
+            row![
+                text(format!(
+                    "{}: {:+.0} dB",
+                    eq_band_label(band),
+                    s.eq_gains_db[band]
+                ))
+                .size(12)
+                .width(Length::Fixed(160.0)),
+                button(text("-").size(11)).on_press(Message::EqDec(band)),
+                button(text("+").size(11)).on_press(Message::EqInc(band)),
+            ]
+            .spacing(6),
+        );
+    }
+
+    scrollable(
+        column![
+            text("Settings").size(16),
+            text(format!("License: {}", state.license_status)).size(12),
+            text(&state.license_error).size(11),
+            row![
+                text_input("License key CB-XXXX-XXXX-XXXX", &state.license_key)
+                    .on_input(Message::LicenseKeyInput)
+                    .padding(6),
+                button(text("Activate").size(12)).on_press(Message::ActivateLicense),
+                button(text("Clear").size(12)).on_press(Message::ClearLicense),
+            ]
+            .spacing(6),
+            text(format!(
+                "Engine: {} | Device: {}",
+                state.audio_engine,
+                state.player.device_name()
+            ))
+            .size(12),
+            devices,
+            text(&state.device_note).size(11),
+            button(text("Refresh devices").size(12)).on_press(Message::SettingsRefreshDevices),
+            stepper(
+                format!("Crossfade: {:.1} s", s.crossfade_secs),
+                Message::XfadeDec,
+                Message::XfadeInc
+            ),
+            stepper(
+                format!("Silence alarm: {:.0} s", s.silence_threshold_secs),
+                Message::SilenceDec,
+                Message::SilenceInc
+            ),
+            row![
+                checkbox("EQ enabled", s.eq_enabled).on_toggle(|_| Message::EqToggle),
+                button(text("Reset EQ").size(11)).on_press(Message::EqReset),
+            ]
+            .spacing(8),
+            eq,
+            stepper(
+                format!("Limiter: {:.1} dBFS", lin_to_dbfs(s.limiter_ceiling)),
+                Message::LimiterDec,
+                Message::LimiterInc
+            ),
+            row![checkbox("Loudness normalize", s.loudness_norm)
+                .on_toggle(|_| Message::LoudnessToggle),]
+            .spacing(8),
+            stepper(
+                format!("Target: {:.0} LUFS", s.loudness_target_lufs),
+                Message::LoudnessTargetDec,
+                Message::LoudnessTargetInc
+            ),
+            text("Streaming (Icecast)").size(14),
+            row![
+                checkbox("Stream enabled", stream_cfg.enabled).on_toggle(|_| Message::StreamToggle),
+                text(stream_state.label()).size(12),
+                text(if stream_state.is_live() {
+                    format!(
+                        "{} kbps - {:.1} MB - {}s",
+                        stream_cfg.bitrate_kbps,
+                        stream_stats.bytes_sent as f64 / 1_048_576.0,
+                        stream_stats.stream_secs
+                    )
+                } else {
+                    String::new()
+                })
+                .size(11),
+            ]
+            .spacing(8),
+            text_input("Host", &stream_cfg.host)
+                .on_input(Message::StreamHost)
+                .padding(6),
+            text_input("Port", &stream_cfg.port.to_string())
+                .on_input(Message::StreamPort)
+                .padding(6),
+            text_input("Mount", &stream_cfg.mount)
+                .on_input(Message::StreamMount)
+                .padding(6),
+            text_input(
+                "Password",
+                if stream_cfg.password.is_empty() {
+                    ""
+                } else {
+                    "••••••"
+                }
+            )
+            .on_input(Message::StreamPassword)
+            .padding(6),
+            stepper(
+                format!("Bitrate: {} kbps", stream_cfg.bitrate_kbps),
+                Message::StreamBitrateDec,
+                Message::StreamBitrateInc
+            ),
+            text("Microphone / line-in").size(14),
+            row![
+                checkbox("Mic enabled", mic_cfg.enabled).on_toggle(|_| Message::MicToggle),
+                text(mic_state_label(&mic_state)).size(12),
+                text(if mic_state_is_live(&mic_state) {
+                    format!(
+                        "{:.1} dBFS{}",
+                        state.player.mic_level_db(),
+                        if state.player.mic_ducking() {
+                            " - ducking"
+                        } else {
+                            ""
+                        }
+                    )
+                } else {
+                    String::new()
+                })
+                .size(11),
+            ]
+            .spacing(8),
+            inputs,
+            text(&state.mic_note).size(11),
+            button(text("Refresh inputs").size(12)).on_press(Message::MicRefreshDevices),
+            stepper(
+                format!("Mic level: {:.0}%", mic_cfg.level * 100.0),
+                Message::MicLevelDec,
+                Message::MicLevelInc
+            ),
+            row![checkbox("Ducking", mic_cfg.duck_enabled).on_toggle(|_| Message::MicDuckToggle),]
+                .spacing(8),
+            stepper(
+                format!("Threshold: {:+.0} dB", mic_cfg.duck_threshold_db),
+                Message::MicThresholdDec,
+                Message::MicThresholdInc
+            ),
+            stepper(
+                format!("Depth: -{:.0} dB", mic_cfg.duck_depth_db),
+                Message::MicDepthDec,
+                Message::MicDepthInc
+            ),
+            stepper(
+                format!("Attack: {:.0} ms", mic_cfg.attack_ms),
+                Message::MicAttackDec,
+                Message::MicAttackInc
+            ),
+            stepper(
+                format!("Release: {:.0} ms", mic_cfg.release_ms),
+                Message::MicReleaseDec,
+                Message::MicReleaseInc
+            ),
+        ]
+        .spacing(10)
+        .padding(12),
+    )
+    .into()
+}
+
+fn mic_state_label(st: &crabcore::audio::MicState) -> String {
+    format!("{:?}", st)
+}
+
+fn mic_state_is_live(st: &crabcore::audio::MicState) -> bool {
+    matches!(st, crabcore::audio::MicState::Live)
+}
+
+// ---------------------------------------------------------------------------
+// Entry
+// ---------------------------------------------------------------------------
+
+fn main() -> iced::Result {
+    iced::application("CrabBoss - Radio Automation", update, view)
+        .subscription(subscription)
+        .theme(|_| Theme::Dark)
+        .run_with(boot)
 }

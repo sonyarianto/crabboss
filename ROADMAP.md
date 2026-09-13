@@ -115,7 +115,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       announces + `Buffering`); live handoffs keep the old deck sounding
       until the new deck lands as a crossfade, superseded/stopped loads are
       discarded, pause-mid-load sticks for an explicit resume
-- [ ] Wire `library.search()` results into the Slint model (currently a no-op) — ✅ done (live list + search filter + tap-to-play)
+- [ ] Wire `library.search()` results into the Iced list (currently a no-op) — ✅ done (live list + search filter + tap-to-play)
 
 ### 1.2 Playlist Generator (real scope, not a checkbox)
 - [x] No-repeat rules: artist, title, album — configurable lookback window
@@ -135,9 +135,9 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       Add/Edit dialog; empty = runs forever
 - [x] "Insert after current track" (`queue` action + `Engine::queue`:
       blends at the boundary with end-of-track auto-fade)
-- [x] Cart hotkeys (keys 1–8 via FocusScope), per-pad progress bar +
-      playing highlight, and assign flow (🎯 Assign → arm a library track →
-      tap a pad; Slint 1.11 has no cross-widget drag events) with pad-place
+- [x] Cart hotkeys (keys 1–8), per-pad progress bar +
+      playing highlight, and assign flow (Assign → arm a library track →
+      tap a pad) with pad-place
       API (`assign_at` replace-in-slot, fixed 8-pad wall)
 
 ### 1.4 Voice Tracking & Teasers
@@ -201,7 +201,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 ## 2. Beyond Parity — Where CrabBoss Wins
 
 RadioBOSS weaknesses: Windows-only, legacy Delphi UI, no ready remote UI,
-closed codebase. Our stack (Rust + Slint, cross-platform, headless-ready)
+closed codebase. Our stack (Rust + Iced, cross-platform, headless-ready)
 beats it on these axes instead of just chasing feature count:
 
 - [ ] **Headless/server mode as first-class target** — `crabboss --headless

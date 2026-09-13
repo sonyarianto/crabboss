@@ -2,15 +2,12 @@
 name = "crabui"
 version = "0.1.0"
 edition = "2021"
-description = "CrabBoss desktop UI built with Slint"
+description = "CrabBoss desktop UI built with Iced"
 
 [dependencies]
 crabcore = { path = "../core" }
 chrono = { workspace = true }
 rfd = "0.15"
-slint = "1.11"
+iced = { version = "0.13", features = ["tokio"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-[build-dependencies]
-slint-build = "1.11"

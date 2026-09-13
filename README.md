@@ -1,6 +1,6 @@
 # 🦀 CrabBoss
 
-**Radio Automation Software** — built with Rust + Slint
+**Radio Automation Software** — built with Rust + Iced
 
 A professional radio station management application inspired by RadioBoss, featuring audio playback, library management, playlist automation, and streaming capabilities.
 
@@ -16,7 +16,7 @@ A professional radio station management application inspired by RadioBoss, featu
 - ✅ **Streaming Output** — Icecast source client (MP3) with auto-reconnect and Settings UI
 - ✅ **Microphone/Line-In** — Live input with voice-activated ducking and bed mix
 - ✅ **Reports** — Play logs with ranged reports + CSV export
-- ✅ **Dark Theme UI** — Modern dark radio-station theme via Slint
+- ✅ **Dark Theme UI** — Modern dark radio-station theme via Iced
 
 ### Coming Soon
 
@@ -30,7 +30,7 @@ A professional radio station management application inspired by RadioBoss, featu
 
 | Layer | Technology |
 |-------|-----------|
-| UI Framework | [Slint](https://slint.dev/) (v1.17) |
+| UI Framework | [Iced](https://iced.rs/) (v0.13, Elm architecture) |
 | Audio Playback | [cpal](https://github.com/RustAudio/cpal) |
 | Audio Decoding | [symphonia](https://crates.io/crates/symphonia) |
 | Metadata | [lofty](https://crates.io/crates/lofty) |
@@ -49,14 +49,8 @@ crabboss/
 │   │       ├── audio/  # Player, DSP, streaming
 │   │       ├── library/ # SQLite library & metadata
 │   │       └── playlist/ # Playlist management
-│   └── ui/             # crabui — Slint desktop application
-│       ├── ui/         # .slint UI files
-│       │   ├── main.slint
-│       │   ├── player.slint
-│       │   ├── library.slint
-│   │       │   ├── playlist.slint
-│       │       │   └── common.slint
-│       └── src/main.rs
+│   └── ui/             # crabui — Iced desktop application
+│       └── src/main.rs   # Elm app: 8 screens + tick subscriptions
 └── README.md
 ```
 
@@ -107,4 +101,4 @@ This project is licensed under the GNU General Public License v3.0 — see the L
 
 ---
 
-🦀 Built with Rust + Slint
+🦀 Built with Rust + Iced
