@@ -8,10 +8,8 @@ description = "CrabBoss desktop UI built with Iced"
 crabcore = { path = "../core" }
 chrono = { workspace = true }
 rfd = "0.15"
-# 0.14 defaults pull the wgpu (DirectX) renderer, whose Windows dependency
-# set (wgpu-hal vs gpu-allocator) does not compile as a unit — see branch
-# notes. tiny-skia (CPU) renders this mostly-static playout UI with ease
-# and needs no GPU/COM stack at all.
-iced = { version = "0.14", default-features = false, features = ["tokio", "tiny-skia"] }
+# SPIKE: retry the default wgpu renderer now that cpal 0.18 evicted
+# windows 0.54 from the graph (gpu-allocator should unify at 0.58).
+iced = { version = "0.14", features = ["tokio"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
