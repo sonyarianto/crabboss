@@ -215,6 +215,18 @@ export component SettingsScreen inherits Rectangle {
     in-out property <string> stream-mount: "/stream";
     in-out property <string> stream-password: "";
     in-out property <string> stream-bitrate: "128 kbps";
+    in-out property <bool> mic-enabled: false;
+    in-out property <string> mic-status: "⏸ Off";
+    in-out property <string> mic-meter: "";
+    in-out property <[string]> mic-devices;
+    in-out property <string> mic-device: "";
+    in-out property <string> mic-device-note: "";
+    in-out property <string> mic-level: "100%";
+    in-out property <bool> mic-duck-on: true;
+    in-out property <string> mic-threshold: "-30 dB";
+    in-out property <string> mic-depth: "-12 dB";
+    in-out property <string> mic-attack: "10 ms";
+    in-out property <string> mic-release: "400 ms";
 
     callback stream-toggle;
     callback stream-host-committed(string);
@@ -223,6 +235,20 @@ export component SettingsScreen inherits Rectangle {
     callback stream-password-committed(string);
     callback stream-bitrate-inc;
     callback stream-bitrate-dec;
+    callback mic-toggle;
+    callback mic-select-device(string);
+    callback mic-refresh-devices;
+    callback mic-level-inc;
+    callback mic-level-dec;
+    callback mic-duck-toggle;
+    callback mic-threshold-inc;
+    callback mic-threshold-dec;
+    callback mic-depth-inc;
+    callback mic-depth-dec;
+    callback mic-attack-inc;
+    callback mic-attack-dec;
+    callback mic-release-inc;
+    callback mic-release-dec;
     callback activate-license(string);
     callback clear-license;
     callback select-device(string);
@@ -774,6 +800,203 @@ export component SettingsScreen inherits Rectangle {
                         text: "Server: host / port / mount (press Enter to save each field) — source user is fixed to 'source'";
                         color: Theme.text-dim;
                         font-size: 10px;
+                    }
+                }
+            }
+
+            // --- Microphone / line-in (cpal engine) ---
+            Rectangle {
+                background: Theme.bg-secondary;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: "🎙 Microphone";
+                            color: Theme.text-primary;
+                            font-size: 15px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Rectangle {
+                            width: 90px;
+                            height: 26px;
+                            border-radius: 6px;
+                            background: root.mic-enabled ? Theme.accent : Theme.bg-panel;
+                            TouchArea { clicked => { root.mic-toggle(); } }
+                            Text {
+                                text: root.mic-enabled ? "MIC ON" : "MIC OFF";
+                                color: root.mic-enabled ? white : Theme.text-dim;
+                                font-size: 11px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: root.mic-status;
+                            color: root.mic-status == "🎙 Live" ? #4caf50 : Theme.text-secondary;
+                            font-size: 12px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.mic-meter;
+                            color: Theme.text-dim;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: "Voice sums into the program mix (and the stream) ahead of the limiter, with the music bed ducked while you talk. Works over a silent bed for talk breaks.";
+                        color: Theme.text-dim;
+                        font-size: 10px;
+                        wrap: word-wrap;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: space-between;
+
+                        Text {
+                            text: "Input devices — tap to switch (live)";
+                            color: Theme.text-secondary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            width: 80px;
+                            height: 26px;
+                            border-radius: 6px;
+                            background: Theme.bg-panel;
+                            TouchArea { clicked => { root.mic-refresh-devices(); } }
+                            Text {
+                                text: "Refresh";
+                                color: Theme.accent;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        for d in root.mic-devices : Rectangle {
+                            height: 30px;
+                            border-radius: 6px;
+                            background: d == root.mic-device ? Theme.bg-panel : transparent;
+                            border-width: 1px;
+                            border-color: d == root.mic-device ? Theme.accent : transparent;
+                            TouchArea { clicked => { root.mic-select-device(d); } }
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 8px;
+                                Text {
+                                    text: d == root.mic-device ? "●" : "○";
+                                    color: d == root.mic-device ? Theme.accent : Theme.text-dim;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: d;
+                                    color: d == root.mic-device ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+
+                    if (root.mic-device-note != "") : Text {
+                        text: root.mic-device-note;
+                        color: Theme.warning;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
+
+                    Stepper {
+                        label: "Mic level";
+                        value: root.mic-level;
+                        hint: "Input gain into the mix + voice detector";
+                        inc => { root.mic-level-inc(); }
+                        dec => { root.mic-level-dec(); }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: "Duck music bed";
+                            color: Theme.text-secondary;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Rectangle {
+                            width: 90px;
+                            height: 26px;
+                            border-radius: 6px;
+                            background: root.mic-duck-on ? Theme.accent : Theme.bg-panel;
+                            TouchArea { clicked => { root.mic-duck-toggle(); } }
+                            Text {
+                                text: root.mic-duck-on ? "DUCK ON" : "DUCK OFF";
+                                color: root.mic-duck-on ? white : Theme.text-dim;
+                                font-size: 11px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Stepper {
+                        label: "Duck threshold";
+                        value: root.mic-threshold;
+                        hint: "Voice level that triggers the duck";
+                        inc => { root.mic-threshold-inc(); }
+                        dec => { root.mic-threshold-dec(); }
+                    }
+
+                    Stepper {
+                        label: "Duck depth";
+                        value: root.mic-depth;
+                        hint: "How far the bed drops while talking";
+                        inc => { root.mic-depth-inc(); }
+                        dec => { root.mic-depth-dec(); }
+                    }
+
+                    Stepper {
+                        label: "Duck attack";
+                        value: root.mic-attack;
+                        hint: "Bed fade-down time when voice starts";
+                        inc => { root.mic-attack-inc(); }
+                        dec => { root.mic-attack-dec(); }
+                    }
+
+                    Stepper {
+                        label: "Duck release";
+                        value: root.mic-release;
+                        hint: "Bed fade-up time after voice stops";
+                        inc => { root.mic-release-inc(); }
+                        dec => { root.mic-release-dec(); }
                     }
                 }
             }

@@ -55,7 +55,7 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
       (cpal, 8 s horizon), EOF restart, Next/Prev, persisted ON/OFF + Up-next
 - [x] Ad scheduler (dated blocks with intros/outros, chained breaks — see §1.3)
 - [x] Icecast/Shoutcast output (see §1.5)
-- [ ] Mic/line-in input with ducking (see §1.6)
+- [x] Mic/line-in input with ducking (see §1.6)
 - [x] Report generator (play logs → CSV + screen; XLS/PDF open — see §1.9)
 - [ ] File dialog (`rfd`), progress timer in UI (see §1.9) — `rfd` import done, progress timer still open
 - [x] Settings screen (device picker, live DSP prefs, license, streaming config — see §1.9)
@@ -75,7 +75,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
 | Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME, PUT + SOURCE fallback, reconnect, metadata) + Settings UI with live status; Shoutcast/relay/listener stats open | 🟡 |
-| Mic / line-in | Mixed input, sidechain ducking, bed music | Unchecked | ❌ |
+| Mic / line-in | Mixed input, sidechain ducking, bed music | cpal input + `rtrb` ring summed pre-limiter/tap, voice-activated ducker, live device switching, Settings mic panel | ✅ |
 | Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
 | Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
 | Reporting | Play logs → XLS/PDF, royalty reports | Unchecked | ❌ |
@@ -149,9 +149,18 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [ ] Artwork metadata forwarding to encoders
 
 ### 1.6 Mic / Live Assist
-- [ ] Mic input via `cpal` input stream, mixed into program bus
-- [ ] Sidechain ducking: auto-lower music bed when mic is active (voice-activated)
-- [ ] Mic "bed" music under live breaks
+- [x] Mic input via `cpal` input stream, mixed into program bus (device
+      picker with live switching, f32 paths at the output rate, linear
+      resample fallback, lock-free `rtrb` ring with a latency bound;
+      summed pre-limiter + pre-stream-tap so the broadcast feed hears it)
+- [x] Sidechain ducking: auto-lower music bed when mic is active
+      (voice-activated peak envelope + threshold/depth/attack/release,
+      live meter + ▼ indicator, duck ON/OFF)
+- [x] Mic "bed" music under live breaks (voice sums over the ducked
+      program bus and passes over a silent bed for talk breaks)
+- [x] Settings UI: MIC ON/OFF toggle (auto-start on launch when enabled),
+      input list, mic-level stepper, duck threshold/depth/attack/release
+      steppers, live status (🎙 Live/⚠ error) + level meter
 
 ### 1.7 Reliability
 - [x] Silence detector: `SilenceMonitor` meters the cpal mix bus (−60 dBFS floor,

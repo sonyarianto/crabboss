@@ -7,6 +7,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::audio::MicConfig;
 use crate::audio::EQ_BAND_COUNT;
 use crate::stream::StreamConfig;
 
@@ -32,6 +33,8 @@ pub struct AppSettings {
     pub loudness_norm: bool,
     /// Icecast/Shoutcast streaming (§1.5): server, mount, encoder.
     pub stream: StreamConfig,
+    /// Mic/line-in with ducking (§1.6): device, level, duck prefs.
+    pub mic: MicConfig,
 }
 
 impl Default for AppSettings {
@@ -46,6 +49,7 @@ impl Default for AppSettings {
             limiter_ceiling: 0.99,
             loudness_norm: true,
             stream: StreamConfig::default(),
+            mic: MicConfig::default(),
         }
     }
 }
@@ -62,6 +66,7 @@ impl AppSettings {
             *g = g.clamp(-12.0, 12.0);
         }
         s.limiter_ceiling = s.limiter_ceiling.clamp(0.1, 1.0);
+        s.mic = std::mem::take(&mut s.mic).sanitized();
         s
     }
 
@@ -96,6 +101,7 @@ mod tests {
                 bitrate_kbps: 192,
                 ..Default::default()
             },
+            mic: MicConfig::default(),
         };
         s.save(&path).unwrap();
         let back = AppSettings::load(&path);
@@ -116,6 +122,47 @@ mod tests {
         assert_eq!(back.stream.mount, "/live");
         assert_eq!(back.stream.bitrate_kbps, 192);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mic_roundtrip_and_clamp() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("crabboss-settings-mic.json");
+        let s = AppSettings {
+            mic: MicConfig {
+                enabled: true,
+                device: Some("USB Mic".into()),
+                level: 0.8,
+                duck_enabled: true,
+                duck_threshold_db: -24.0,
+                duck_depth_db: 9.0,
+                attack_ms: 8.0,
+                release_ms: 300.0,
+            },
+            ..Default::default()
+        };
+        s.save(&path).unwrap();
+        let back = AppSettings::load(&path);
+        assert!(back.mic.enabled);
+        assert_eq!(back.mic.device.as_deref(), Some("USB Mic"));
+        assert!((back.mic.level - 0.8).abs() < 1e-6);
+        assert!((back.mic.duck_threshold_db + 24.0).abs() < 1e-6);
+        assert!((back.mic.duck_depth_db - 9.0).abs() < 1e-6);
+        std::fs::remove_file(&path).ok();
+        // Out-of-range values clamp on load.
+        let bad = dir.join("crabboss-settings-mic-bad.json");
+        std::fs::write(
+            &bad,
+            br#"{"mic":{"level":9.0,"duck_threshold_db":5.0,"duck_depth_db":99.0,"attack_ms":0.0,"release_ms":99999.0}}"#,
+        )
+        .unwrap();
+        let back = AppSettings::load(&bad);
+        assert_eq!(back.mic.level, 1.5);
+        assert_eq!(back.mic.duck_threshold_db, 0.0);
+        assert_eq!(back.mic.duck_depth_db, 24.0);
+        assert_eq!(back.mic.attack_ms, 1.0);
+        assert_eq!(back.mic.release_ms, 3000.0);
+        std::fs::remove_file(&bad).ok();
     }
 
     #[test]

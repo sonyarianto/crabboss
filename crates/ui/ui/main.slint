@@ -110,6 +110,18 @@ export component MainWindow inherits Window {
     in-out property <string> settings-stream-mount: "/stream";
     in-out property <string> settings-stream-password: "";
     in-out property <string> settings-stream-bitrate: "128 kbps";
+    in-out property <bool> settings-mic-enabled: false;
+    in-out property <string> settings-mic-status: "⏸ Off";
+    in-out property <string> settings-mic-meter: "";
+    in-out property <[string]> settings-mic-devices;
+    in-out property <string> settings-mic-device: "";
+    in-out property <string> settings-mic-device-note: "";
+    in-out property <string> settings-mic-level: "100%";
+    in-out property <bool> settings-mic-duck-on: true;
+    in-out property <string> settings-mic-threshold: "-30 dB";
+    in-out property <string> settings-mic-depth: "-12 dB";
+    in-out property <string> settings-mic-attack: "10 ms";
+    in-out property <string> settings-mic-release: "400 ms";
 
     // -- Nav --
     callback navigate(int);
@@ -162,6 +174,20 @@ export component MainWindow inherits Window {
     callback settings-stream-password-committed(string);
     callback settings-stream-bitrate-inc;
     callback settings-stream-bitrate-dec;
+    callback settings-mic-toggle;
+    callback settings-mic-select-device(string);
+    callback settings-mic-refresh-devices;
+    callback settings-mic-level-inc;
+    callback settings-mic-level-dec;
+    callback settings-mic-duck-toggle;
+    callback settings-mic-threshold-inc;
+    callback settings-mic-threshold-dec;
+    callback settings-mic-depth-inc;
+    callback settings-mic-depth-dec;
+    callback settings-mic-attack-inc;
+    callback settings-mic-attack-dec;
+    callback settings-mic-release-inc;
+    callback settings-mic-release-dec;
 
     // -- Scheduler callbacks --
     callback scheduler-toggled(bool);
@@ -463,6 +489,32 @@ export component MainWindow inherits Window {
             stream-password-committed(t) => { root.settings-stream-password-committed(t); }
             stream-bitrate-inc => { root.settings-stream-bitrate-inc(); }
             stream-bitrate-dec => { root.settings-stream-bitrate-dec(); }
+            mic-enabled <=> root.settings-mic-enabled;
+            mic-status <=> root.settings-mic-status;
+            mic-meter <=> root.settings-mic-meter;
+            mic-devices: root.settings-mic-devices;
+            mic-device <=> root.settings-mic-device;
+            mic-device-note <=> root.settings-mic-device-note;
+            mic-level <=> root.settings-mic-level;
+            mic-duck-on <=> root.settings-mic-duck-on;
+            mic-threshold <=> root.settings-mic-threshold;
+            mic-depth <=> root.settings-mic-depth;
+            mic-attack <=> root.settings-mic-attack;
+            mic-release <=> root.settings-mic-release;
+            mic-toggle => { root.settings-mic-toggle(); }
+            mic-select-device(d) => { root.settings-mic-select-device(d); }
+            mic-refresh-devices => { root.settings-mic-refresh-devices(); }
+            mic-level-inc => { root.settings-mic-level-inc(); }
+            mic-level-dec => { root.settings-mic-level-dec(); }
+            mic-duck-toggle => { root.settings-mic-duck-toggle(); }
+            mic-threshold-inc => { root.settings-mic-threshold-inc(); }
+            mic-threshold-dec => { root.settings-mic-threshold-dec(); }
+            mic-depth-inc => { root.settings-mic-depth-inc(); }
+            mic-depth-dec => { root.settings-mic-depth-dec(); }
+            mic-attack-inc => { root.settings-mic-attack-inc(); }
+            mic-attack-dec => { root.settings-mic-attack-dec(); }
+            mic-release-inc => { root.settings-mic-release-inc(); }
+            mic-release-dec => { root.settings-mic-release-dec(); }
         }
 
         // -- Scheduler --

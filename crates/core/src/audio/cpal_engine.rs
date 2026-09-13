@@ -2,16 +2,20 @@
 //!
 //! Status: stereo symphonia decode → rubato resample to device rate →
 //! dual-cursor equal-power/linear crossfade through `Mixer` in the callback,
-//! with 12-band EQ insert and limiter on the program bus.
-//! TODO: mic input, Icecast tee.
+//! with 12-band EQ insert and limiter on the program bus. Mic/line-in
+//! (§1.6) sums into the program bus ahead of the limiter + stream tap
+//! with voice-activated ducking of the music bed.
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use rtrb::RingBuffer;
 
 use crate::audio::engine::Engine;
+use crate::audio::mic::{MicConfig, MicResampler, MicState, MIC_RING_SAMPLES};
 use crate::audio::mixer::{Frame, Mixer, EQ_BAND_COUNT};
 use crate::audio::player::{PlayerState, TrackInfo};
 use crate::audio::silence::SilenceMonitor;
@@ -149,6 +153,13 @@ pub struct CpalEngine {
     /// Icecast streaming: manager + live tap for the audio callback.
     stream: Arc<Mutex<crate::stream::StreamManager>>,
     stream_tap: Arc<Mutex<Option<crate::stream::StreamTap>>>,
+    /// Mic/line-in (§1.6): input stream (rebuilt on device change) +
+    /// consumer swapped in/out by start/stop for the output callback.
+    _mic_stream: Option<cpal::Stream>,
+    mic_consumer: Arc<Mutex<Option<rtrb::Consumer<f32>>>>,
+    mic_live: Arc<AtomicBool>,
+    mic_config: Arc<Mutex<MicConfig>>,
+    mic_state: Arc<Mutex<MicState>>,
 }
 
 impl CpalEngine {
@@ -178,6 +189,10 @@ impl CpalEngine {
         let mixer = Arc::new(Mutex::new(Mixer::default()));
         let silence = Arc::new(Mutex::new(SilenceMonitor::new(48000, 10.0)));
         let stream_tap: Arc<Mutex<Option<crate::stream::StreamTap>>> = Arc::new(Mutex::new(None));
+        let mic_consumer: Arc<Mutex<Option<rtrb::Consumer<f32>>>> = Arc::new(Mutex::new(None));
+        let mic_live = Arc::new(AtomicBool::new(false));
+        let mic_config = Arc::new(Mutex::new(MicConfig::default()));
+        let mic_state: Arc<Mutex<MicState>> = Arc::new(Mutex::new(MicState::Off));
 
         let (stream, device_rate, device_name) = match Self::open_silent_stream(
             xfade.clone(),
@@ -186,6 +201,9 @@ impl CpalEngine {
             mixer.clone(),
             silence.clone(),
             stream_tap.clone(),
+            mic_consumer.clone(),
+            mic_live.clone(),
+            mic_config.clone(),
             want,
         ) {
             Ok((s, rate, name)) => {
@@ -218,6 +236,11 @@ impl CpalEngine {
                 crate::stream::StreamConfig::default(),
             ))),
             stream_tap: Arc::new(Mutex::new(None)),
+            _mic_stream: None,
+            mic_consumer,
+            mic_live,
+            mic_config,
+            mic_state,
         }
     }
 
@@ -232,6 +255,20 @@ impl CpalEngine {
 
     fn xfade_secs(&self) -> f32 {
         *self.crossfade_secs.lock().unwrap()
+    }
+
+    /// Push level + ducking prefs into the mixer's ducker (live, no
+    /// stream rebuild — the callback reads `mic_level` per invocation).
+    fn apply_mic_dsp(&self) {
+        let config = self.mic_config.lock().unwrap().clone();
+        let mut mx = self.mixer.lock().unwrap();
+        mx.ducker.set_enabled(config.duck_enabled);
+        mx.ducker.configure(
+            config.duck_threshold_db,
+            config.duck_depth_db,
+            config.attack_ms,
+            config.release_ms,
+        );
     }
 
     fn decode_resampled(&self, path: &Path) -> Result<PlaybackCursor> {
@@ -305,6 +342,7 @@ impl CpalEngine {
             .unwrap_or_default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn open_silent_stream(
         xfade: Arc<Mutex<XfadeState>>,
         state: Arc<Mutex<PlayerState>>,
@@ -312,6 +350,9 @@ impl CpalEngine {
         mixer: Arc<Mutex<Mixer>>,
         silence: Arc<Mutex<SilenceMonitor>>,
         stream_tap: Arc<Mutex<Option<crate::stream::StreamTap>>>,
+        mic_consumer: Arc<Mutex<Option<rtrb::Consumer<f32>>>>,
+        mic_live: Arc<AtomicBool>,
+        mic_config: Arc<Mutex<MicConfig>>,
         want: Option<String>,
     ) -> std::result::Result<(cpal::Stream, u32, String), String> {
         let host = cpal::default_host();
@@ -349,15 +390,53 @@ impl CpalEngine {
                     let tap = stream_tap.lock().unwrap().clone();
                     let mut tap_buf = [0.0f32; 8192];
                     let mut tap_n = 0usize;
+                    // Mic drain: locked once per callback, popped per frame.
+                    // Input and output devices drift apart over hours, so
+                    // bound the buffered latency — discard the oldest down
+                    // to 1/4 ring when more than 1/2 ring is buffered.
+                    let mic_on = mic_live.load(Ordering::Relaxed);
+                    let mic_level = mic_config.lock().unwrap().level;
+                    let mut mic_con = mic_consumer.lock().unwrap();
+                    if mic_on {
+                        if let Some(con) = mic_con.as_mut() {
+                            let buffered = con.slots();
+                            if buffered > MIC_RING_SAMPLES / 2 {
+                                let mut drop_n = (buffered - MIC_RING_SAMPLES / 4) & !1;
+                                while drop_n > 0 {
+                                    if con.pop().is_err() {
+                                        break;
+                                    }
+                                    drop_n -= 1;
+                                }
+                            }
+                        }
+                    }
 
                     for frame in data.chunks_mut(channels) {
                         let req = if playing { xf.pull() } else { None };
+                        // Mic sums into the program bus ahead of the limiter
+                        // + stream tap (voice goes out over the broadcast
+                        // feed too), independent of transport state so talk
+                        // breaks work over a silent bed.
+                        let mic_frame = if mic_on {
+                            mic_con.as_mut().and_then(|con| {
+                                con.pop().ok().map(|l| {
+                                    let r = con.pop().unwrap_or(l);
+                                    Frame { l, r }
+                                })
+                            })
+                        } else {
+                            None
+                        };
                         let (l, r) = match req {
                             Some((a, b, x)) => {
-                                let f = mx.process_x(Some(a), b, x);
+                                let f = mx.process_x_mic(Some(a), b, x, mic_frame, mic_level);
                                 (f.l, f.r)
                             }
-                            None => (0.0, 0.0),
+                            None => {
+                                let f = mx.process_x_mic(None, None, 0.0, mic_frame, mic_level);
+                                (f.l, f.r)
+                            }
                         };
                         // Tap post-DSP, pre-monitor-volume: the broadcast
                         // feed carries full program level regardless of the
@@ -402,6 +481,111 @@ impl CpalEngine {
             .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
         Ok((stream, sample_rate, name))
+    }
+
+    /// List input devices (mic picker on the Settings screen).
+    pub fn list_input_devices() -> Vec<String> {
+        cpal::default_host()
+            .input_devices()
+            .map(|devs| devs.filter_map(|d| d.name().ok()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    }
+
+    /// Open the mic/line-in stream at (or resampled to) the output rate.
+    /// The input callback converts channels → stereo, resamples, and
+    /// pushes into `ring`; the output callback drains it. Returns the
+    /// stream, the device name, and the native input rate.
+    fn open_input_stream(
+        want: Option<String>,
+        device_rate: u32,
+        ring: rtrb::Producer<f32>,
+    ) -> std::result::Result<(cpal::Stream, String), String> {
+        use cpal::SampleFormat;
+        let host = cpal::default_host();
+        let named = want.as_deref().and_then(|n| {
+            host.input_devices()
+                .ok()
+                .and_then(|mut devs| devs.find(|d| d.name().is_ok_and(|dn| dn == n)))
+        });
+        if want.is_some() && named.is_none() {
+            tracing::warn!(
+                "Input device '{}' not found, falling back to default",
+                want.as_deref().unwrap_or_default()
+            );
+        }
+        let device = named
+            .or_else(|| host.default_input_device())
+            .ok_or_else(|| "no input device".to_string())?;
+        let name = device.name().unwrap_or_else(|_| "Default".to_string());
+        // Prefer an f32 config at the output rate (zero resampling);
+        // otherwise take the default input config and resample in the
+        // callback. Non-f32-only devices are rejected (rare on desktop).
+        let supported = device
+            .supported_input_configs()
+            .map_err(|e| e.to_string())?
+            .collect::<Vec<_>>();
+        let at_rate = supported.iter().find(|c| {
+            c.sample_format() == SampleFormat::F32
+                && c.channels() >= 1
+                && c.min_sample_rate().0 <= device_rate
+                && device_rate <= c.max_sample_rate().0
+        });
+        let (stream_config, input_rate) = match at_rate {
+            Some(c) => {
+                let channels = c.channels().min(8);
+                let cfg = (*c)
+                    .with_sample_rate(cpal::SampleRate(device_rate))
+                    .config();
+                (cpal::StreamConfig { channels, ..cfg }, device_rate)
+            }
+            None => {
+                let def = device.default_input_config().map_err(|e| e.to_string())?;
+                if def.sample_format() != SampleFormat::F32 {
+                    return Err(format!("input '{name}' offers no f32 capture config"));
+                }
+                let rate = def.sample_rate().0;
+                (def.config(), rate)
+            }
+        };
+        if input_rate != device_rate {
+            tracing::info!("Mic resampling {input_rate} Hz → {device_rate} Hz");
+        }
+        let channels = stream_config.channels as usize;
+        let err_fn = |err| tracing::error!("mic input stream error: {}", err);
+        let mut producer = ring;
+        let mut resampler = MicResampler::new(input_rate, device_rate);
+        let mut scratch: Vec<(f32, f32)> = Vec::with_capacity(2048);
+        let stream = device
+            .build_input_stream(
+                &stream_config,
+                move |data: &[f32], _: &_| {
+                    scratch.clear();
+                    for frame in data.chunks(channels.max(1)) {
+                        let (l, r) = match frame {
+                            [s] => (*s, *s),
+                            [l, r, ..] => (*l, *r),
+                            [] => continue,
+                        };
+                        resampler.feed(l, r, &mut scratch);
+                    }
+                    // Drop newest when the ring is full — a glitch beats
+                    // ever-growing monitoring latency. The `slots` check
+                    // makes the pair-push atomic: this is the only writer
+                    // and the consumer only ever frees slots.
+                    for (l, r) in scratch.drain(..) {
+                        if producer.slots() < 2 {
+                            break;
+                        }
+                        let _ = producer.push(l);
+                        let _ = producer.push(r);
+                    }
+                },
+                err_fn,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+        stream.play().map_err(|e| e.to_string())?;
+        Ok((stream, name))
     }
 
     fn read_duration(&self, path: &Path) -> Option<f64> {
@@ -632,6 +816,77 @@ impl Engine for CpalEngine {
 
     fn set_stream_title(&self, title: &str) {
         self.stream.lock().unwrap().set_title(title);
+    }
+
+    fn set_mic_config(&mut self, config: MicConfig) {
+        let config = config.sanitized();
+        let device_changed = self.mic_config.lock().unwrap().device != config.device;
+        *self.mic_config.lock().unwrap() = config;
+        self.apply_mic_dsp();
+        // A live mic follows device switches without a restart dance.
+        if device_changed && self.mic_live.load(Ordering::Relaxed) {
+            if let Err(e) = self.mic_start() {
+                tracing::warn!("Mic device switch failed: {e}");
+            }
+        }
+    }
+
+    fn mic_config(&self) -> MicConfig {
+        self.mic_config.lock().unwrap().clone()
+    }
+
+    fn mic_start(&mut self) -> Result<()> {
+        // Tear down first: start is an idempotent (re)open.
+        self.mic_stop();
+        let config = self.mic_config.lock().unwrap().clone().sanitized();
+        let (producer, consumer) = RingBuffer::new(MIC_RING_SAMPLES);
+        match Self::open_input_stream(config.device.clone(), self.device_rate, producer) {
+            Ok((stream, name)) => {
+                *self.mic_consumer.lock().unwrap() = Some(consumer);
+                self.apply_mic_dsp();
+                self.mixer.lock().unwrap().ducker.reset();
+                self._mic_stream = Some(stream);
+                self.mic_live.store(true, Ordering::Relaxed);
+                *self.mic_state.lock().unwrap() = MicState::Live;
+                tracing::info!("Mic live: input '{name}'");
+                Ok(())
+            }
+            Err(msg) => {
+                *self.mic_state.lock().unwrap() = MicState::Error(msg.clone());
+                tracing::warn!("Mic start failed: {msg}");
+                Err(CrabError::Audio(msg))
+            }
+        }
+    }
+
+    fn mic_stop(&mut self) {
+        self.mic_live.store(false, Ordering::Relaxed);
+        *self.mic_consumer.lock().unwrap() = None;
+        self._mic_stream = None;
+        self.mixer.lock().unwrap().ducker.reset();
+        *self.mic_state.lock().unwrap() = MicState::Off;
+    }
+
+    fn mic_state(&self) -> MicState {
+        // A dropped error stream reports Off once stopped; Live only while
+        // the flag is set so a dead input can't masquerade as running.
+        if self.mic_live.load(Ordering::Relaxed) {
+            MicState::Live
+        } else {
+            self.mic_state.lock().unwrap().clone()
+        }
+    }
+
+    fn mic_level_db(&self) -> f32 {
+        if self.mic_live.load(Ordering::Relaxed) {
+            self.mixer.lock().unwrap().mic_level_db()
+        } else {
+            -99.0
+        }
+    }
+
+    fn mic_ducking(&self) -> bool {
+        self.mic_live.load(Ordering::Relaxed) && self.mixer.lock().unwrap().ducking()
     }
 }
 

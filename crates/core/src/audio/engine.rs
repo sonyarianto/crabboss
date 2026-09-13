@@ -101,6 +101,33 @@ pub trait Engine {
     }
     /// Queue a now-playing metadata update for the stream.
     fn set_stream_title(&self, _title: &str) {}
+    /// Install the mic/line-in config; device applies on next start,
+    /// level + ducking apply live when running.
+    fn set_mic_config(&mut self, _config: crate::audio::MicConfig) {}
+    /// Current mic config.
+    fn mic_config(&self) -> crate::audio::MicConfig {
+        crate::audio::MicConfig::default()
+    }
+    /// Start the input stream (voice feeds the program bus + stream tap).
+    /// Unlike streaming, open failures are synchronous, so they surface
+    /// here AND via [`Engine::mic_state`].
+    fn mic_start(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Stop the input stream.
+    fn mic_stop(&mut self) {}
+    /// Live mic state (Off/Live/Error).
+    fn mic_state(&self) -> crate::audio::MicState {
+        crate::audio::MicState::Off
+    }
+    /// Mic envelope in dBFS (floored; UI level meter).
+    fn mic_level_db(&self) -> f32 {
+        -99.0
+    }
+    /// True while the music bed is audibly ducked under the mic.
+    fn mic_ducking(&self) -> bool {
+        false
+    }
     /// Seconds into the current track (`0.0` when nothing is playing).
     fn position_secs(&self) -> f64 {
         0.0

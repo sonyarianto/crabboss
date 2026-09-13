@@ -339,6 +339,8 @@ pub struct Mixer {
     pub eq: EqChain,
     /// Lookahead peak limiter (final stage).
     pub limiter: Limiter,
+    /// Voice-activated music-bed ducker (mic path, §1.6).
+    pub ducker: crate::audio::Ducker,
 }
 
 impl Default for Mixer {
@@ -350,6 +352,7 @@ impl Default for Mixer {
             ceiling: 0.99,
             eq: EqChain::default(),
             limiter: Limiter::default(),
+            ducker: crate::audio::Ducker::default(),
         }
     }
 }
@@ -381,8 +384,10 @@ impl Mixer {
     }
 
     /// Recompute EQ coefficients for the device rate (on stream open).
+    /// Also tracks the ducker rate so duck timings stay in wall-clock ms.
     pub fn set_eq_rate(&mut self, rate: u32) {
         self.eq.set_rate(rate);
+        self.ducker.set_rate(rate);
     }
 
     pub fn set_eq_enabled(&mut self, on: bool) {
@@ -408,6 +413,7 @@ impl Mixer {
     pub fn reset(&mut self) {
         self.eq.reset();
         self.limiter.reset();
+        self.ducker.reset();
     }
 
     fn gains(curve: CrossfadeCurve, x: f32) -> (f32, f32) {
@@ -435,12 +441,54 @@ impl Mixer {
     /// Used by the engine so every audio frame gets its own blend point.
     /// Chain: EQ insert → blend → gain → soft-clip net → limiter.
     pub fn process_x(&mut self, a: Option<Frame>, b: Option<Frame>, x: f32) -> Frame {
+        let (l, r) = self.music_bus(a, b, x);
+        self.finalize(l, r)
+    }
+
+    /// Mic path: duck the music bed by the voice-activated gain, sum the
+    /// (leveled) mic, then run the shared soft-clip + limiter final stage
+    /// so a loud voice can't clip the program bus. The ducker sees the
+    /// post-gain mic — what the listener hears is what triggers the duck.
+    pub fn process_x_mic(
+        &mut self,
+        a: Option<Frame>,
+        b: Option<Frame>,
+        x: f32,
+        mic: Option<Frame>,
+        mic_level: f32,
+    ) -> Frame {
+        let (l, r) = self.music_bus(a, b, x);
+        let (ml, mr) = match mic {
+            Some(m) => (m.l * mic_level, m.r * mic_level),
+            None => (0.0, 0.0),
+        };
+        let duck = self.ducker.process(ml, mr);
+        self.finalize(l * duck + ml, r * duck + mr)
+    }
+
+    /// True while the bed is audibly ducked under the mic (UI indicator).
+    pub fn ducking(&self) -> bool {
+        self.ducker.ducking()
+    }
+
+    /// Mic envelope in dBFS (floored; UI level meter).
+    pub fn mic_level_db(&self) -> f32 {
+        self.ducker.input_level_db()
+    }
+
+    /// Blend → EQ → gain (pre-duck, pre-final-stage shared music bus).
+    fn music_bus(&mut self, a: Option<Frame>, b: Option<Frame>, x: f32) -> (f32, f32) {
         let x = x.clamp(0.0, 1.0);
         let (ga, gb) = Self::gains(self.curve, x);
         let a = a.unwrap_or_default();
         let b = b.unwrap_or_default();
         let l = self.eq.tick(a.l * ga + b.l * gb) * self.gain;
         let r = self.eq.tick(a.r * ga + b.r * gb) * self.gain;
+        (l, r)
+    }
+
+    /// Shared final stage: soft-clip safety net → lookahead limiter.
+    fn finalize(&mut self, l: f32, r: f32) -> Frame {
         let l = soft_clip(l, self.ceiling);
         let r = soft_clip(r, self.ceiling);
         let (l, r) = self.limiter.process(l, r);
@@ -659,5 +707,64 @@ mod tests {
         m.set_eq_band(11, -12.0);
         let f = m.process_x(Some(Frame { l: -0.4, r: 0.4 }), None, 0.0);
         assert!((f.l + 0.4).abs() < 1e-6 && (f.r - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mic_path_matches_music_path_when_mic_absent() {
+        let mut m = Mixer::default();
+        let a = Some(Frame { l: 0.4, r: -0.3 });
+        let plain = m.process_x(a, None, 0.0);
+        let with_mic = m.process_x_mic(a, None, 0.0, None, 1.0);
+        // No mic signal: ducker sits at unity, so both paths agree.
+        assert!((plain.l - with_mic.l).abs() < 1e-5);
+        assert!((plain.r - with_mic.r).abs() < 1e-5);
+        assert!(!m.ducking());
+    }
+
+    #[test]
+    fn mic_passes_when_music_silent() {
+        let mut m = Mixer::default();
+        let mic = Some(Frame { l: 0.2, r: 0.1 });
+        let f = m.process_x_mic(None, None, 0.0, mic, 1.0);
+        assert!((f.l - 0.2).abs() < 1e-5 && (f.r - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn loud_mic_ducks_music_bed() {
+        let mut m = Mixer::default();
+        let music = Some(Frame { l: 0.5, r: 0.5 });
+        // Quiet mic first: bed untouched.
+        let open = m.process_x_mic(music, None, 0.0, Some(Frame { l: 0.001, r: 0.001 }), 1.0);
+        assert!((open.l - 0.5).abs() < 0.01);
+        // Loud voice for a while: the ducker clamps down toward −12 dB.
+        for _ in 0..96_000 {
+            m.process_x_mic(music, None, 0.0, Some(Frame { l: 0.9, r: 0.9 }), 1.0);
+        }
+        assert!(m.ducking());
+        assert!(m.mic_level_db() > -2.0);
+        // Probe the bed with the voice momentarily absent (one frame is far
+        // shorter than the 400 ms release, so the duck is still engaged):
+        // the bed alone must sit near 0.5 × −12 dB ≈ 0.126.
+        let ducked = m.process_x_mic(music, None, 0.0, None, 1.0);
+        assert!((ducked.l - 0.126).abs() < 0.02, "ducked bed {}", ducked.l);
+    }
+
+    #[test]
+    fn mic_level_scales_voice() {
+        let mut m = Mixer::default();
+        let mic = Some(Frame { l: 0.4, r: 0.4 });
+        let full = m.process_x_mic(None, None, 0.0, mic, 1.0);
+        let half = m.process_x_mic(None, None, 0.0, mic, 0.5);
+        assert!((full.l - 0.4).abs() < 1e-5);
+        assert!((half.l - 0.2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn mic_path_still_limited_by_limiter() {
+        let mut m = Mixer::default();
+        m.set_ceiling(0.5);
+        // Screaming into the mic must not clip the program bus.
+        let f = m.process_x_mic(None, None, 0.0, Some(Frame { l: 3.0, r: 3.0 }), 1.0);
+        assert!(f.l <= 0.5 + 1e-6 && f.r <= 0.5 + 1e-6);
     }
 }

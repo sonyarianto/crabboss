@@ -110,6 +110,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!("Stream auto-start failed: {e}");
         }
     }
+    // Mic/line-in: install config; auto-start when enabled.
+    player.set_mic_config(settings.borrow().mic.clone());
+    if settings.borrow().mic.enabled && engine_name == "cpal" {
+        if let Err(e) = player.mic_start() {
+            tracing::warn!("Mic auto-start failed: {e}");
+        }
+    }
 
     // Initialize library (create db in current dir)
     let db_path = std::env::current_dir()
@@ -1526,6 +1533,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         ui.set_settings_stream_bitrate(format!("{} kbps", cfg.bitrate_kbps).into());
     }
+    fn push_input_devices(ui: &MainWindow) {
+        let devs = crabcore::audio::CpalEngine::list_input_devices();
+        let model = Rc::new(slint::VecModel::from(
+            devs.into_iter()
+                .map(|d| d.into())
+                .collect::<Vec<slint::SharedString>>(),
+        ));
+        ui.set_settings_mic_devices(model.into());
+    }
+    fn mic_labels(ui: &MainWindow, player: &dyn crabcore::audio::Engine) {
+        let cfg = player.mic_config();
+        let st = player.mic_state();
+        ui.set_settings_mic_enabled(cfg.enabled);
+        ui.set_settings_mic_status(st.label().into());
+        ui.set_settings_mic_meter(if st.is_live() {
+            let duck = if player.mic_ducking() {
+                " · ▼ ducking"
+            } else {
+                ""
+            };
+            format!("{:.1} dBFS{}", player.mic_level_db(), duck).into()
+        } else {
+            "".into()
+        });
+        ui.set_settings_mic_device(cfg.device.clone().unwrap_or_default().into());
+        ui.set_settings_mic_level(format!("{:.0}%", cfg.level * 100.0).into());
+        ui.set_settings_mic_duck_on(cfg.duck_enabled);
+        ui.set_settings_mic_threshold(format!("{:+.0} dB", cfg.duck_threshold_db).into());
+        ui.set_settings_mic_depth(format!("-{:.0} dB", cfg.duck_depth_db).into());
+        ui.set_settings_mic_attack(format!("{:.0} ms", cfg.attack_ms).into());
+        ui.set_settings_mic_release(format!("{:.0} ms", cfg.release_ms).into());
+    }
     push_devices(&ui);
     ui.set_settings_device(
         settings
@@ -1538,6 +1577,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_settings_device_note("".into());
     settings_labels(&ui, &settings.borrow());
     stream_labels(&ui, state.borrow().player.as_ref());
+    push_input_devices(&ui);
+    ui.set_settings_mic_device_note("".into());
+    mic_labels(&ui, state.borrow().player.as_ref());
     {
         let ui_weak = ui.as_weak();
         ui.on_settings_refresh_devices(move || {
@@ -1910,6 +1952,249 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // -- Microphone / line-in: toggle, device picker, level, ducking --
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_toggle(move || {
+            let mut s = settings.borrow_mut();
+            s.mic.enabled = !s.mic.enabled;
+            let _ = s.save(&settings_path);
+            state.borrow_mut().player.set_mic_config(s.mic.clone());
+            if s.mic.enabled {
+                if let Err(e) = state.borrow_mut().player.mic_start() {
+                    tracing::warn!("Mic start failed: {e}");
+                }
+            } else {
+                state.borrow_mut().player.mic_stop();
+            }
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_settings_mic_refresh_devices(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                push_input_devices(&ui);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_select_device(move |name| {
+            let name = name.to_string();
+            settings.borrow_mut().mic.device = Some(name.clone());
+            if settings.borrow().save(&settings_path).is_ok() {
+                tracing::info!("Mic input set to '{name}' (switches live)");
+            }
+            // Live-restarts the input when running (engine compares devices).
+            state
+                .borrow_mut()
+                .player
+                .set_mic_config(settings.borrow().mic.clone());
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+                ui.set_settings_mic_device_note("Input switched live — no restart needed".into());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_level_inc(move || {
+            let mut s = settings.borrow_mut();
+            s.mic.level = (s.mic.level + 0.05).clamp(0.0, 1.5);
+            let _ = s.save(&settings_path);
+            state.borrow_mut().player.set_mic_config(s.mic.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_level_dec(move || {
+            let mut s = settings.borrow_mut();
+            s.mic.level = (s.mic.level - 0.05).clamp(0.0, 1.5);
+            let _ = s.save(&settings_path);
+            state.borrow_mut().player.set_mic_config(s.mic.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_duck_toggle(move || {
+            let mut s = settings.borrow_mut();
+            s.mic.duck_enabled = !s.mic.duck_enabled;
+            let _ = s.save(&settings_path);
+            state.borrow_mut().player.set_mic_config(s.mic.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    fn duck_ms_step(ladder: &[f32], current: f32, up: bool) -> f32 {
+        let idx = ladder
+            .iter()
+            .position(|&b| b >= current)
+            .unwrap_or(ladder.len() - 1);
+        match up {
+            true => ladder[(idx + 1).min(ladder.len() - 1)],
+            false => ladder[idx.saturating_sub(1)],
+        }
+    }
+    const ATTACK_LADDER: [f32; 9] = [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0];
+    const RELEASE_LADDER: [f32; 9] = [10.0, 25.0, 50.0, 100.0, 200.0, 400.0, 800.0, 1500.0, 3000.0];
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_threshold_inc(move || {
+            let mut s = settings.borrow_mut();
+            s.mic.duck_threshold_db = (s.mic.duck_threshold_db + 3.0).clamp(-60.0, 0.0);
+            let _ = s.save(&settings_path);
+            state.borrow_mut().player.set_mic_config(s.mic.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_threshold_dec(move || {
+            let mut s = settings.borrow_mut();
+            s.mic.duck_threshold_db = (s.mic.duck_threshold_db - 3.0).clamp(-60.0, 0.0);
+            let _ = s.save(&settings_path);
+            state.borrow_mut().player.set_mic_config(s.mic.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_depth_inc(move || {
+            let mut s = settings.borrow_mut();
+            s.mic.duck_depth_db = (s.mic.duck_depth_db + 3.0).clamp(0.0, 24.0);
+            let _ = s.save(&settings_path);
+            state.borrow_mut().player.set_mic_config(s.mic.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_depth_dec(move || {
+            let mut s = settings.borrow_mut();
+            s.mic.duck_depth_db = (s.mic.duck_depth_db - 3.0).clamp(0.0, 24.0);
+            let _ = s.save(&settings_path);
+            state.borrow_mut().player.set_mic_config(s.mic.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_attack_inc(move || {
+            let mut s = settings.borrow_mut();
+            s.mic.attack_ms = duck_ms_step(&ATTACK_LADDER, s.mic.attack_ms, true);
+            let _ = s.save(&settings_path);
+            state.borrow_mut().player.set_mic_config(s.mic.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_attack_dec(move || {
+            let mut s = settings.borrow_mut();
+            s.mic.attack_ms = duck_ms_step(&ATTACK_LADDER, s.mic.attack_ms, false);
+            let _ = s.save(&settings_path);
+            state.borrow_mut().player.set_mic_config(s.mic.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_release_inc(move || {
+            let mut s = settings.borrow_mut();
+            s.mic.release_ms = duck_ms_step(&RELEASE_LADDER, s.mic.release_ms, true);
+            let _ = s.save(&settings_path);
+            state.borrow_mut().player.set_mic_config(s.mic.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        ui.on_settings_mic_release_dec(move || {
+            let mut s = settings.borrow_mut();
+            s.mic.release_ms = duck_ms_step(&RELEASE_LADDER, s.mic.release_ms, false);
+            let _ = s.save(&settings_path);
+            state.borrow_mut().player.set_mic_config(s.mic.clone());
+            drop(s);
+            if let Some(ui) = ui_weak.upgrade() {
+                mic_labels(&ui, state.borrow().player.as_ref());
+            }
+        });
+    }
+
     // -- Play --
     {
         let state = state.clone();
@@ -2123,9 +2408,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 // Streaming status + now-playing metadata (cheap, lock-free).
+                // Mic meter + duck indicator ride along (mixer lock only).
                 {
                     let s = state.borrow();
                     stream_labels(&ui, s.player.as_ref());
+                    mic_labels(&ui, s.player.as_ref());
                     if let Some(t) = s.player.current_track() {
                         let label = t.title.clone().unwrap_or_else(|| {
                             t.path
