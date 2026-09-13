@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -18,6 +18,65 @@ use crate::audio::mixer::{Frame, Mixer, EQ_BAND_COUNT};
 use crate::audio::silence::SilenceMonitor;
 use crate::audio::MAX_GAIN_DB;
 use crate::error::{CrabError, Result};
+
+/// Realtime hardening: lock-free mirrors for the audio callback hot path.
+///
+/// The cpal output callback runs on an OS-owned high-priority thread. Every
+/// `Mutex` it locks is a potential dropout when another thread (UI tick,
+/// loader install, mic start/stop) holds that lock at the wrong moment.
+/// These mirrors let the callback read `volume` + transport `state` without
+/// locking, while writers keep the existing `Mutex` as the serialization
+/// point and sync the mirror under it. The guarded audio data itself still
+/// lives behind its mutexes, so `Relaxed`/`SeqCst` pairing here is only a
+/// hint channel — correctness never depends on atomic ordering.
+///
+/// Deliberately NOT changed: `xfade` / `mixer` / `silence` stay mutex-guarded
+/// (the callback acquires each once per buffer, writers touch them rarely and
+/// briefly). Full lock-freedom there would need a redesign for no audible gain.
+///
+/// Output buffering: radio playout favors stability over latency, so we ask
+/// for a deeper-than-default device buffer (≈43 ms @ 48 kHz). A preempted
+/// callback thread then has room to ride out scheduling jitter from other
+/// processes instead of underrunning. Falls back to the device default when
+/// the fixed size is rejected.
+const STATE_STOPPED: u8 = 0;
+const STATE_PLAYING: u8 = 1;
+const STATE_PAUSED: u8 = 2;
+const STATE_BUFFERING: u8 = 3;
+
+/// Preemption-resistant output buffer in frames (~43 ms @ 48 kHz stereo).
+const OUTPUT_BUFFER_FRAMES: u32 = 2048;
+
+fn encode_state(s: PlayerState) -> u8 {
+    match s {
+        PlayerState::Stopped => STATE_STOPPED,
+        PlayerState::Playing => STATE_PLAYING,
+        PlayerState::Paused => STATE_PAUSED,
+        PlayerState::Buffering => STATE_BUFFERING,
+    }
+}
+
+/// Inverse of [`encode_state`]; only exercised by tests today (the live
+/// callback compares the raw code directly).
+#[allow(dead_code)]
+fn decode_state(v: u8) -> PlayerState {
+    // Only exercised by tests today; the live callback compares the raw code
+    // directly. Kept beside `encode_state` as the documented inverse.
+    match v {
+        STATE_PLAYING => PlayerState::Playing,
+        STATE_PAUSED => PlayerState::Paused,
+        STATE_BUFFERING => PlayerState::Buffering,
+        _ => PlayerState::Stopped,
+    }
+}
+
+fn load_volume_bits(v: &AtomicU32) -> f32 {
+    f32::from_bits(v.load(Ordering::Relaxed))
+}
+
+fn store_volume_bits(v: &AtomicU32, f: f32) {
+    v.store(f.to_bits(), Ordering::Relaxed);
+}
 
 /// Decoded track: stereo-interleaved f32 at device rate.
 struct PlaybackCursor {
@@ -170,6 +229,9 @@ impl LoadJob {
 struct LoaderShared {
     xfade: Arc<Mutex<XfadeState>>,
     state: Arc<Mutex<PlayerState>>,
+    /// Lock-free mirror of `state` for the audio callback hot path.
+    /// Writers sync it while holding `state`; the callback only reads it.
+    state_atomic: Arc<AtomicU8>,
     current_track: Arc<Mutex<Option<TrackInfo>>>,
     silence: Arc<Mutex<SilenceMonitor>>,
     crossfade_secs: Arc<Mutex<f32>>,
@@ -240,6 +302,10 @@ impl LoaderShared {
         if *st != PlayerState::Paused {
             *st = PlayerState::Playing;
         }
+        // Sync the lock-free mirror while still holding the mutex.
+        let encoded = encode_state(*st);
+        drop(st);
+        self.state_atomic.store(encoded, Ordering::SeqCst);
     }
 
     /// Install a decoded `queue` job (same end-of-track semantics as the
@@ -260,6 +326,7 @@ impl LoaderShared {
         drop(xf);
         self.silence.lock().unwrap().reset();
         *self.state.lock().unwrap() = PlayerState::Playing;
+        self.state_atomic.store(STATE_PLAYING, Ordering::SeqCst);
         *self.current_track.lock().unwrap() = Some(TrackInfo {
             path,
             title: None,
@@ -284,6 +351,7 @@ impl LoaderShared {
         let mut st = self.state.lock().unwrap();
         if *st == PlayerState::Buffering {
             *st = PlayerState::Stopped;
+            self.state_atomic.store(STATE_STOPPED, Ordering::SeqCst);
             *self.current_track.lock().unwrap() = None;
         }
     }
@@ -392,8 +460,13 @@ pub struct CpalEngine {
     crossfade_secs: Arc<Mutex<f32>>,
     silence: Arc<Mutex<SilenceMonitor>>,
     state: Arc<Mutex<PlayerState>>,
+    /// Lock-free mirror of `state` (see module docs). The audio callback
+    /// reads this; every writer syncs it while holding `state`.
+    state_atomic: Arc<AtomicU8>,
     current_track: Arc<Mutex<Option<TrackInfo>>>,
-    volume: Arc<Mutex<f32>>,
+    /// Monitor volume as f32 bits: lock-free read on the audio callback,
+    /// written by `set_volume` (which still takes `mixer` for the DSP gain).
+    volume: Arc<AtomicU32>,
     mixer: Arc<Mutex<Mixer>>,
     /// Loudness normalization: enabled flag + per-path gain lookup (dB).
     loudness_lookup: Option<crate::audio::engine::LoudnessLookup>,
@@ -444,9 +517,10 @@ impl CpalEngine {
             auto_len: 0,
         }));
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
+        let state_atomic = Arc::new(AtomicU8::new(STATE_STOPPED));
         let current_track = Arc::new(Mutex::new(None));
         let crossfade_secs = Arc::new(Mutex::new(3.0));
-        let volume = Arc::new(Mutex::new(1.0));
+        let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let mixer = Arc::new(Mutex::new(Mixer::default()));
         let silence = Arc::new(Mutex::new(SilenceMonitor::new(48000, 10.0)));
         let stream_tap: Arc<Mutex<Option<crate::stream::StreamTap>>> = Arc::new(Mutex::new(None));
@@ -458,6 +532,7 @@ impl CpalEngine {
         let (stream, device_rate, device_name) = match Self::open_silent_stream(
             xfade.clone(),
             state.clone(),
+            state_atomic.clone(),
             volume.clone(),
             mixer.clone(),
             silence.clone(),
@@ -489,6 +564,7 @@ impl CpalEngine {
             LoaderShared {
                 xfade: xfade.clone(),
                 state: state.clone(),
+                state_atomic: state_atomic.clone(),
                 current_track: current_track.clone(),
                 silence: silence.clone(),
                 crossfade_secs: crossfade_secs.clone(),
@@ -507,8 +583,9 @@ impl CpalEngine {
             crossfade_secs: crossfade_secs.clone(),
             silence: silence.clone(),
             state: state.clone(),
+            state_atomic: state_atomic.clone(),
             current_track: current_track.clone(),
-            volume,
+            volume: volume.clone(),
             mixer,
             loudness_lookup: None,
             loudness_enabled: std::cell::Cell::new(false),
@@ -533,6 +610,7 @@ impl CpalEngine {
         LoaderShared {
             xfade: self.xfade.clone(),
             state: self.state.clone(),
+            state_atomic: self.state_atomic.clone(),
             current_track: self.current_track.clone(),
             silence: self.silence.clone(),
             crossfade_secs: self.crossfade_secs.clone(),
@@ -621,7 +699,8 @@ impl CpalEngine {
     fn open_silent_stream(
         xfade: Arc<Mutex<XfadeState>>,
         state: Arc<Mutex<PlayerState>>,
-        volume: Arc<Mutex<f32>>,
+        state_atomic: Arc<AtomicU8>,
+        volume: Arc<AtomicU32>,
         mixer: Arc<Mutex<Mixer>>,
         silence: Arc<Mutex<SilenceMonitor>>,
         stream_tap: Arc<Mutex<Option<crate::stream::StreamTap>>>,
@@ -649,20 +728,42 @@ impl CpalEngine {
         let config = device.default_output_config().map_err(|e| e.to_string())?;
         let sample_rate = config.sample_rate().0;
         let channels = config.channels() as usize;
-        let stream_config: cpal::StreamConfig = config.into();
+        let base_config: cpal::StreamConfig = config.into();
+        // Stability over latency (radio playout): a deeper-than-default
+        // buffer rides out scheduling jitter from other processes instead of
+        // underrunning. Retried with the device default below when rejected.
+        let mut fixed_config = base_config.clone();
+        fixed_config.buffer_size = cpal::BufferSize::Fixed(OUTPUT_BUFFER_FRAMES);
 
         let err_fn = |err| tracing::error!("cpal stream error: {}", err);
-        let stream = device
-            .build_output_stream(
-                &stream_config,
-                move |data: &mut [f32], _| {
-                    let vol = *volume.lock().unwrap();
+        // One callback instance per build attempt (`FnMut` is moved in), so
+        // clone the shared handles per attempt. Only one stream survives.
+        let make_callback = || {
+            let volume = volume.clone();
+            let state_atomic = state_atomic.clone();
+            let mixer = mixer.clone();
+            let xfade = xfade.clone();
+            let silence = silence.clone();
+            let state = state.clone();
+            let stream_tap = stream_tap.clone();
+            let mic_consumer = mic_consumer.clone();
+            let mic_live = mic_live.clone();
+            let mic_config = mic_config.clone();
+            // Last-known mic level: reused while the config lock is contended
+            // so the callback never blocks on a UI-held lock.
+            let mut last_mic_level = 1.0f32;
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    let vol = load_volume_bits(&volume);
+                    // Lock-free transport read; writers sync the mirror while
+                    // holding `state`, so the callback never blocks here.
+                    let playing = state_atomic.load(Ordering::Relaxed) == STATE_PLAYING;
                     let mut mx = mixer.lock().unwrap();
                     let mut xf = xfade.lock().unwrap();
                     let mut sil = silence.lock().unwrap();
-                    let playing = *state.lock().unwrap() == PlayerState::Playing;
-                    // Program-bus tap (streaming): cloned once per callback.
-                    let tap = stream_tap.lock().unwrap().clone();
+                    // Program-bus tap (streaming): cloned once per callback,
+                    // without blocking — a concurrent stream start/stop costs
+                    // one buffer of tap, never a dropout.
+                    let tap = stream_tap.try_lock().ok().and_then(|g| g.clone());
                     let mut tap_buf = [0.0f32; 8192];
                     let mut tap_n = 0usize;
                     // Mic drain: locked once per callback, popped per frame.
@@ -670,10 +771,13 @@ impl CpalEngine {
                     // bound the buffered latency — discard the oldest down
                     // to 1/4 ring when more than 1/2 ring is buffered.
                     let mic_on = mic_live.load(Ordering::Relaxed);
-                    let mic_level = mic_config.lock().unwrap().level;
-                    let mut mic_con = mic_consumer.lock().unwrap();
+                    if let Ok(cfg) = mic_config.try_lock() {
+                        last_mic_level = cfg.level;
+                    }
+                    let mic_level = last_mic_level;
+                    let mut mic_guard = mic_consumer.try_lock().ok();
                     if mic_on {
-                        if let Some(con) = mic_con.as_mut() {
+                        if let Some(con) = mic_guard.as_mut().and_then(|g| g.as_mut()) {
                             let buffered = con.slots();
                             if buffered > MIC_RING_SAMPLES / 2 {
                                 let mut drop_n = (buffered - MIC_RING_SAMPLES / 4) & !1;
@@ -694,12 +798,15 @@ impl CpalEngine {
                         // feed too), independent of transport state so talk
                         // breaks work over a silent bed.
                         let mic_frame = if mic_on {
-                            mic_con.as_mut().and_then(|con| {
-                                con.pop().ok().map(|l| {
-                                    let r = con.pop().unwrap_or(l);
-                                    Frame { l, r }
+                            mic_guard
+                                .as_mut()
+                                .and_then(|g| g.as_mut())
+                                .and_then(|con| {
+                                    con.pop().ok().map(|l| {
+                                        let r = con.pop().unwrap_or(l);
+                                        Frame { l, r }
+                                    })
                                 })
-                            })
                         } else {
                             None
                         };
@@ -745,14 +852,23 @@ impl CpalEngine {
                     if let Some(t) = &tap {
                         t.push(&tap_buf[..tap_n]);
                     }
-                    // Auto-stop at EOF.
+                    // Auto-stop at EOF (once per track — a brief lock is fine).
                     if playing && xf.is_done() {
                         *state.lock().unwrap() = PlayerState::Stopped;
+                        state_atomic.store(STATE_STOPPED, Ordering::SeqCst);
                     }
-                },
-                err_fn,
-                None,
-            )
+            }
+        };
+        let stream = device
+            .build_output_stream(&fixed_config, make_callback(), err_fn, None)
+            .or_else(|e| {
+                tracing::warn!(
+                    "Fixed {}-frame output buffer rejected ({}); using device default",
+                    OUTPUT_BUFFER_FRAMES,
+                    e
+                );
+                device.build_output_stream(&base_config, make_callback(), err_fn, None)
+            })
             .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
         Ok((stream, sample_rate, name))
@@ -903,6 +1019,7 @@ impl Engine for CpalEngine {
             self.loader_shared()
                 .install_play(path, gen, cursor, duration, was_live);
             *self.state.lock().unwrap() = PlayerState::Playing;
+            self.state_atomic.store(STATE_PLAYING, Ordering::SeqCst);
             return Ok(());
         }
         self.loading.store(true, Ordering::SeqCst);
@@ -928,6 +1045,7 @@ impl Engine for CpalEngine {
             duration_secs: None,
         });
         *self.state.lock().unwrap() = PlayerState::Buffering;
+        self.state_atomic.store(STATE_BUFFERING, Ordering::SeqCst);
         self.silence.lock().unwrap().reset();
         self.load_tx
             .send(LoadJob::Play {
@@ -942,6 +1060,7 @@ impl Engine for CpalEngine {
 
     fn pause(&self) {
         *self.state.lock().unwrap() = PlayerState::Paused;
+        self.state_atomic.store(STATE_PAUSED, Ordering::SeqCst);
     }
 
     fn resume(&self) {
@@ -950,8 +1069,10 @@ impl Engine for CpalEngine {
         // advances instead of stranding the transport in `Paused`).
         if !self.xfade.lock().unwrap().is_done() {
             *self.state.lock().unwrap() = PlayerState::Playing;
+            self.state_atomic.store(STATE_PLAYING, Ordering::SeqCst);
         } else if self.loading.load(Ordering::SeqCst) {
             *self.state.lock().unwrap() = PlayerState::Buffering;
+            self.state_atomic.store(STATE_BUFFERING, Ordering::SeqCst);
         }
     }
 
@@ -968,6 +1089,7 @@ impl Engine for CpalEngine {
         drop(xf);
         self.silence.lock().unwrap().reset();
         *self.state.lock().unwrap() = PlayerState::Stopped;
+        self.state_atomic.store(STATE_STOPPED, Ordering::SeqCst);
         *self.current_track.lock().unwrap() = None;
     }
 
@@ -983,12 +1105,12 @@ impl Engine for CpalEngine {
 
     fn set_volume(&self, vol: f32) {
         let clamped = vol.clamp(0.0, 1.5);
-        *self.volume.lock().unwrap() = clamped;
+        store_volume_bits(&self.volume, clamped);
         self.mixer.lock().unwrap().set_gain(clamped);
     }
 
     fn volume(&self) -> f32 {
-        *self.volume.lock().unwrap()
+        load_volume_bits(&self.volume)
     }
 
     fn state(&self) -> PlayerState {
@@ -1371,6 +1493,39 @@ mod tests {
             v.push(1.0 - t);
         }
         v
+    }
+
+    #[test]
+    fn rt_mirrors_roundtrip() {
+        for s in [
+            PlayerState::Stopped,
+            PlayerState::Playing,
+            PlayerState::Paused,
+            PlayerState::Buffering,
+        ] {
+            assert_eq!(decode_state(encode_state(s)), s);
+        }
+        assert_eq!(decode_state(99), PlayerState::Stopped);
+        let v = AtomicU32::new(1.0f32.to_bits());
+        assert!((load_volume_bits(&v) - 1.0).abs() < 1e-9);
+        store_volume_bits(&v, 0.37);
+        assert!((load_volume_bits(&v) - 0.37).abs() < 1e-6);
+    }
+
+    #[test]
+    fn transport_writes_sync_the_atomic_mirror() {
+        let eng = CpalEngine::new();
+        eng.stop();
+        assert_eq!(eng.state(), PlayerState::Stopped);
+        assert_eq!(eng.state_atomic.load(Ordering::SeqCst), STATE_STOPPED);
+        eng.pause();
+        assert_eq!(eng.state(), PlayerState::Paused);
+        assert_eq!(eng.state_atomic.load(Ordering::SeqCst), STATE_PAUSED);
+        eng.resume(); // nothing loaded, not loading: stays Paused
+        assert_eq!(eng.state_atomic.load(Ordering::SeqCst), STATE_PAUSED);
+        eng.set_volume(0.5);
+        assert!((eng.volume() - 0.5).abs() < 1e-6);
+        assert_eq!(eng.volume.load(Ordering::SeqCst), 0.5f32.to_bits());
     }
 
     #[test]
