@@ -4,24 +4,27 @@
 
 A professional radio station management application inspired by RadioBoss, featuring audio playback, library management, playlist automation, and streaming capabilities.
 
-## Features (In Progress)
+## Features
 
-- ✅ **Audio Playback** — Play, pause, stop, volume control via cpal (gapless crossfade engine)
-- ✅ **Music Library** — SQLite-backed database with metadata extraction
-- ✅ **Playlist Management** — Create, edit, and manage playlists
-- ✅ **Metadata Reading** — Auto-read ID3, Vorbis, and other tags via lofty
+- ✅ **Audio Playback** — Play, pause, stop, volume via cpal; stereo gapless engine with equal-power crossfade and background decoding (UI never freezes)
+- ✅ **Music Library** — SQLite database with metadata extraction, search, health scan, loudness analysis, auto-classification (music/jingle/ad)
+- ✅ **Playlist Management** — Create, edit, and manage playlists; auto-generator with rotation rules (no-repeat, separation, playcount priority, dayparting, jingle slots)
+- ✅ **Scheduler** — Time + weekday events with expiration, Auto-DJ continuity with prefetch handoff
+- ✅ **Advertisement Scheduler** — Dated blocks with intro→spot→outro chained breaks
+- ✅ **Cart Wall** — 8 pads with hotkeys, progress, assign-from-library
+- ✅ **12-Band EQ + Limiter + Loudness** — Program EQ, brickwall limiter, BS.1770/R128 normalization
+- ✅ **Streaming Output** — Icecast source client (MP3) with auto-reconnect and Settings UI
+- ✅ **Microphone/Line-In** — Live input with voice-activated ducking and bed mix
+- ✅ **Reports** — Play logs with ranged reports + CSV export
 - ✅ **Dark Theme UI** — Modern dark radio-station theme via Slint
 
 ### Coming Soon
 
-- 🔄 Crossfading engine
-- 🔄 12-band equalizer
-- 🔄 Playlist auto-generator with rotation rules
-- 🔄 Advertisement scheduler
-- 🔄 Icecast/Shoutcast streaming output
-- 🔄 Cart wall for instant playback
-- 🔄 Report generator (play logs → XLS/PDF)
-- 🔄 Microphone/line-in input
+- 🔄 Shoutcast output + listener stats
+- 🔄 Voice tracking & teasers
+- 🔄 Library depth (mass tag editor, BPM scan, dupe detection, auto-sync)
+- 🔄 XLS/PDF report export
+- 🔄 Headless/server mode + web remote UI
 
 ## Tech Stack
 

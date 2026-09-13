@@ -53,7 +53,7 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [x] Scheduler MVP: event list, Add/Edit dialog (time/action/days), auto-tick firing `generate`/`load`/`play`
 - [x] Track kinds (music/jingle/ad): auto-classify on import, `set_kind`, pre-kind DB migration
 - [x] Cart Wall MVP: 8 pads, instant play, jingle-first seeding/loading with kind badges
-- [ ] Crossfader + gapless (see §1.1 — full scope below)
+- [x] Crossfader + gapless (see §1.1 — stereo dual-cursor engine, equal-power/linear curves, background decode loader)
 - [x] 12-band EQ + limiter (see §1.1)
 - [x] Playlist auto-generator with rotation rules (engine done: repeat/separation/priority/daypart/jingles; UI presets open)
 - [x] Auto-DJ continuity: 1 s tick with live progress, prefetch handoff
@@ -62,7 +62,7 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
 - [x] Icecast/Shoutcast output (see §1.5)
 - [x] Mic/line-in input with ducking (see §1.6)
 - [x] Report generator (play logs → CSV + screen; XLS/PDF open — see §1.9)
-- [ ] File dialog (`rfd`), progress timer in UI (see §1.9) — `rfd` import done, progress timer still open
+- [x] File dialog (`rfd`) + import progress in UI (see §1.9) — native multi-select dialog, chunked per-tick import with live status
 - [x] Settings screen (device picker, live DSP prefs, license, streaming config — see §1.9)
 - [ ] Quality: `cargo fmt/clippy`, unit tests (`library`, `playlist`), CI (see §1.10)
 
@@ -72,10 +72,10 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 
 | Area | RadioBOSS has | CrabBoss today | Status |
 |---|---|---|---|
-| Playback engine | Gapless, sample-accurate crossfade, curve choice | `Mixer` DSP exists, not wired to two cursors; mono-only `CpalEngine` | 🟡 |
+| Playback engine | Gapless, sample-accurate crossfade, curve choice | Stereo dual-cursor engine, equal-power/linear crossfade, background decode loader, gapless queued handoff | ✅ |
 | EQ / dynamics | Full EQ, limiter, loudness normalization | 12-band peaking EQ (±12 dB) + brickwall limiter + BS.1770/R128 loudness normalization (library scan, per-track gain at decode) | ✅ |
-| Playlist generator | Rotation, no-repeat, separation, playcount priority, dayparting, multi-playlist UI | Checkbox only (+ kind-aware counting) | ❌ |
-| Ad scheduler | Dated blocks, intros/outros, color-coded list | Unchecked | ❌ |
+| Playlist generator | Rotation, no-repeat, separation, playcount priority, dayparting, multi-playlist UI | Engine complete (repeat/separation/priority/daypart/jingles) + scheduler `generate` + Auto-DJ rotation; multi-preset UI open | 🟡 |
+| Ad scheduler | Dated blocks, intros/outros, color-coded list | Dated blocks with intro→spot→outro chained breaks + engine pending queue | ✅ |
 | Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP + "valid until" expiry with row badges and warnings banner | ✅ |
 | Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
@@ -83,14 +83,14 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Mic / line-in | Mixed input, sidechain ducking, bed music | cpal input + `rtrb` ring summed pre-limiter/tap, voice-activated ducker, live device switching, Settings mic panel | ✅ |
 | Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
 | Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
-| Reporting | Play logs → XLS/PDF, royalty reports | Unchecked | ❌ |
-| Library depth | Mass tag editor, BPM scan, dupe detection, scheduled sync, health scan | `scan_directory()` only | 🟡 |
+| Reporting | Play logs → XLS/PDF, royalty reports | Play logging on all paths + ranged reports + CSV export (jingles/ads excluded); XLS/PDF open | ✅ |
+| Library depth | Mass tag editor, BPM scan, dupe detection, scheduled sync, health scan | Scan + missing-file health scan + loudness scan + kind auto-classify/repair; mass-tag/BPM/dupes/auto-sync open | 🟡 |
 | Track health | Proactive missing/corrupt detection | ✅ `missing_files()` + startup/on-demand scan, ⚠ row flags | ✅ |
 | UI niceties | Hotkeys, screen-reader a11y, drag-drop, waveform | — | — |
 | Stream archive | Scheduled output recording | — | — |
 | License | Offline key, holder, tier | MVP done (checksum → ed25519 TODO) | ✅ |
-| File import UX | File dialog | `rfd` unchecked | ❌ |
-| Quality gates | — | Tests in scheduler/cart/mixer/license; none for library/playlist; no CI | 🟡 |
+| File import UX | File dialog | Native `rfd` multi-select import with per-tick progress + report-export dialog | ✅ |
+| Quality gates | — | 107 tests green (library, playlist, scheduler, cart, mixer, license, stream); `cargo fmt` + `clippy -D warnings` in CI | ✅ |
 
 Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardware, see §2).
 
@@ -194,7 +194,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] `rfd` native file dialog for import (+ report export)
 
 ### 1.10 Quality gates
-- [ ] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — `playlist` done, `library` partial (kind tests only)
+- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — 107 tests green: kind classification + repair, loudness store/count, migrations, generator rules, manager CRUD
 - [x] `cargo fmt` + `clippy` in CI (`-D warnings`, zero warnings) + `ci.yml` (fmt/clippy/test on push+PR)
 
 ## 2. Beyond Parity — Where CrabBoss Wins
