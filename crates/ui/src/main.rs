@@ -3171,12 +3171,12 @@ fn view_settings(state: &App) -> Element<'_, Message> {
             text_input("Port", &stream_cfg.port.to_string())
                 .on_input(Message::StreamPort)
                 .padding(6),
-                    text_input("Mount", &stream_cfg.mount)
-                        .on_input(Message::StreamMount)
-                        .padding(6),
-                    text_input("Username", &stream_cfg.username)
-                        .on_input(Message::StreamUsername)
-                        .padding(6),
+            text_input("Mount", &stream_cfg.mount)
+                .on_input(Message::StreamMount)
+                .padding(6),
+            text_input("Username", &stream_cfg.username)
+                .on_input(Message::StreamUsername)
+                .padding(6),
             text_input(
                 "Password",
                 if stream_cfg.password.is_empty() {
