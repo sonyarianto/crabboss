@@ -2402,7 +2402,7 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
         iced::widget::space::horizontal(),
         button(text("Health").size(12)).on_press(Message::HealthCheck),
         button(text("Loudness").size(12)).on_press(Message::LoudnessScan),
-        button(text("+ Import").size(12)).on_press(Message::ImportFiles),
+        button(text("Import").size(12)).on_press(Message::ImportFiles),
     ]
     .spacing(6);
 
