@@ -204,9 +204,9 @@ impl Screen {
         match self {
             Screen::Home => "Home",
             Screen::Playout => "Playout",
-            Screen::Media => "Media",
+            Screen::Media => "Library",
             Screen::Scheduler => "Scheduler",
-            Screen::Carts => "Carts",
+            Screen::Carts => "Cart Wall",
             Screen::Reports => "Reports",
             Screen::Ads => "Ads",
             Screen::Settings => "Settings",
@@ -2293,8 +2293,8 @@ fn view_home(state: &App) -> Element<'_, Message> {
     ]
     .spacing(12);
     let actions = row![
-        button(text("Open Playout").size(14)).on_press(Message::Navigate(Screen::Playout)),
-        button(text("Media Manager").size(14)).on_press(Message::Navigate(Screen::Media)),
+        button(text("Playout").size(14)).on_press(Message::Navigate(Screen::Playout)),
+        button(text("Library").size(14)).on_press(Message::Navigate(Screen::Media)),
         button(text("Scheduler").size(14)).on_press(Message::Navigate(Screen::Scheduler)),
         button(text("Cart Wall").size(14)).on_press(Message::Navigate(Screen::Carts)),
     ]
@@ -2484,9 +2484,13 @@ fn view_library_page(state: &App) -> Element<'_, Message> {
 }
 
 fn view_playout(state: &App) -> Element<'_, Message> {
-    row![
-        container(view_player_panel(state)).width(Length::Fixed(300.0)),
-        container(view_library_panel(state)).width(Length::Fill),
+    column![
+        text("Playout").size(16),
+        row![
+            container(view_player_panel(state)).width(Length::Fixed(300.0)),
+            container(view_library_panel(state)).width(Length::Fill),
+        ]
+        .spacing(8),
     ]
     .spacing(8)
     .padding(8)
