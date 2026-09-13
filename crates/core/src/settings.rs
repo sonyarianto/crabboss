@@ -194,10 +194,7 @@ mod tests {
         assert_eq!(d.station_name, "CrabBoss FM");
         let blank = dir.join("crabboss-settings-blank-name.json");
         std::fs::write(&blank, br#"{"station_name":"   "}"#).unwrap();
-        assert_eq!(
-            AppSettings::load(&blank).station_name,
-            "CrabBoss FM"
-        );
+        assert_eq!(AppSettings::load(&blank).station_name, "CrabBoss FM");
         std::fs::remove_file(&blank).ok();
         let bad = dir.join("crabboss-settings-bad.json");
         std::fs::write(&bad, b"{not json").unwrap();

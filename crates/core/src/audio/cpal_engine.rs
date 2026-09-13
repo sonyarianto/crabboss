@@ -734,10 +734,7 @@ impl CpalEngine {
         cpal::default_host()
             .output_devices()
             .map(|devs| {
-                devs
-                    .filter_map(|d| {
-                        d.description().ok().map(|desc| desc.name().to_string())
-                    })
+                devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
@@ -804,110 +801,107 @@ impl CpalEngine {
             // so the callback never blocks on a UI-held lock.
             let mut last_mic_level = 1.0f32;
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let vol = load_volume_bits(&volume);
-                    // Lock-free transport read; writers sync the mirror while
-                    // holding `state`, so the callback never blocks here.
-                    let playing = state_atomic.load(Ordering::Relaxed) == STATE_PLAYING;
-                    let mut mx = mixer.lock().unwrap();
-                    let mut xf = xfade.lock().unwrap();
-                    let mut sil = silence.lock().unwrap();
-                    // Program-bus tap (streaming): cloned once per callback,
-                    // without blocking — a concurrent stream start/stop costs
-                    // one buffer of tap, never a dropout.
-                    let tap = stream_tap.try_lock().ok().and_then(|g| g.clone());
-                    let mut tap_buf = [0.0f32; 8192];
-                    let mut tap_n = 0usize;
-                    // Mic drain: locked once per callback, popped per frame.
-                    // Input and output devices drift apart over hours, so
-                    // bound the buffered latency — discard the oldest down
-                    // to 1/4 ring when more than 1/2 ring is buffered.
-                    let mic_on = mic_live.load(Ordering::Relaxed);
-                    if let Ok(cfg) = mic_config.try_lock() {
-                        last_mic_level = cfg.level;
-                    }
-                    let mic_level = last_mic_level;
-                    let mut mic_guard = mic_consumer.try_lock().ok();
-                    if mic_on {
-                        if let Some(con) = mic_guard.as_mut().and_then(|g| g.as_mut()) {
-                            let buffered = con.slots();
-                            if buffered > MIC_RING_SAMPLES / 2 {
-                                let mut drop_n = (buffered - MIC_RING_SAMPLES / 4) & !1;
-                                while drop_n > 0 {
-                                    if con.pop().is_err() {
-                                        break;
-                                    }
-                                    drop_n -= 1;
+                let vol = load_volume_bits(&volume);
+                // Lock-free transport read; writers sync the mirror while
+                // holding `state`, so the callback never blocks here.
+                let playing = state_atomic.load(Ordering::Relaxed) == STATE_PLAYING;
+                let mut mx = mixer.lock().unwrap();
+                let mut xf = xfade.lock().unwrap();
+                let mut sil = silence.lock().unwrap();
+                // Program-bus tap (streaming): cloned once per callback,
+                // without blocking — a concurrent stream start/stop costs
+                // one buffer of tap, never a dropout.
+                let tap = stream_tap.try_lock().ok().and_then(|g| g.clone());
+                let mut tap_buf = [0.0f32; 8192];
+                let mut tap_n = 0usize;
+                // Mic drain: locked once per callback, popped per frame.
+                // Input and output devices drift apart over hours, so
+                // bound the buffered latency — discard the oldest down
+                // to 1/4 ring when more than 1/2 ring is buffered.
+                let mic_on = mic_live.load(Ordering::Relaxed);
+                if let Ok(cfg) = mic_config.try_lock() {
+                    last_mic_level = cfg.level;
+                }
+                let mic_level = last_mic_level;
+                let mut mic_guard = mic_consumer.try_lock().ok();
+                if mic_on {
+                    if let Some(con) = mic_guard.as_mut().and_then(|g| g.as_mut()) {
+                        let buffered = con.slots();
+                        if buffered > MIC_RING_SAMPLES / 2 {
+                            let mut drop_n = (buffered - MIC_RING_SAMPLES / 4) & !1;
+                            while drop_n > 0 {
+                                if con.pop().is_err() {
+                                    break;
                                 }
+                                drop_n -= 1;
                             }
                         }
                     }
+                }
 
-                    for frame in data.chunks_mut(channels) {
-                        let req = if playing { xf.pull() } else { None };
-                        // Mic sums into the program bus ahead of the limiter
-                        // + stream tap (voice goes out over the broadcast
-                        // feed too), independent of transport state so talk
-                        // breaks work over a silent bed.
-                        let mic_frame = if mic_on {
-                            mic_guard
-                                .as_mut()
-                                .and_then(|g| g.as_mut())
-                                .and_then(|con| {
-                                    con.pop().ok().map(|l| {
-                                        let r = con.pop().unwrap_or(l);
-                                        Frame { l, r }
-                                    })
-                                })
-                        } else {
-                            None
-                        };
-                        let (l, r) = match req {
-                            Some((a, b, x)) => {
-                                let f = mx.process_x_mic(Some(a), b, x, mic_frame, mic_level);
-                                (f.l, f.r)
-                            }
-                            None => {
-                                let f = mx.process_x_mic(None, None, 0.0, mic_frame, mic_level);
-                                (f.l, f.r)
-                            }
-                        };
-                        // Tap post-DSP, pre-monitor-volume: the broadcast
-                        // feed carries full program level regardless of the
-                        // operator's local listening volume.
-                        if tap.is_some() {
-                            if tap_n + 2 > tap_buf.len() {
-                                if let Some(t) = &tap {
-                                    t.push(&tap_buf[..tap_n]);
-                                }
-                                tap_n = 0;
-                            }
-                            tap_buf[tap_n] = l;
-                            tap_buf[tap_n + 1] = r;
-                            tap_n += 2;
+                for frame in data.chunks_mut(channels) {
+                    let req = if playing { xf.pull() } else { None };
+                    // Mic sums into the program bus ahead of the limiter
+                    // + stream tap (voice goes out over the broadcast
+                    // feed too), independent of transport state so talk
+                    // breaks work over a silent bed.
+                    let mic_frame = if mic_on {
+                        mic_guard.as_mut().and_then(|g| g.as_mut()).and_then(|con| {
+                            con.pop().ok().map(|l| {
+                                let r = con.pop().unwrap_or(l);
+                                Frame { l, r }
+                            })
+                        })
+                    } else {
+                        None
+                    };
+                    let (l, r) = match req {
+                        Some((a, b, x)) => {
+                            let f = mx.process_x_mic(Some(a), b, x, mic_frame, mic_level);
+                            (f.l, f.r)
                         }
-                        let (l, r) = (l * vol, r * vol);
-                        sil.push_frame(playing, l, r);
-                        if channels == 1 {
-                            frame[0] = (l + r) * 0.5;
-                        } else {
-                            frame[0] = l;
-                            if channels > 1 {
-                                frame[1] = r;
+                        None => {
+                            let f = mx.process_x_mic(None, None, 0.0, mic_frame, mic_level);
+                            (f.l, f.r)
+                        }
+                    };
+                    // Tap post-DSP, pre-monitor-volume: the broadcast
+                    // feed carries full program level regardless of the
+                    // operator's local listening volume.
+                    if tap.is_some() {
+                        if tap_n + 2 > tap_buf.len() {
+                            if let Some(t) = &tap {
+                                t.push(&tap_buf[..tap_n]);
                             }
-                            for s in frame.iter_mut().skip(2) {
-                                *s = 0.0;
-                            }
+                            tap_n = 0;
+                        }
+                        tap_buf[tap_n] = l;
+                        tap_buf[tap_n + 1] = r;
+                        tap_n += 2;
+                    }
+                    let (l, r) = (l * vol, r * vol);
+                    sil.push_frame(playing, l, r);
+                    if channels == 1 {
+                        frame[0] = (l + r) * 0.5;
+                    } else {
+                        frame[0] = l;
+                        if channels > 1 {
+                            frame[1] = r;
+                        }
+                        for s in frame.iter_mut().skip(2) {
+                            *s = 0.0;
                         }
                     }
-                    // Flush the tap buffer for this callback invocation.
-                    if let Some(t) = &tap {
-                        t.push(&tap_buf[..tap_n]);
-                    }
-                    // Auto-stop at EOF (once per track — a brief lock is fine).
-                    if playing && xf.is_done() {
-                        *state.lock().unwrap() = PlayerState::Stopped;
-                        state_atomic.store(STATE_STOPPED, Ordering::SeqCst);
-                    }
+                }
+                // Flush the tap buffer for this callback invocation.
+                if let Some(t) = &tap {
+                    t.push(&tap_buf[..tap_n]);
+                }
+                // Auto-stop at EOF (once per track — a brief lock is fine).
+                if playing && xf.is_done() {
+                    *state.lock().unwrap() = PlayerState::Stopped;
+                    state_atomic.store(STATE_STOPPED, Ordering::SeqCst);
+                }
             }
         };
         let stream = device
@@ -930,10 +924,7 @@ impl CpalEngine {
         cpal::default_host()
             .input_devices()
             .map(|devs| {
-                devs
-                    .filter_map(|d| {
-                        d.description().ok().map(|desc| desc.name().to_string())
-                    })
+                devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
