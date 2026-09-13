@@ -18,6 +18,7 @@ component TrackRow inherits Rectangle {
     in property <bool> is-selected: false;
 
     callback clicked;
+    callback play-pressed;
 
     height: 36px;
     background: is-selected ? Theme.bg-panel : (is-even ? Theme.bg-primary : Theme.bg-secondary);
@@ -32,6 +33,25 @@ component TrackRow inherits Rectangle {
         padding-left: 12px;
         padding-right: 12px;
         spacing: 8px;
+
+        // explicit per-row play button (row click only selects)
+        Rectangle {
+            width: 28px;
+            height: 28px;
+            border-radius: 14px;
+            background: Theme.bg-panel;
+            y: (parent.height - self.height) / 2;
+            Text {
+                text: "▶";
+                color: Theme.accent;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                clicked => { root.play-pressed(); }
+            }
+        }
 
         // kind badge: Music / Jingle / Ad
         Rectangle {
@@ -73,6 +93,7 @@ component TrackRow inherits Rectangle {
             color: Theme.text-dim;
             font-size: 12px;
             vertical-alignment: center;
+            horizontal-alignment: right;
             horizontal-stretch: 1;
         }
 
@@ -136,6 +157,12 @@ component ListHeader inherits Rectangle {
         padding-right: 12px;
         spacing: 8px;
 
+        // spacer over the per-row play buttons
+        Text {
+            text: "";
+            width: 28px;
+        }
+
         Text {
             text: "Kind";
             color: Theme.text-dim;
@@ -169,6 +196,7 @@ component ListHeader inherits Rectangle {
             font-size: 11px;
             font-weight: 600;
             vertical-alignment: center;
+            horizontal-alignment: right;
             horizontal-stretch: 1;
         }
 
@@ -191,7 +219,7 @@ export component LibraryPanel inherits Rectangle {
 
     callback search-changed(string);
     callback track-selected(int);
-    callback track-double-clicked(int);
+    callback track-play-pressed(int);
     callback import-files;
     callback health-check;
     callback loudness-scan;
@@ -315,7 +343,11 @@ export component LibraryPanel inherits Rectangle {
                         clicked => {
                             root.selected-index = i;
                             root.track-selected(i);
-                            root.track-double-clicked(i);
+                        }
+                        play-pressed => {
+                            root.selected-index = i;
+                            root.track-selected(i);
+                            root.track-play-pressed(i);
                         }
                     }
                 }

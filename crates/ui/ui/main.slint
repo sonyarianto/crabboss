@@ -80,6 +80,7 @@ export component MainWindow inherits Window {
     // -- Library state (live model; both Playout tab and Media screen bind here) --
     in-out property <[LibTrack]> library-tracks;
     in-out property <string> library-status: "";
+    in-out property <string> library-count-label: "0 tracks";
     callback loudness-scan;
 
     // -- Report state --
@@ -142,7 +143,7 @@ export component MainWindow inherits Window {
     callback library-health-check;
     callback library-search-changed(string);
     callback library-track-selected(int);
-    callback library-track-double-clicked(int);
+    callback library-track-play-pressed(int);
 
     // -- Playlist callbacks --
     callback playlist-play-item(int);
@@ -413,12 +414,13 @@ export component MainWindow inherits Window {
                     LibraryPanel {
                         vertical-stretch: 1;
                         tracks: root.library-tracks;
+                        track-count: root.library-count-label;
                         status <=> root.library-status;
                         selected-index <=> root.library-selected-index;
 
                         search-changed(text) => { root.library-search-changed(text); }
                         track-selected(idx) => { root.library-track-selected(idx); }
-                        track-double-clicked(idx) => { root.library-track-double-clicked(idx); }
+                        track-play-pressed(idx) => { root.library-track-play-pressed(idx); }
                         import-files => { root.import-files(); }
                         health-check => { root.library-health-check(); }
                         loudness-scan => { root.loudness-scan(); }
@@ -431,12 +433,13 @@ export component MainWindow inherits Window {
         if (root.current-screen == 3) : LibraryPanel {
             vertical-stretch: 1;
             tracks: root.library-tracks;
+            track-count: root.library-count-label;
             status <=> root.library-status;
             selected-index <=> root.library-selected-index;
 
             search-changed(text) => { root.library-search-changed(text); }
             track-selected(idx) => { root.library-track-selected(idx); }
-            track-double-clicked(idx) => { root.library-track-double-clicked(idx); }
+            track-play-pressed(idx) => { root.library-track-play-pressed(idx); }
             import-files => { root.import-files(); }
             health-check => { root.library-health-check(); }
             loudness-scan => { root.loudness-scan(); }

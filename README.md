@@ -35,7 +35,7 @@ A professional radio station management application inspired by RadioBoss, featu
 | Audio Decoding | [symphonia](https://crates.io/crates/symphonia) |
 | Metadata | [lofty](https://crates.io/crates/lofty) |
 | Database | [rusqlite](https://crates.io/crates/rusqlite) (SQLite) |
-| Async Runtime | [tokio](https://crates.io/crates/tokio) |
+| Concurrency | std threads + channels (UI thread never blocks on decode/analysis) |
 | Logging | [tracing](https://crates.io/crates/tracing) |
 
 ## Project Structure

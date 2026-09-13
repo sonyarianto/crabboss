@@ -6,7 +6,6 @@ description = "CrabBoss core engine: audio playback, library management, and sch
 
 [dependencies]
 # Workspace deps
-tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

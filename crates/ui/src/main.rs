@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc;
 
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -13,6 +14,15 @@ slint::include_modules!();
 
 use crabcore::audio::{Engine, EQ_BAND_COUNT};
 use crabcore::library::TrackKind;
+
+/// One analyzed track posted by the loudness worker thread back to the
+/// UI thread (which alone writes to SQLite).
+struct LoudnessDone {
+    id: String,
+    file_name: String,
+    lufs: f32,
+    gain_db: f32,
+}
 
 /// Application state shared between UI callbacks
 struct AppState {
@@ -22,7 +32,7 @@ struct AppState {
     playlist_manager: crabcore::playlist::PlaylistManager,
     #[allow(dead_code)]
     current_track_index: usize,
-    /// True while the loudness scan timer is mid-scan (single-flight guard).
+    /// True while the loudness background scan is in flight (single-flight guard).
     loudness_scanning: Rc<RefCell<bool>>,
 }
 
@@ -258,6 +268,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // row indices from Slint resolve against this.
     let last_shown: Rc<RefCell<Vec<crabcore::library::Track>>> = Rc::new(RefCell::new(Vec::new()));
 
+    // Loudness background scan handles: worker thread → channel → pump timer.
+    // (done, total) progress for the status line.
+    let scan_rx: Rc<RefCell<Option<mpsc::Receiver<LoudnessDone>>>> = Rc::new(RefCell::new(None));
+    let scan_progress: Rc<RefCell<(usize, usize)>> = Rc::new(RefCell::new((0, 0)));
+
     // True while a chunked file import is draining (one file per timer
     // tick); a second click while active is ignored, not stacked.
     let import_active: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
@@ -287,11 +302,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // -- Library: push tracks to UI (missing files get a ⚠ prefix) --
+    // `total` is the full library size; when a search filter is active
+    // (`shown < total`) the header reads "N of M tracks" so filtering is
+    // visibly working.
     fn refresh_library(
         ui: &MainWindow,
         tracks: Vec<crabcore::library::Track>,
         last_shown: &Rc<RefCell<Vec<crabcore::library::Track>>>,
+        total: usize,
     ) {
+        let shown = tracks.len();
         let rows: Vec<LibTrack> = tracks
             .iter()
             .map(|t| {
@@ -318,12 +338,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         *last_shown.borrow_mut() = tracks;
         let model = Rc::new(slint::VecModel::from(rows));
         ui.set_library_tracks(model.into());
+        ui.set_library_count_label(
+            if shown == total {
+                format!("{} track{}", total, if total == 1 { "" } else { "s" })
+            } else {
+                format!("{shown} of {total} tracks")
+            }
+            .into(),
+        );
     }
-    refresh_library(
-        &ui,
-        state.borrow().library.get_all_tracks().unwrap_or_default(),
-        &last_shown,
-    );
+    {
+        let tracks = state.borrow().library.get_all_tracks().unwrap_or_default();
+        let total = tracks.len();
+        refresh_library(&ui, tracks, &last_shown, total);
+    }
     ui.set_library_status("".into());
 
     // -- Library health: startup scan + on-demand --
@@ -360,7 +388,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tracks = s.library.get_all_tracks().unwrap_or_default();
         ui.set_track_count(tracks.len() as i32);
         drop(s);
-        refresh_library(ui, tracks, last_shown);
+        let total = tracks.len();
+        refresh_library(ui, tracks, last_shown, total);
     }
     {
         let s = state.borrow();
@@ -392,84 +421,162 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // -- Loudness scan: analyze un-analyzed tracks one per timer tick so
-    //    the window stays responsive. The timer idles (flag check only)
-    //    once the scan completes. --
+    // -- Loudness scan (background worker): analyze un-analyzed tracks on a
+    //    dedicated thread so the UI thread never blocks on full-file decode
+    //    (one track costs seconds — the old one-per-tick scan froze the
+    //    window for the whole per-track duration). The worker only reads
+    //    audio files and posts results over a channel; the pump timer below
+    //    stores them via `Library` on the UI thread (SQLite stays
+    //    single-threaded) and refreshes the table once, on completion. --
+    fn start_loudness_scan(
+        state: &Rc<RefCell<AppState>>,
+        ui: &MainWindow,
+        scan_rx: &Rc<RefCell<Option<mpsc::Receiver<LoudnessDone>>>>,
+        scan_progress: &Rc<RefCell<(usize, usize)>>,
+        announce_empty: bool,
+    ) {
+        if *state.borrow().loudness_scanning.borrow() {
+            return; // already running
+        }
+        let jobs: Vec<(String, String, String)> = state
+            .borrow()
+            .library
+            .tracks_missing_loudness(usize::MAX)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| (t.id, t.file_path, t.file_name))
+            .collect();
+        if jobs.is_empty() {
+            if announce_empty {
+                ui.set_library_status("✓ All tracks analyzed".into());
+            }
+            return;
+        }
+        let total = jobs.len();
+        *state.borrow().loudness_scanning.borrow_mut() = true;
+        *scan_progress.borrow_mut() = (0, total);
+        let (tx, rx) = mpsc::channel();
+        *scan_rx.borrow_mut() = Some(rx);
+        ui.set_library_status(format!("🔊 Loudness scan starting… ({total} to go)").into());
+        tracing::info!("Loudness scan started ({total} tracks, background thread)");
+        if std::thread::Builder::new()
+            .name("loudness-scan".into())
+            .spawn(move || {
+                for (id, path, file_name) in jobs {
+                    let p = PathBuf::from(&path);
+                    // Missing files get a sentinel so they never wedge the queue.
+                    let (lufs, gain_db) = if !p.is_file() {
+                        (-70.0, 0.0)
+                    } else {
+                        match crabcore::audio::analyze_file(&p) {
+                            Ok(a) => (a.integrated_lufs, a.gain_db),
+                            Err(e) => {
+                                tracing::warn!("Loudness failed for {file_name}: {e}");
+                                (-70.0, 0.0)
+                            }
+                        }
+                    };
+                    if tx
+                        .send(LoudnessDone {
+                            id,
+                            file_name,
+                            lufs,
+                            gain_db,
+                        })
+                        .is_err()
+                    {
+                        break; // UI went away; stop promptly
+                    }
+                }
+            })
+            .is_err()
+        {
+            tracing::error!("Loudness scan: failed to spawn worker thread");
+            *state.borrow().loudness_scanning.borrow_mut() = false;
+            *scan_rx.borrow_mut() = None;
+            ui.set_library_status("⚠ Loudness scan failed to start".into());
+        }
+    }
+    // Pump: drain worker results (100 ms, idle-cheap) and store them. --
     {
         let state = state.clone();
         let ui_weak = ui.as_weak();
         let last_shown = last_shown.clone();
-        ui.on_loudness_scan(move || {
-            let Some(ui) = ui_weak.upgrade() else { return };
-            if *state.borrow().loudness_scanning.borrow() {
-                return; // already running
-            }
-            *state.borrow().loudness_scanning.borrow_mut() = true;
-            ui.set_library_status("🔊 Loudness scan starting…".into());
-            tracing::info!("Loudness scan started");
-            let state = state.clone();
-            let ui_weak = ui.as_weak();
-            let last_shown = last_shown.clone();
-            let tick = slint::Timer::default();
-            tick.start(
-                slint::TimerMode::Repeated,
-                std::time::Duration::from_millis(50),
-                move || {
-                    if !*state.borrow().loudness_scanning.borrow() {
-                        return; // scan not active
-                    }
-                    let Some(ui) = ui_weak.upgrade() else { return };
-                    let s = state.borrow();
-                    let next = s
-                        .library
-                        .tracks_missing_loudness(1)
-                        .ok()
-                        .and_then(|v| v.into_iter().next());
-                    let Some(next) = next else {
-                        // Queue drained: finish up.
-                        drop(s);
-                        *state.borrow().loudness_scanning.borrow_mut() = false;
-                        ui.set_library_status("✓ Loudness scan complete".into());
-                        let tracks = state.borrow().library.get_all_tracks().unwrap_or_default();
-                        ui.set_track_count(tracks.len() as i32);
-                        refresh_library(&ui, tracks, &last_shown);
-                        return;
-                    };
-                    let path = PathBuf::from(&next.file_path);
-                    if !path.is_file() {
-                        // Record a sentinel so missing files never wedge the queue.
-                        let _ = s.library.set_loudness(&next.id, -70.0, 0.0);
-                    } else {
-                        match crabcore::audio::analyze_file(&path) {
-                            Ok(a) => {
-                                let _ =
-                                    s.library
-                                        .set_loudness(&next.id, a.integrated_lufs, a.gain_db);
-                                tracing::info!(
-                                    "Loudness {}: {:.1} LUFS → {:+.1} dB",
-                                    next.file_name,
-                                    a.integrated_lufs,
-                                    a.gain_db
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!("Loudness failed for {}: {}", next.file_name, e);
-                                let _ = s.library.set_loudness(&next.id, -70.0, 0.0);
+        let scan_rx = scan_rx.clone();
+        let scan_progress = scan_progress.clone();
+        let tick = slint::Timer::default();
+        tick.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(100),
+            move || {
+                if !*state.borrow().loudness_scanning.borrow() {
+                    return;
+                }
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let (batch, worker_gone) = {
+                    let mut slot = scan_rx.borrow_mut();
+                    let Some(rx) = slot.as_mut() else { return };
+                    let mut batch = Vec::new();
+                    let mut worker_gone = false;
+                    loop {
+                        match rx.try_recv() {
+                            Ok(m) => batch.push(m),
+                            Err(mpsc::TryRecvError::Empty) => break,
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                worker_gone = true;
+                                break;
                             }
                         }
                     }
-                    let remaining = s
-                        .library
-                        .tracks_missing_loudness(1)
-                        .map(|v| v.len())
-                        .unwrap_or(0);
-                    drop(s);
+                    (batch, worker_gone)
+                };
+                if batch.is_empty() && !worker_gone {
+                    return;
+                }
+                {
+                    let s = state.borrow();
+                    for m in &batch {
+                        let _ = s.library.set_loudness(&m.id, m.lufs, m.gain_db);
+                        tracing::info!(
+                            "Loudness {}: {:.1} LUFS → {:+.1} dB",
+                            m.file_name,
+                            m.lufs,
+                            m.gain_db
+                        );
+                    }
+                }
+                let (done, total) = {
+                    let mut p = scan_progress.borrow_mut();
+                    p.0 += batch.len();
+                    *p
+                };
+                if done >= total || worker_gone {
+                    *state.borrow().loudness_scanning.borrow_mut() = false;
+                    *scan_rx.borrow_mut() = None;
+                    let tracks = state.borrow().library.get_all_tracks().unwrap_or_default();
+                    ui.set_track_count(tracks.len() as i32);
                     ui.set_library_status(
-                        format!("🔊 Analyzing loudness… {} to go", remaining).into(),
+                        format!("✓ Loudness scan complete ({done} analyzed)").into(),
                     );
-                },
-            );
-            std::mem::forget(tick);
+                    let total = tracks.len();
+                    refresh_library(&ui, tracks, &last_shown, total);
+                    tracing::info!("Loudness scan complete: {done}/{total} analyzed");
+                } else {
+                    ui.set_library_status(format!("🔊 Analyzing loudness… {done}/{total}").into());
+                }
+            },
+        );
+        std::mem::forget(tick);
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        let scan_rx = scan_rx.clone();
+        let scan_progress = scan_progress.clone();
+        ui.on_loudness_scan(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                start_loudness_scan(&state, &ui, &scan_rx, &scan_progress, true);
+            }
         });
     }
 
@@ -2519,6 +2626,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui_weak = ui.as_weak();
         let last_shown = last_shown.clone();
         let import_active = import_active.clone();
+        let scan_rx = scan_rx.clone();
+        let scan_progress = scan_progress.clone();
         ui.on_import_files(move || {
             let files = rfd::FileDialog::new()
                 .set_title("Import audio files")
@@ -2553,6 +2662,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ui_weak = ui_weak.clone();
             let last_shown = last_shown.clone();
             let import_active = import_active.clone();
+            let scan_rx = scan_rx.clone();
+            let scan_progress = scan_progress.clone();
             let tick = slint::Timer::default();
             tick.start(
                 slint::TimerMode::Repeated,
@@ -2579,8 +2690,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             .into(),
                         );
-                        refresh_library(&ui, tracks, &last_shown);
+                        let total = tracks.len();
+                        refresh_library(&ui, tracks, &last_shown, total);
                         tracing::info!("Import complete: {added} added, {skipped} skipped");
+                        // New tracks still need loudness analysis — hand them
+                        // to the background scanner (no freeze, no-op when
+                        // nothing is pending or a scan already runs).
+                        if added > 0 {
+                            start_loudness_scan(&state, &ui, &scan_rx, &scan_progress, false);
+                        }
                         return;
                     };
                     let done = total - pending.borrow().len();
@@ -2610,25 +2728,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui_weak = ui.as_weak();
         ui.on_library_search_changed(move |query| {
             let s = state.borrow();
+            // Total first (empty query reuses it — no double query).
+            let all = s.library.get_all_tracks().unwrap_or_default();
+            let total = all.len();
             let tracks = if query.trim().is_empty() {
-                s.library.get_all_tracks().unwrap_or_default()
+                all
             } else {
                 s.library.search(query.trim()).unwrap_or_default()
             };
             drop(s);
             if let Some(ui) = ui_weak.upgrade() {
-                refresh_library(&ui, tracks, &last_shown);
+                tracing::info!(
+                    "Library search {:?}: {} shown of {total}",
+                    query.to_string(),
+                    tracks.len()
+                );
+                refresh_library(&ui, tracks, &last_shown, total);
             }
         });
     }
 
-    // -- Library Track Double-Click (Play) --
+    // -- Library Track Play Button (explicit ▶ per row; row click only selects) --
     {
         let state = state.clone();
         let ui_weak = ui.as_weak();
         let last_shown = last_shown.clone();
         let auto_continue = auto_continue.clone();
-        ui.on_library_track_double_clicked(move |index: i32| {
+        ui.on_library_track_play_pressed(move |index: i32| {
             let shown = last_shown.borrow();
             let track = shown.get(index as usize).cloned();
             drop(shown);
@@ -2786,7 +2912,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing::info!("🦀 CrabBoss UI ready — launching window");
-    ui.window().set_maximized(true);
+    // Start maximized. NOTE: do NOT call `set_maximized(true)` here before
+    // `run()` — on Windows the window is then created in a half-maximized
+    // state (maximized caption, small size stuck top-left) and any later
+    // `set_maximized(true)` is a no-op. Instead queue it into the event
+    // loop: `run()` shows the window first, so the closure lands on a real,
+    // normal window and the false→true transition applies for real.
+    {
+        let ui_weak = ui.as_weak();
+        if let Err(e) = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.window().set_maximized(true);
+            }
+        }) {
+            tracing::warn!("Could not queue maximize request: {e}");
+        }
+    }
+    // Auto-start the loudness scan for anything still pending (e.g. tracks
+    // imported in a previous session whose scan never finished) — background
+    // thread, so startup stays instant. Quiet when there is nothing to do.
+    {
+        let pending = state.borrow().library.count_missing_loudness().unwrap_or(0);
+        if pending > 0 {
+            tracing::info!("Auto-starting loudness scan ({pending} pending)");
+            start_loudness_scan(&state, &ui, &scan_rx, &scan_progress, false);
+        }
+    }
     ui.run()?;
 
     Ok(())
