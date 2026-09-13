@@ -45,8 +45,32 @@ fn kind_label(k: TrackKind) -> &'static str {
     }
 }
 
+/// Display title: metadata title, else the file name without its container
+/// extension ("Song.mp3" -> "Song"). Display-only; stored data is untouched.
 fn track_label(t: &Track) -> String {
-    t.title.clone().unwrap_or_else(|| t.file_name.clone())
+    t.title
+        .clone()
+        .unwrap_or_else(|| strip_audio_extension(&t.file_name))
+}
+
+/// Strip the trailing container extension for display. Keeps names without
+/// a dot (or dotfiles) as-is.
+fn strip_audio_extension(name: &str) -> String {
+    match name.rfind('.') {
+        Some(i) if i > 0 => name[..i].to_string(),
+        _ => name.to_string(),
+    }
+}
+
+/// "Title - Artist", omitting the separator when one side is missing so
+/// untagged files never render a dangling " - ".
+fn join_title_artist(title: &str, artist: &str) -> String {
+    match (title.is_empty(), artist.is_empty()) {
+        (false, false) => format!("{title} - {artist}"),
+        (false, true) => title.to_string(),
+        (true, false) => artist.to_string(),
+        (true, true) => String::new(),
+    }
 }
 
 /// `--engine cpal` (only backend; `--engine rodio` warns and uses cpal).
@@ -543,7 +567,11 @@ impl App {
                 tracing::info!("Auto-DJ playing: {}", label);
                 self.is_playing = true;
                 self.now_title = label;
-                self.now_artist = "Auto-DJ".into();
+                self.now_artist = pick
+                    .artist
+                    .clone()
+                    .filter(|a| !a.trim().is_empty())
+                    .unwrap_or_else(|| "Auto-DJ".into());
                 self.up_next.clear();
             }
             Err(e) => tracing::error!("Auto-DJ play failed: {}", e),
@@ -879,7 +907,7 @@ impl App {
             let label = t.title.clone().unwrap_or_else(|| {
                 t.path
                     .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
+                    .map(|f| strip_audio_extension(&f.to_string_lossy()))
                     .unwrap_or_default()
             });
             self.player.set_stream_title(&label);
@@ -967,7 +995,7 @@ impl App {
                             t.file_path
                         );
                         let path = PathBuf::from(&t.file_path);
-                        let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
+                        let label = track_label(&t);
                         match self.player.play(&path) {
                             Ok(()) => {
                                 let _ = self.library.record_play(&t.id, t.duration_secs);
@@ -1150,7 +1178,7 @@ fn boot() -> (App, Task<Message>) {
         let jingles = library.list_by_kind(TrackKind::Jingle).unwrap_or_default();
         let music = library.list_by_kind(TrackKind::Music).unwrap_or_default();
         for t in jingles.iter().chain(music.iter()).take(4) {
-            let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
+            let label = track_label(t);
             let _ = carts.create(&label, &t.file_path);
         }
         if track_count > 0 {
@@ -1375,10 +1403,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         state.auto_continue = true;
                         state.lib_selected = Some(i);
                         state.is_playing = true;
-                        state.now_title = track
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| track.file_name.clone());
+                        state.now_title = track_label(&track);
                         state.now_artist = track.artist.clone().unwrap_or_default();
                     }
                     Err(e) => {
@@ -1619,7 +1644,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 .or_else(|| tracks.iter().find(|t| !existing.contains(&t.file_path)));
             match next {
                 Some(t) => {
-                    let label = t.title.clone().unwrap_or_else(|| t.file_name.clone());
+                    let label = track_label(t);
                     if let Err(e) = state.carts.create(&label, &t.file_path) {
                         tracing::error!("Cart add failed: {}", e);
                     }
@@ -1639,10 +1664,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 state.cart_status = "No library track armed - tap one first".into();
                 return Task::none();
             };
-            let label = track
-                .title
-                .clone()
-                .unwrap_or_else(|| track.file_name.clone());
+            let label = track_label(&track);
             if let Err(e) = state.carts.assign_at(slot as i32, &label, &track.file_path) {
                 tracing::error!("Cart place failed: {}", e);
                 return Task::none();
@@ -2187,7 +2209,10 @@ fn view(state: &App) -> Element<'_, Message> {
 /// grow stream/mic indicators later. v1 carries only the on-air status.
 fn view_footer(state: &App) -> Element<'_, Message> {
     let status = if state.is_playing {
-        format!("ON AIR: {} - {}", state.now_title, state.now_artist)
+        format!(
+            "ON AIR: {}",
+            join_title_artist(&state.now_title, &state.now_artist)
+        )
     } else {
         "Off air".to_string()
     };
@@ -2239,7 +2264,10 @@ fn view_sidebar(state: &App) -> Element<'_, Message> {
 
 fn view_home(state: &App) -> Element<'_, Message> {
     let status = if state.is_playing {
-        format!("ON AIR: {} - {}", state.now_title, state.now_artist)
+        format!(
+            "ON AIR: {}",
+            join_title_artist(&state.now_title, &state.now_artist)
+        )
     } else {
         "Off air".to_string()
     };
@@ -2388,7 +2416,7 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
     } else {
         for (i, t) in state.lib_tracks.iter().take(500).enumerate() {
             let missing = !PathBuf::from(&t.file_path).is_file();
-            let base = t.title.clone().unwrap_or_else(|| t.file_name.clone());
+            let base = track_label(t);
             let title = if missing {
                 format!("! {}", base)
             } else if Some(i) == state.lib_selected {
@@ -2433,14 +2461,13 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
             String::new()
         } else {
             format!(
-                "{}: {} - {}",
+                "{}: {}",
                 if state.is_playing {
                     "Playing"
                 } else {
                     "Paused"
                 },
-                state.now_title,
-                state.now_artist
+                join_title_artist(&state.now_title, &state.now_artist)
             )
         })
         .size(11),
@@ -2690,10 +2717,9 @@ fn view_reports(state: &App) -> Element<'_, Message> {
     for e in &state.report_entries {
         list = list.push(
             text(format!(
-                "{} | {} - {} [{}]",
+                "{} | {} [{}]",
                 e.played_at.format("%d/%m %H:%M"),
-                e.title,
-                e.artist,
+                join_title_artist(&e.title, &e.artist),
                 e.kind.as_str()
             ))
             .size(12),
