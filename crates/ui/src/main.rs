@@ -2237,16 +2237,16 @@ fn view_sidebar(state: &App) -> Element<'_, Message> {
         Screen::Ads,
         Screen::Settings,
     ] {
-        let label = if s == state.screen {
-            format!("[{}]", s.label())
+        // Active screen gets the theme's accent button; the rest stay
+        // transparent text buttons — no bracket hacks needed.
+        let entry = button(text(s.label()).size(13))
+            .width(Length::Fill)
+            .on_press(Message::Navigate(s));
+        list = list.push(if s == state.screen {
+            entry.style(iced::widget::button::primary)
         } else {
-            s.label().to_string()
-        };
-        list = list.push(
-            button(text(label).size(13))
-                .width(Length::Fill)
-                .on_press(Message::Navigate(s)),
-        );
+            entry.style(iced::widget::button::text)
+        });
     }
 
     container(
