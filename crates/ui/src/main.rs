@@ -1375,7 +1375,10 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                             .unwrap_or_else(|| track.file_name.clone());
                         state.now_artist = track.artist.clone().unwrap_or_default();
                     }
-                    Err(e) => tracing::error!("Failed to play: {}", e),
+                    Err(e) => {
+                        tracing::error!("Failed to play: {}", e);
+                        state.lib_status = format!("Play failed: {}", e);
+                    }
                 }
             }
         }
@@ -2366,6 +2369,21 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
     column![
         header,
         search,
+        text(if state.now_title == "No track loaded" {
+            String::new()
+        } else {
+            format!(
+                "{}: {} - {}",
+                if state.is_playing {
+                    "Playing"
+                } else {
+                    "Paused"
+                },
+                state.now_title,
+                state.now_artist
+            )
+        })
+        .size(11),
         text(&state.lib_status).size(11),
         scrollable(list).height(Length::Fill),
     ]
