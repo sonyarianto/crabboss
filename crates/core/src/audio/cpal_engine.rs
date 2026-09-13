@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -236,6 +236,9 @@ struct LoaderShared {
     silence: Arc<Mutex<SilenceMonitor>>,
     crossfade_secs: Arc<Mutex<f32>>,
     load_gen: Arc<AtomicU64>,
+    /// Decode jobs submitted but not yet installed (channel-queued or
+    /// decoding). Balanced by [`InflightGuard`] on every loader exit path.
+    load_inflight: Arc<AtomicUsize>,
     /// True while a `play` decode is in flight — the resume target when a
     /// pause lands mid-load (back to `Buffering`, so the landing deck still
     /// advances instead of stranding the transport in `Paused`).
@@ -357,6 +360,20 @@ impl LoaderShared {
     }
 }
 
+/// Balances the [`LoaderShared::load_inflight`] count for one loader job:
+/// every received job was counted at submit, so dropping this guard on any
+/// exit path (install, decode failure, superseded-skip) keeps the counter
+/// exact with no per-outcome bookkeeping to forget.
+struct InflightGuard {
+    n: Arc<AtomicUsize>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.n.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Worker loop: decode jobs FIFO, skipping anything superseded while
 /// queued and discarding anything superseded mid-decode — stale audio is
 /// never installed over a newer request. Returns false when the thread
@@ -366,6 +383,9 @@ fn spawn_loader(shared: LoaderShared, rx: mpsc::Receiver<LoadJob>) -> bool {
         .name("crabboss-loader".into())
         .spawn(move || {
             while let Ok(job) = rx.recv() {
+                let _inflight = InflightGuard {
+                    n: shared.load_inflight.clone(),
+                };
                 if job.gen() != shared.load_gen.load(Ordering::SeqCst) {
                     continue;
                 }
@@ -487,6 +507,9 @@ pub struct CpalEngine {
     load_tx: mpsc::Sender<LoadJob>,
     /// Monotonic generation: every `play`/`stop` invalidates older jobs.
     load_gen: Arc<AtomicU64>,
+    /// Decode jobs submitted but not yet installed (channel-queued or
+    /// decoding). Balanced by [`InflightGuard`] on every loader exit path.
+    load_inflight: Arc<AtomicUsize>,
     /// True while a `play` decode is in flight (resume target). See
     /// [`LoaderShared::loading`].
     loading: Arc<AtomicBool>,
@@ -558,6 +581,7 @@ impl CpalEngine {
         // Background decode loader (decoding needs no device — headless
         // engines and tests get one too).
         let load_gen = Arc::new(AtomicU64::new(0));
+        let load_inflight = Arc::new(AtomicUsize::new(0));
         let loading = Arc::new(AtomicBool::new(false));
         let (load_tx, load_rx) = mpsc::channel();
         let loader_ok = spawn_loader(
@@ -569,6 +593,7 @@ impl CpalEngine {
                 silence: silence.clone(),
                 crossfade_secs: crossfade_secs.clone(),
                 load_gen: load_gen.clone(),
+                load_inflight: load_inflight.clone(),
                 loading: loading.clone(),
                 device_rate,
             },
@@ -605,6 +630,7 @@ impl CpalEngine {
             mic_state,
             load_tx,
             load_gen,
+            load_inflight,
             loading,
             loader_ok,
         }
@@ -620,6 +646,7 @@ impl CpalEngine {
             silence: self.silence.clone(),
             crossfade_secs: self.crossfade_secs.clone(),
             load_gen: self.load_gen.clone(),
+            load_inflight: self.load_inflight.clone(),
             loading: self.loading.clone(),
             device_rate: self.device_rate,
         }
@@ -661,6 +688,19 @@ impl CpalEngine {
             .clamp(-MAX_GAIN_DB, MAX_GAIN_DB)
     }
 
+    /// Enqueue a decode job on the loader thread, counting it as in-flight
+    /// until the loader settles it (install / decode failure /
+    /// superseded-skip, all balanced by [`InflightGuard`]). A failed send
+    /// rolls the count back so it never leaks.
+    fn submit_load(&self, job: LoadJob) -> Result<()> {
+        self.load_inflight.fetch_add(1, Ordering::SeqCst);
+        if let Err(e) = self.load_tx.send(job) {
+            self.load_inflight.fetch_sub(1, Ordering::SeqCst);
+            return Err(CrabError::Audio(format!("decode loader gone: {e}")));
+        }
+        Ok(())
+    }
+
     /// Queue a file to start at the current deck's end (insert-after).
     /// Appends behind anything already pending. Async like `play`: the
     /// job decodes on the loader thread, so Auto-DJ prefetch on the UI
@@ -686,10 +726,7 @@ impl CpalEngine {
             gen: self.load_gen.load(Ordering::SeqCst),
             gain_db,
         };
-        self.load_tx
-            .send(job)
-            .map_err(|e| CrabError::Audio(format!("decode loader gone: {e}")))?;
-        Ok(())
+        self.submit_load(job)
     }
 
     /// List output devices (for Settings screen later).
@@ -1033,14 +1070,12 @@ impl Engine for CpalEngine {
             // old deck through the decode — no on-air gap. Its label stays
             // until the new deck lands (no 00:00 progress flicker).
             self.silence.lock().unwrap().reset();
-            self.load_tx
-                .send(LoadJob::Play {
-                    path,
-                    gen,
-                    was_live,
-                    gain_db,
-                })
-                .map_err(|e| CrabError::Audio(format!("decode loader gone: {e}")))?;
+            self.submit_load(LoadJob::Play {
+                path,
+                gen,
+                was_live,
+                gain_db,
+            })?;
             return Ok(());
         }
         *self.current_track.lock().unwrap() = Some(TrackInfo {
@@ -1052,14 +1087,12 @@ impl Engine for CpalEngine {
         *self.state.lock().unwrap() = PlayerState::Buffering;
         self.state_atomic.store(STATE_BUFFERING, Ordering::SeqCst);
         self.silence.lock().unwrap().reset();
-        self.load_tx
-            .send(LoadJob::Play {
-                path,
-                gen,
-                was_live,
-                gain_db,
-            })
-            .map_err(|e| CrabError::Audio(format!("decode loader gone: {e}")))?;
+        self.submit_load(LoadJob::Play {
+            path,
+            gen,
+            was_live,
+            gain_db,
+        })?;
         Ok(())
     }
 
@@ -1159,6 +1192,10 @@ impl Engine for CpalEngine {
 
     fn pending_count(&self) -> usize {
         self.xfade.lock().unwrap().next.len()
+    }
+
+    fn load_inflight(&self) -> usize {
+        self.load_inflight.load(Ordering::SeqCst)
     }
 
     fn has_queue(&self) -> bool {
@@ -1531,6 +1568,45 @@ mod tests {
         eng.set_volume(0.5);
         assert!((eng.volume() - 0.5).abs() < 1e-6);
         assert_eq!(eng.volume.load(Ordering::SeqCst), 0.5f32.to_bits());
+    }
+
+    #[test]
+    fn queue_counts_inflight_until_install() {
+        let dir = loader_test_dir("inflight");
+        let f = dir.join("q.wav");
+        write_test_wav(&f, 0.5, 48000);
+        let eng = CpalEngine::new();
+        eng.queue(&f).unwrap();
+        // Submitted but not yet decoded: counts as outstanding prefetch so a
+        // fast poll loop won't re-queue the same pick before it lands.
+        assert_eq!(eng.load_inflight(), 1);
+        wait_for("queued deck installs", || {
+            eng.state() == PlayerState::Playing && eng.current_track().is_some_and(|t| t.path == f)
+        });
+        assert_eq!(eng.load_inflight(), 0);
+        eng.stop();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn superseded_queue_drains_inflight() {
+        let dir = loader_test_dir("inflight-sup");
+        let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+        write_test_wav(&a, 0.5, 48000);
+        write_test_wav(&b, 0.5, 48000);
+        let eng = CpalEngine::new();
+        eng.queue(&a).unwrap();
+        eng.play(&b).unwrap();
+        assert_eq!(eng.load_inflight(), 2);
+        // The stale queue job is skipped, the play lands; the count must
+        // settle back to zero rather than leak.
+        wait_for("latest play wins and inflight drains", || {
+            eng.state() == PlayerState::Playing
+                && eng.current_track().is_some_and(|t| t.path == b)
+                && eng.load_inflight() == 0
+        });
+        eng.stop();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Streaming smoke test: audio played locally must arrive at the Icecast

@@ -163,6 +163,14 @@ pub trait Engine {
     fn pending_count(&self) -> usize {
         0
     }
+    /// Decode jobs submitted but not yet installed (sitting in the loader
+    /// channel or decoding). A `queue()` that hasn't installed yet still
+    /// counts as outstanding prefetch — without this, a fast poll loop
+    /// re-queues the same pick once per tick until the first decode lands,
+    /// stacking duplicate decks behind the live one.
+    fn load_inflight(&self) -> usize {
+        0
+    }
     /// True when `queue()` really defers to end-of-track (cpal).
     /// Prefetch must only run here — elsewhere it would cut tracks short.
     fn has_queue(&self) -> bool {

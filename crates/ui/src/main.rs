@@ -1000,7 +1000,11 @@ impl App {
         if !playing {
             return;
         }
-        let pending = self.player.pending_count();
+        // Installed decks plus decode jobs still in flight: `queue()` returns
+        // the moment the job is submitted, so without the in-flight count the
+        // 200 ms tick would re-queue the same pick every tick until the first
+        // decode lands, stacking duplicate decks behind the live one.
+        let pending = self.player.pending_count() + self.player.load_inflight();
         let has_queue = self.player.has_queue();
         let dur_opt = if has_dur { Some(dur) } else { None };
         if !crabcore::audio::needs_prefetch(pos, dur_opt, pending, has_queue, 8.0) {
