@@ -250,6 +250,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // row indices from Slint resolve against this.
     let last_shown: Rc<RefCell<Vec<crabcore::library::Track>>> = Rc::new(RefCell::new(Vec::new()));
 
+    // True while a chunked file import is draining (one file per timer
+    // tick); a second click while active is ignored, not stacked.
+    let import_active: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+
     // Auto-DJ continuity: true while the program feed owns playback
     // (any program play sets it; manual Stop clears it; EOF restarts on it).
     let auto_continue: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
@@ -2341,12 +2345,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // -- 1s tick: live progress + Auto-DJ feed --
-    // Progress labels move on both engines; the feed prefetches ahead on
-    // queue-capable engines and restarts natural EOFs while Auto-DJ owns feed.
+    // Progress labels move; the feed prefetches ahead and restarts natural
+    // EOFs while Auto-DJ owns it. Restart fires only on a genuine
+    // Playing → finished transition — a bare idle Stopped must never
+    // self-start (e.g. right after an import fills the library).
     {
         let state = state.clone();
         let ui_weak = ui.as_weak();
         let auto_continue = auto_continue.clone();
+        let tick_was_playing: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
         let tick = slint::Timer::default();
         tick.start(
             slint::TimerMode::Repeated,
@@ -2421,12 +2428,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 if !ui.get_autodj_enabled() || !*auto_continue.borrow() {
+                    // Still track the transport so a later re-enable sees a
+                    // fresh edge instead of a stale "was playing".
+                    *tick_was_playing.borrow_mut() = playing;
                     return;
                 }
                 let s = state.borrow();
-                // Natural EOF in any state (manual Stop clears the flag):
-                // keep the feed going without a gap.
-                if finished {
+                // Genuine EOF: the transport just fell out of Playing with
+                // nothing left. Idle Stopped (never played, stopped long
+                // ago) is NOT an EOF — manual Stop also clears the flag.
+                let eof_transition = finished && (playing || *tick_was_playing.borrow());
+                *tick_was_playing.borrow_mut() = playing;
+                if eof_transition {
                     drop(s);
                     autodj_play_now(&state, &ui);
                     return;
@@ -2467,10 +2480,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // -- Import Files (native dialog, multi-select audio) --
+    // The dialog returns immediately; files import one per timer tick so
+    // 10+ tracks never freeze the window (each add_track parses tags via
+    // lofty + writes SQLite, tens-to-hundreds of ms on the UI thread).
+    // Progress shows live in the status label; the list refreshes at the
+    // end. The timer idles (flag check only) once the queue drains. --
     {
         let state = state.clone();
         let ui_weak = ui.as_weak();
         let last_shown = last_shown.clone();
+        let import_active = import_active.clone();
         ui.on_import_files(move || {
             let files = rfd::FileDialog::new()
                 .set_title("Import audio files")
@@ -2482,35 +2501,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .pick_files();
             let Some(files) = files else { return };
-            let s = state.borrow();
-            let mut added = 0;
-            let mut skipped = 0;
-            for f in &files {
-                match s.library.add_track(f) {
-                    Ok(t) => {
-                        tracing::info!("Imported {} as {:?}", f.display(), t.kind);
-                        added += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Skipping {}: {}", f.display(), e);
-                        skipped += 1;
-                    }
+            if files.is_empty() {
+                return;
+            }
+            if *import_active.borrow() {
+                tracing::warn!("Import already running; ignoring {} files", files.len());
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_library_status("Import already running…".into());
                 }
+                return;
             }
-            let tracks = s.library.get_all_tracks().unwrap_or_default();
-            drop(s);
+            *import_active.borrow_mut() = true;
+            let total = files.len();
+            let pending = Rc::new(RefCell::new(std::collections::VecDeque::from(files)));
+            let added = Rc::new(RefCell::new(0usize));
+            let skipped = Rc::new(RefCell::new(0usize));
             if let Some(ui) = ui_weak.upgrade() {
-                ui.set_track_count(tracks.len() as i32);
-                ui.set_library_status(
-                    if skipped > 0 {
-                        format!("Imported {}, skipped {}", added, skipped)
-                    } else {
-                        format!("Imported {}", added)
-                    }
-                    .into(),
-                );
-                refresh_library(&ui, tracks, &last_shown);
+                ui.set_library_status(format!("Importing 0/{total}…").into());
             }
+            tracing::info!("Importing {total} files…");
+            let state = state.clone();
+            let ui_weak = ui_weak.clone();
+            let last_shown = last_shown.clone();
+            let import_active = import_active.clone();
+            let tick = slint::Timer::default();
+            tick.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_millis(50),
+                move || {
+                    if !*import_active.borrow() {
+                        return; // import not active
+                    }
+                    let Some(ui) = ui_weak.upgrade() else { return };
+                    let next = pending.borrow_mut().pop_front();
+                    let Some(f) = next else {
+                        // Queue drained: finish up.
+                        *import_active.borrow_mut() = false;
+                        let s = state.borrow();
+                        let tracks = s.library.get_all_tracks().unwrap_or_default();
+                        drop(s);
+                        let (added, skipped) = (*added.borrow(), *skipped.borrow());
+                        ui.set_track_count(tracks.len() as i32);
+                        ui.set_library_status(
+                            if skipped > 0 {
+                                format!("Imported {added}, skipped {skipped}")
+                            } else {
+                                format!("Imported {added}")
+                            }
+                            .into(),
+                        );
+                        refresh_library(&ui, tracks, &last_shown);
+                        tracing::info!("Import complete: {added} added, {skipped} skipped");
+                        return;
+                    };
+                    let done = total - pending.borrow().len();
+                    let s = state.borrow();
+                    match s.library.add_track(&f) {
+                        Ok(t) => {
+                            tracing::info!("Imported {} as {:?}", f.display(), t.kind);
+                            *added.borrow_mut() += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Skipping {}: {}", f.display(), e);
+                            *skipped.borrow_mut() += 1;
+                        }
+                    }
+                    drop(s);
+                    ui.set_library_status(format!("Importing {done}/{total}…").into());
+                },
+            );
+            std::mem::forget(tick);
         });
     }
 
