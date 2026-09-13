@@ -21,13 +21,59 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 /// An established source connection to an Icecast server.
 #[derive(Debug)]
 pub struct IcecastSource {
-    stream: TcpStream,
+    stream: SourceStream,
     /// In-band metadata interval (bytes of audio between metadata blocks),
     /// as announced by the server via `ice-metadata-interval`. 0 = off.
     meta_interval: usize,
     bytes_until_meta: usize,
     /// Send timeout so a stalled server can't wedge the audio thread.
     send_timeout: Duration,
+}
+
+/// Transport under the source connection: plain TCP, or TLS over TCP for
+/// servers behind HTTPS. Handshake and send logic are identical on both.
+/// The TLS session is boxed: it dwarfs the socket, and an unbalanced enum
+/// would bloat every value.
+#[derive(Debug)]
+enum SourceStream {
+    Plain(TcpStream),
+    Tls(Box<native_tls::TlsStream<TcpStream>>),
+}
+
+impl Read for SourceStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            SourceStream::Plain(s) => s.read(buf),
+            SourceStream::Tls(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for SourceStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            SourceStream::Plain(s) => s.write(buf),
+            SourceStream::Tls(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            SourceStream::Plain(s) => s.flush(),
+            SourceStream::Tls(s) => s.flush(),
+        }
+    }
+}
+
+impl SourceStream {
+    /// Reach the raw socket through either variant (socket timeouts live
+    /// there; the TLS session passes them through to the same socket).
+    fn socket(&mut self) -> &TcpStream {
+        match self {
+            SourceStream::Plain(s) => s,
+            SourceStream::Tls(s) => s.get_ref(),
+        }
+    }
 }
 
 /// Handshake outcome: which protocol variant the server accepted.
@@ -50,13 +96,7 @@ impl IcecastSource {
     pub fn connect(config: &StreamConfig) -> Result<(Self, HandshakeProtocol)> {
         let config = config.clone().sanitized();
         let addr = format!("{}:{}", config.host, config.port);
-        let mut stream = TcpStream::connect(&addr)
-            .map_err(|e| CrabError::Audio(format!("Icecast connect {addr}: {e}")))?;
-        stream
-            .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
-            .and_then(|_| stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT)))
-            .map_err(|e| CrabError::Audio(format!("Icecast timeouts: {e}")))?;
-
+        let mut stream = Self::open(&config, &addr)?;
         let headers = Self::request_headers(&config);
         let mount = config.mount.clone();
         match Self::handshake(&mut stream, &addr, "PUT", &mount, &headers, true) {
@@ -67,12 +107,7 @@ impl IcecastSource {
             Err(put_err) => {
                 tracing::warn!("Icecast PUT failed ({put_err}); trying legacy SOURCE");
                 // Reconnect: the failed attempt may have consumed bytes.
-                let mut stream = TcpStream::connect(&addr)
-                    .map_err(|e| CrabError::Audio(format!("Icecast reconnect {addr}: {e}")))?;
-                stream
-                    .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
-                    .and_then(|_| stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT)))
-                    .map_err(|e| CrabError::Audio(format!("Icecast timeouts: {e}")))?;
+                let mut stream = Self::open(&config, &addr)?;
                 let meta_interval =
                     Self::handshake(&mut stream, &addr, "SOURCE", &mount, &headers, false)
                         .map_err(|src_err| {
@@ -86,11 +121,34 @@ impl IcecastSource {
         }
     }
 
-    fn finish(stream: TcpStream, meta_interval: usize) -> Self {
+    /// Open the transport: plain TCP, or TLS-wrapped when the config asks
+    /// (servers behind HTTPS, e.g. port 443). Timeouts go on the raw
+    /// socket first so the TLS handshake itself stays bounded; SNI uses
+    /// the configured host.
+    fn open(config: &StreamConfig, addr: &str) -> Result<SourceStream> {
+        let stream = TcpStream::connect(addr)
+            .map_err(|e| CrabError::Audio(format!("Icecast connect {addr}: {e}")))?;
+        stream
+            .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
+            .and_then(|_| stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT)))
+            .map_err(|e| CrabError::Audio(format!("Icecast timeouts: {e}")))?;
+        if !config.tls {
+            return Ok(SourceStream::Plain(stream));
+        }
+        let connector = native_tls::TlsConnector::new()
+            .map_err(|e| CrabError::Audio(format!("TLS setup: {e}")))?;
+        connector
+            .connect(config.host.as_str(), stream)
+            .map(|tls| SourceStream::Tls(Box::new(tls)))
+            .map_err(|e| CrabError::Audio(format!("TLS handshake {addr}: {e}")))
+    }
+
+    fn finish(mut stream: SourceStream, meta_interval: usize) -> Self {
         // Steady-state send timeout: slower than handshake, still bounded.
         let send_timeout = Duration::from_secs(15);
-        let _ = stream.set_write_timeout(Some(send_timeout));
-        let _ = stream.set_read_timeout(Some(send_timeout));
+        let socket = stream.socket();
+        let _ = socket.set_write_timeout(Some(send_timeout));
+        let _ = socket.set_read_timeout(Some(send_timeout));
         let bytes_until_meta = meta_interval;
         Self {
             stream,
@@ -129,7 +187,7 @@ impl IcecastSource {
     /// protocol (`PUT /live HTTP/1.1`) — a bare `/` leaves the server with
     /// no mount to attach, so real servers reject it.
     fn handshake(
-        stream: &mut TcpStream,
+        stream: &mut SourceStream,
         addr: &str,
         method: &str,
         mount: &str,
@@ -193,7 +251,7 @@ impl IcecastSource {
     /// any pipelined bytes after it in `pending` for the next call. This is
     /// what lets a split `100 Continue` + final status (or both coalesced
     /// in one segment) parse correctly either way.
-    fn read_response_headers(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<String> {
+    fn read_response_headers(stream: &mut SourceStream, pending: &mut Vec<u8>) -> Result<String> {
         let mut buf = [0u8; 4096];
         loop {
             if let Some(pos) = pending.windows(4).position(|w| w == b"\r\n\r\n") {

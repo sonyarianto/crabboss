@@ -154,7 +154,9 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] Icecast source client (encode + push): MP3/LAME CBR encoder tapped off the
       post-DSP cpal mix bus (pre-monitor-volume), lock-free `rtrb` ring → sender
       thread with real-time pacing, Icecast 2.4 `PUT` with legacy `SOURCE`
-      fallback, in-band `StreamTitle` metadata, bounded reconnects (5, backoff)
+      fallback, mount in the request path, split-`100-continue`-proof
+      handshake, optional TLS (OS-native stack, SNI) for HTTPS servers,
+      in-band `StreamTitle` metadata, bounded reconnects (5, backoff)
 - [x] Settings UI: STREAM ON/OFF toggle (auto-start on launch when enabled),
       host/port/mount/password fields (Enter commits, persisted), bitrate
       ladder stepper (8–320 kbps), live status (⏳ Connecting/🔴 Live/⚠ error)

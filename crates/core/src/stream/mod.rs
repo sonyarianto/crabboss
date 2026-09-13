@@ -46,6 +46,9 @@ pub struct StreamConfig {
     /// Source username (Icecast default: `source`).
     pub username: String,
     pub password: String,
+    /// Wrap the connection in TLS (for servers behind HTTPS, e.g. port 443).
+    /// Uses the OS-native TLS stack with SNI set to `host`.
+    pub tls: bool,
     /// Ice-Name shown in directories/players.
     pub name: String,
     pub genre: String,
@@ -66,6 +69,7 @@ impl Default for StreamConfig {
             mount: "/stream".into(),
             username: "source".into(),
             password: String::new(),
+            tls: false,
             name: "CrabBoss FM".into(),
             genre: String::new(),
             description: String::new(),

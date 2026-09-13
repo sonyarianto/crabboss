@@ -344,6 +344,7 @@ enum Message {
     LoudnessTargetInc,
     LoudnessTargetDec,
     StreamToggle,
+    StreamTlsToggle,
     StreamHost(String),
     StreamPort(String),
     StreamMount(String),
@@ -2037,6 +2038,15 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 state.player.stream_stop();
             }
         }
+        Message::StreamTlsToggle => {
+            // Takes effect on the next start (TLS wraps the fresh
+            // connection); restart the stream to apply it live.
+            state.settings.stream.tls = !state.settings.stream.tls;
+            state.save_settings();
+            state
+                .player
+                .set_stream_config(state.settings.stream.clone());
+        }
         Message::StreamHost(v) => {
             state.settings.stream.host = v;
             state.save_settings();
@@ -3130,6 +3140,9 @@ fn view_settings(state: &App) -> Element<'_, Message> {
                 checkbox(stream_cfg.enabled)
                     .label("Stream enabled")
                     .on_toggle(|_| Message::StreamToggle),
+                checkbox(stream_cfg.tls)
+                    .label("TLS (https)")
+                    .on_toggle(|_| Message::StreamTlsToggle),
                 text(stream_state.label()).size(12),
                 text(if stream_state.is_live() {
                     format!(
