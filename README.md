@@ -30,8 +30,8 @@ A professional radio station management application inspired by RadioBoss, featu
 
 | Layer | Technology |
 |-------|-----------|
-| UI Framework | [Iced](https://iced.rs/) (v0.14, Elm architecture; wgpu with tiny-skia fallback) |
-| Audio Playback | [cpal](https://github.com/RustAudio/cpal) (v0.18) |
+| UI Framework | [Iced](https://iced.rs/) (Elm architecture) |
+| Audio Playback | [cpal](https://github.com/RustAudio/cpal) |
 | Audio Decoding | [symphonia](https://crates.io/crates/symphonia) |
 | Metadata | [lofty](https://crates.io/crates/lofty) |
 | Database | [rusqlite](https://crates.io/crates/rusqlite) (SQLite) |
