@@ -14,10 +14,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 
-# Audio (legacy rodio path — to be removed after CpalEngine parity)
-rodio = { version = "0.19", features = ["symphonia"] }
-
-# Audio (new low-level path: cpal engine per ROADMAP)
+# Audio (cpal engine: device I/O; symphonia decode; rubato resample)
 cpal = "0.15"
 symphonia = { version = "0.5", features = ["all"] }
 rubato = "0.15"

@@ -494,14 +494,6 @@ impl Mixer {
         let (l, r) = self.limiter.process(l, r);
         Frame { l, r }
     }
-
-    /// Process an interleaved stereo slice in place (legacy rodio/decode
-    /// path: gain + soft-clip safety net only — no EQ/limiter there).
-    pub fn process_stereo_in_place(&self, buf: &mut [f32]) {
-        for s in buf.iter_mut() {
-            *s = soft_clip(*s * self.gain, self.ceiling);
-        }
-    }
 }
 
 fn soft_clip(x: f32, ceiling: f32) -> f32 {

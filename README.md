@@ -6,7 +6,7 @@ A professional radio station management application inspired by RadioBoss, featu
 
 ## Features (In Progress)
 
-- ✅ **Audio Playback** — Play, pause, stop, volume control via rodio
+- ✅ **Audio Playback** — Play, pause, stop, volume control via cpal (gapless crossfade engine)
 - ✅ **Music Library** — SQLite-backed database with metadata extraction
 - ✅ **Playlist Management** — Create, edit, and manage playlists
 - ✅ **Metadata Reading** — Auto-read ID3, Vorbis, and other tags via lofty
@@ -28,8 +28,8 @@ A professional radio station management application inspired by RadioBoss, featu
 | Layer | Technology |
 |-------|-----------|
 | UI Framework | [Slint](https://slint.dev/) (v1.17) |
-| Audio Playback | [rodio](https://crates.io/crates/rodio) + cpal |
-| Audio Decoding | [symphonia](https://crates.io/crates/symphonia) (via rodio) |
+| Audio Playback | [cpal](https://github.com/RustAudio/cpal) |
+| Audio Decoding | [symphonia](https://crates.io/crates/symphonia) |
 | Metadata | [lofty](https://crates.io/crates/lofty) |
 | Database | [rusqlite](https://crates.io/crates/rusqlite) (SQLite) |
 | Async Runtime | [tokio](https://crates.io/crates/tokio) |

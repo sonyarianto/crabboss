@@ -197,7 +197,7 @@ export component SettingsScreen inherits Rectangle {
     in property <string> license-status: "Unlicensed";
     in property <string> license-error: "";
     in property <string> audio-device: "Default";
-    in property <string> audio-engine: "rodio";
+    in property <string> audio-engine: "cpal";
     in-out property <[string]> devices;
     in-out property <string> selected-device: "";
     in-out property <string> device-note: "";
@@ -388,7 +388,7 @@ export component SettingsScreen inherits Rectangle {
 
                     SettingRow {
                         label: "Engine";
-                        value: root.audio-engine + " (restart flag --engine to switch)";
+                        value: root.audio-engine;
                     }
 
                     SettingRow {

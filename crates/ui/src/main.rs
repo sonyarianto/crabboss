@@ -39,10 +39,10 @@ fn kind_label(k: TrackKind) -> &'static str {
     }
 }
 
-/// `--engine rodio|cpal` (default rodio until CpalEngine reaches parity).
+/// `--engine cpal` (only backend; `--engine rodio` warns and uses cpal).
 fn engine_choice() -> String {
     let mut args = std::env::args().skip(1);
-    let mut choice = std::env::var("CRABBOSS_ENGINE").unwrap_or_else(|_| "rodio".into());
+    let mut choice = std::env::var("CRABBOSS_ENGINE").unwrap_or_else(|_| "cpal".into());
     while let Some(a) = args.next() {
         if a == "--engine" {
             if let Some(v) = args.next() {
@@ -73,23 +73,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &settings_path,
     )));
 
-    // Engine A/B: rodio default, `--engine cpal` opts into new backend.
-    let engine_name = engine_choice();
-    let mut player: Box<dyn Engine> = match engine_name.as_str() {
-        "cpal" => {
-            tracing::info!("Audio engine: cpal");
-            match settings.borrow().output_device.clone() {
-                Some(dev) => Box::new(crabcore::audio::CpalEngine::open_named(&dev)),
-                None => Box::new(crabcore::audio::CpalEngine::new()),
-            }
+    // Audio engine: cpal is the sole backend since the rodio removal.
+    // The flag/env override stays as a deprecated no-op so old scripts
+    // and shortcuts keep working.
+    let engine_name = {
+        let choice = engine_choice();
+        if choice != "cpal" {
+            tracing::warn!("Unknown engine '{choice}', using cpal");
         }
-        _ => {
-            if engine_name != "rodio" {
-                tracing::warn!("Unknown engine '{}', falling back to rodio", engine_name);
-            }
-            tracing::info!("Audio engine: rodio (stable)");
-            Box::new(crabcore::audio::Player::new())
-        }
+        "cpal".to_string()
+    };
+    tracing::info!("Audio engine: cpal");
+    let mut player: Box<dyn Engine> = match settings.borrow().output_device.clone() {
+        Some(dev) => Box::new(crabcore::audio::CpalEngine::open_named(&dev)),
+        None => Box::new(crabcore::audio::CpalEngine::new()),
     };
     if !player.has_audio_device() {
         tracing::warn!("⚠ Running without audio output (headless mode)");
@@ -572,8 +569,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
-            // queue <path>: insert after current track (blends at boundary;
-            // rodio backend degrades to immediate play). Not logged until heard.
+            // queue <path>: insert after current track (blends at the
+            // boundary). Not logged until heard.
             "queue" => {
                 let path = PathBuf::from(&event.target);
                 if path.is_file() {
@@ -1140,7 +1137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // -- Silence monitor: every 5s, recover dead air with a filler track --
-    // Metering lives in CpalEngine; on rodio (default) the alarm never trips.
+    // Metering lives in CpalEngine's mix bus.
     // Recovery is rate-limited to once per minute to avoid storms.
     {
         let state = state.clone();

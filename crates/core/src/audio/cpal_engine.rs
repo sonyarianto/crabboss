@@ -1,10 +1,8 @@
-//! cpal-backed engine (ROADMAP: rodio → cpal).
-//!
-//! Status: stereo symphonia decode → rubato resample to device rate →
-//! dual-cursor equal-power/linear crossfade through `Mixer` in the callback,
-//! with 12-band EQ insert and limiter on the program bus. Mic/line-in
-//! (§1.6) sums into the program bus ahead of the limiter + stream tap
-//! with voice-activated ducking of the music bed.
+//! cpal audio engine: stereo symphonia decode → rubato resample to the
+//! device rate → dual-cursor equal-power/linear crossfade through `Mixer`
+//! in the callback, with 12-band EQ insert and limiter on the program bus.
+//! Mic/line-in (§1.6) sums into the program bus ahead of the limiter +
+//! stream tap with voice-activated ducking of the music bed.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -14,10 +12,9 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::RingBuffer;
 
-use crate::audio::engine::Engine;
+use crate::audio::engine::{Engine, PlayerState, TrackInfo};
 use crate::audio::mic::{MicConfig, MicResampler, MicState, MIC_RING_SAMPLES};
 use crate::audio::mixer::{Frame, Mixer, EQ_BAND_COUNT};
-use crate::audio::player::{PlayerState, TrackInfo};
 use crate::audio::silence::SilenceMonitor;
 use crate::audio::MAX_GAIN_DB;
 use crate::error::{CrabError, Result};

@@ -1,11 +1,14 @@
 # CrabBoss ROADMAP
 
-## Audio Backend Decision: rodio → cpal
+## Audio Backend: cpal (rodio removed)
 
-**Status:** Decided — migrate to `cpal` directly for low-level control.
+**Status:** Done — migrated to `cpal` directly for low-level control;
+the legacy rodio `Player` and the `rodio` dependency are removed.
+`CpalEngine` is the sole backend (`--engine` flag kept as a no-op).
 
-**Current (v0.1.0):**
-- `crabcore::audio::Player` (`crates/core/src/audio/player.rs`) uses `rodio 0.19` + `symphonia` (via rodio) + `lofty` for duration.
+**Before (v0.1.0):**
+- `crabcore::audio::Player` (`audio/player.rs`, since deleted) used
+  `rodio 0.19` + `symphonia` (via rodio) + `lofty` for duration.
 - Good for: play / pause / resume / volume.
 - Not enough for radio automation.
 
@@ -31,11 +34,13 @@ symphonia decoder thread -> f32 PCM -> rtrb ringbuf ->
     + Icecast/Shoutcast tee (encoded stream)
 ```
 
-**Migration (keep `crabui` working):**
+**Migration (kept `crabui` working throughout):**
 1. ✅ Add `cpal, symphonia, rubato, rtrb` to `crates/core/Cargo.toml`; keep `rodio` temporarily.
 2. ✅ Introduce `audio::Engine` trait; implement `CpalEngine` alongside legacy `Player`.
 3. ✅ Switch `crates/ui/src/main.rs` to `Engine` trait — A/B via `--engine cpal` (default rodio).
-4. Remove `rodio` dependency.
+4. ✅ Remove `rodio` dependency: delete `audio/player.rs`, move
+   `PlayerState`/`TrackInfo` into `audio::engine`, cpal becomes the
+   default and only backend.
 
 ## Broader Milestones (from README)
 
@@ -123,8 +128,8 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       badge (⏳ ≤7 days / ⚠ last day / expired) + warnings banner (⏳ ≤3 days,
       ⚠ last-day, expired-but-still-listed) and a Valid-until field in the
       Add/Edit dialog; empty = runs forever
-- [x] "Insert after current track" (`queue` action + `Engine::queue`: cpal blends
-      at the boundary with end-of-track auto-fade; rodio degrades to immediate play)
+- [x] "Insert after current track" (`queue` action + `Engine::queue`:
+      blends at the boundary with end-of-track auto-fade)
 - [x] Cart hotkeys (keys 1–8 via FocusScope), per-pad progress bar +
       playing highlight, and assign flow (🎯 Assign → arm a library track →
       tap a pad; Slint 1.11 has no cross-widget drag events) with pad-place
@@ -165,8 +170,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 ### 1.7 Reliability
 - [x] Silence detector: `SilenceMonitor` meters the cpal mix bus (−60 dBFS floor,
       10 s default threshold); UI polls every 5 s and auto-recovers dead air
-      with a filler music track (rate-limited 1/min). Metering is cpal-only —
-      rodio (current default) reports no alarm.
+      with a filler music track (rate-limited 1/min).
 - [x] Background library health scan: `missing_files()` + startup scan, on-demand
       `✓ Health` button in Media/Playout, ⚠ prefixes on missing rows
 

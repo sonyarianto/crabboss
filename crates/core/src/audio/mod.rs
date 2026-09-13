@@ -1,20 +1,15 @@
-//! Audio playback engine
-//!
-//! Legacy `Player` (rodio) + new `CpalEngine` (cpal) behind `Engine` trait.
-//! See ROADMAP: rodio → cpal migration.
+//! Audio playback engine: `CpalEngine` (cpal) behind the `Engine` trait.
 
 mod cpal_engine;
 mod engine;
 mod loudness;
 mod mic;
 mod mixer;
-mod player;
 mod silence;
 
 pub use cpal_engine::CpalEngine;
-pub use engine::{needs_prefetch, Engine};
+pub use engine::{needs_prefetch, Engine, PlayerState, TrackInfo};
 pub use loudness::{analyze_file, LoudnessAnalysis, LoudnessMeter, MAX_GAIN_DB, TARGET_LUFS};
 pub use mic::{Ducker, MicConfig, MicResampler, MicState, MIC_RING_SAMPLES};
 pub use mixer::{CrossfadeCurve, EqBand, EqChain, Frame, Mixer, EQ_BAND_COUNT, EQ_CENTER_HZ};
-pub use player::{Player, PlayerState, TrackInfo};
 pub use silence::{SilenceMonitor, SILENCE_FLOOR};
