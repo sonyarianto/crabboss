@@ -2169,18 +2169,37 @@ fn view(state: &App) -> Element<'_, Message> {
         Screen::Settings => view_settings(state),
     };
 
-    row![
-        view_sidebar(state),
-        iced::widget::rule::vertical(1),
-        container(body).width(Length::Fill).height(Length::Fill),
+    column![
+        row![
+            view_sidebar(state),
+            iced::widget::rule::vertical(1),
+            container(body).width(Length::Fill).height(Length::Fill),
+        ]
+        .height(Length::Fill),
+        iced::widget::rule::horizontal(1),
+        view_footer(state),
     ]
     .into()
 }
 
+/// Full-width status footer: the on-air line gets the whole window width
+/// (long titles no longer wrap inside the narrow sidebar) with room to
+/// grow stream/mic indicators later. v1 carries only the on-air status.
+fn view_footer(state: &App) -> Element<'_, Message> {
+    let status = if state.is_playing {
+        format!("ON AIR: {} - {}", state.now_title, state.now_artist)
+    } else {
+        "Off air".to_string()
+    };
+    container(text(status).size(12))
+        .padding([6, 12])
+        .width(Length::Fill)
+        .into()
+}
+
 /// Halloy-style left sidebar (v1: fixed position, no collapse, no badges):
-/// station name, a scrollable entry list (one per screen, active
-/// highlighted), and the on-air status pinned at the bottom so it is
-/// visible everywhere.
+/// station name plus a scrollable entry list (one per screen, active
+/// highlighted). Global status lives in the full-width footer.
 fn view_sidebar(state: &App) -> Element<'_, Message> {
     let mut list = column![].spacing(4);
     for s in [
@@ -2204,17 +2223,11 @@ fn view_sidebar(state: &App) -> Element<'_, Message> {
                 .on_press(Message::Navigate(s)),
         );
     }
-    let status = if state.is_playing {
-        format!("ON AIR: {} - {}", state.now_title, state.now_artist)
-    } else {
-        "Off air".to_string()
-    };
 
     container(
         column![
             text(&state.station_name).size(15),
             scrollable(list).height(Length::Fill),
-            text(status).size(11),
         ]
         .spacing(6)
         .padding(10),
