@@ -288,6 +288,7 @@ enum Message {
     MicAttackDec,
     MicReleaseInc,
     MicReleaseDec,
+    StationName(String),
     // License
     LicenseKeyInput(String),
     ActivateLicense,
@@ -1178,6 +1179,7 @@ fn boot() -> (App, Task<Message>) {
     let input_devices = crabcore::audio::CpalEngine::list_input_devices();
     // Silence unused-mut warning on settings: boot owns it, App takes it below.
     settings.autodj = autodj;
+    let station_name = settings.station_name.clone();
 
     let mut app = App {
         player,
@@ -1190,7 +1192,7 @@ fn boot() -> (App, Task<Message>) {
         settings_path,
         license,
         screen: Screen::Home,
-        station_name: "CrabBoss FM".into(),
+        station_name,
         audio_engine: engine_name,
         is_playing: false,
         now_title: "No track loaded".into(),
@@ -2088,6 +2090,13 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             state.save_settings();
             state.player.set_mic_config(state.settings.mic.clone());
         }
+        Message::StationName(v) => {
+            // Stored raw like the stream host field (trimmed + defaulted on
+            // load); the dashboard header mirrors it live.
+            state.settings.station_name = v.clone();
+            state.station_name = v;
+            state.save_settings();
+        }
         // -- License ----------------------------------------------------------
         Message::LicenseKeyInput(v) => {
             state.license_key = v;
@@ -2219,7 +2228,7 @@ fn view_home(state: &App) -> Element<'_, Message> {
     .spacing(12);
     scrollable(
         column![
-            text(format!("{} CrabBoss FM", state.station_name)).size(20),
+            text(&state.station_name).size(20),
             text(status).size(12),
             stats,
             text("Quick Actions").size(14),
@@ -2812,6 +2821,10 @@ fn view_settings(state: &App) -> Element<'_, Message> {
                 button(text("Clear").size(12)).on_press(Message::ClearLicense),
             ]
             .spacing(6),
+            text("Station").size(14),
+            text_input("Station name", &state.settings.station_name)
+                .on_input(Message::StationName)
+                .padding(6),
             text(format!(
                 "Engine: {} | Device: {}",
                 state.audio_engine,

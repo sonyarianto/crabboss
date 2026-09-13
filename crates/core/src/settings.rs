@@ -19,6 +19,8 @@ use crate::stream::StreamConfig;
 pub struct AppSettings {
     /// Output device name (`None` = system default).
     pub output_device: Option<String>,
+    /// Station display name (dashboard header + top bar).
+    pub station_name: String,
     pub crossfade_secs: f32,
     pub silence_threshold_secs: f32,
     /// Auto-DJ continuity: keep the music going without a DJ.
@@ -46,6 +48,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             output_device: None,
+            station_name: "CrabBoss FM".into(),
             crossfade_secs: 3.0,
             silence_threshold_secs: 10.0,
             autodj: true,
@@ -66,6 +69,9 @@ impl AppSettings {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
+        if s.station_name.trim().is_empty() {
+            s.station_name = "CrabBoss FM".into();
+        }
         s.crossfade_secs = s.crossfade_secs.clamp(0.0, 30.0);
         s.silence_threshold_secs = s.silence_threshold_secs.clamp(1.0, 120.0);
         for g in &mut s.eq_gains_db {
@@ -94,6 +100,7 @@ mod tests {
         let path = dir.join("crabboss-settings-test.json");
         let s = AppSettings {
             output_device: Some("Speakers".into()),
+            station_name: "Test FM".into(),
             crossfade_secs: 5.5,
             silence_threshold_secs: 8.0,
             autodj: false,
@@ -116,6 +123,7 @@ mod tests {
         s.save(&path).unwrap();
         let back = AppSettings::load(&path);
         assert_eq!(back.output_device.as_deref(), Some("Speakers"));
+        assert_eq!(back.station_name, "Test FM");
         assert_eq!(
             (back.crossfade_secs, back.silence_threshold_secs),
             (5.5, 8.0)
@@ -183,6 +191,14 @@ mod tests {
         std::fs::remove_file(&missing).ok();
         let d = AppSettings::load(&missing);
         assert_eq!(d.crossfade_secs, 3.0);
+        assert_eq!(d.station_name, "CrabBoss FM");
+        let blank = dir.join("crabboss-settings-blank-name.json");
+        std::fs::write(&blank, br#"{"station_name":"   "}"#).unwrap();
+        assert_eq!(
+            AppSettings::load(&blank).station_name,
+            "CrabBoss FM"
+        );
+        std::fs::remove_file(&blank).ok();
         let bad = dir.join("crabboss-settings-bad.json");
         std::fs::write(&bad, b"{not json").unwrap();
         let d = AppSettings::load(&bad);
