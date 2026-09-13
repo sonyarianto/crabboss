@@ -285,6 +285,14 @@ fn sender_loop(
         reconnects = 0;
         stats.reconnects.store(0, Ordering::Relaxed);
         let started = Instant::now();
+        // Drop anything buffered before go-live (pre-roll silence or a prior
+        // run's tail): dumping it as one burst trips server flood protection
+        // (RST right after handshake), and a live feed starts at the live
+        // edge by definition — listeners join the now, not the backlog.
+        while consumer.pop().is_ok() {}
+        // Wall-clock pacing anchor: each batch below accounts its own air
+        // time. The source must behave like a live feed, never a file dump.
+        let mut deadline = Instant::now();
         let mut scratch: Vec<f32> = Vec::with_capacity(DRAIN_FRAMES * 2);
 
         loop {
@@ -344,6 +352,17 @@ fn sender_loop(
             stats
                 .stream_secs
                 .store(started.elapsed().as_secs(), Ordering::Relaxed);
+            // Pace to wall clock: this batch is `frames` of audio at the
+            // encoder rate. Sleep the remainder; if a stall put us behind,
+            // re-anchor instead of burst-catching-up (same RST hazard as
+            // the backlog dump above).
+            deadline += Duration::from_secs_f64(frames as f64 / device_rate as f64);
+            let now = Instant::now();
+            if deadline > now {
+                std::thread::sleep(deadline - now);
+            } else if now.duration_since(deadline) > Duration::from_secs(1) {
+                deadline = now;
+            }
         }
 
         // --- Mid-stream drop: bounded retry like connect failures ---
