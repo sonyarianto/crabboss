@@ -346,6 +346,7 @@ enum Message {
     StreamToggle,
     StreamTlsToggle,
     StreamHost(String),
+    StreamUsername(String),
     StreamPort(String),
     StreamMount(String),
     StreamPassword(String),
@@ -2054,6 +2055,13 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 .player
                 .set_stream_config(state.settings.stream.clone());
         }
+        Message::StreamUsername(v) => {
+            state.settings.stream.username = v;
+            state.save_settings();
+            state
+                .player
+                .set_stream_config(state.settings.stream.clone());
+        }
         Message::StreamPort(v) => {
             if let Ok(p) = v.trim().parse::<u16>() {
                 state.settings.stream.port = p;
@@ -3163,9 +3171,12 @@ fn view_settings(state: &App) -> Element<'_, Message> {
             text_input("Port", &stream_cfg.port.to_string())
                 .on_input(Message::StreamPort)
                 .padding(6),
-            text_input("Mount", &stream_cfg.mount)
-                .on_input(Message::StreamMount)
-                .padding(6),
+                    text_input("Mount", &stream_cfg.mount)
+                        .on_input(Message::StreamMount)
+                        .padding(6),
+                    text_input("Username", &stream_cfg.username)
+                        .on_input(Message::StreamUsername)
+                        .padding(6),
             text_input(
                 "Password",
                 if stream_cfg.password.is_empty() {
