@@ -88,7 +88,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP + "valid until" expiry with row badges and warnings banner | ✅ |
 | Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
-| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME, PUT + SOURCE fallback, TLS, paced, reconnect, metadata) + Settings UI with live status; Shoutcast/relay/listener stats open | 🟡 |
+| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME, PUT + SOURCE fallback, TLS, paced, reconnect, metadata) + Settings UI with live status + listener count; Shoutcast/relay/artwork open | 🟡 |
 | Mic / line-in | Mixed input, sidechain ducking, bed music | cpal input + `rtrb` ring summed pre-limiter/tap, voice-activated ducker, live device switching, Settings mic panel | ✅ |
 | Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
 | Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
@@ -187,7 +187,9 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       direct to the pod (plain HTTP, e.g. :8000) or via TCP passthrough;
       keep HTTPS for listeners
 - [ ] Shoutcast v1/v2 source client
-- [ ] Listener/connection stats in UI (local bytes/uptime done; listener counts need Icecast admin/JSON API)
+- [x] Listener/connection stats in UI (local bytes/uptime plus listener
+      count polled from the public status API while live; "—" when the
+      API is disabled/unreachable — never an error state)
 - [ ] Artwork metadata forwarding to encoders
 
 ### 1.6 Mic / Live Assist

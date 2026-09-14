@@ -19,6 +19,8 @@ impl App {
         self.pump_import();
         self.pump_autosync();
         super::update::library::maybe_autosync(self);
+        super::update::settings::pump_listeners(self);
+        super::update::settings::maybe_poll_listeners(self);
 
         let pos = self.player.position_secs();
         let (dur, has_dur) = match self.player.current_track() {

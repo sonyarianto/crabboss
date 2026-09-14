@@ -9,9 +9,11 @@
 mod encoder;
 mod encoder_mp3;
 mod encoder_opus;
+mod listeners;
 mod manager;
 mod source;
 
+pub use listeners::{fetch_listener_count, parse_listener_count, LISTENER_POLL_SECS};
 pub use manager::{StreamManager, StreamTap};
 #[allow(unused_imports)]
 pub use source::IcecastSource;

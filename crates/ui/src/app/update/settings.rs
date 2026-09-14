@@ -5,6 +5,8 @@
 use crabcore::audio::{EQ_BAND_COUNT, TARGET_MAX_LUFS, TARGET_MIN_LUFS};
 use crabcore::stream::StreamFormat;
 
+use std::sync::mpsc;
+
 use super::super::App;
 use crate::widgets::{
     duck_ms_step, opus_bitrate_step, opus_snap_bitrate, stream_bitrate_step, ATTACK_LADDER,
@@ -428,6 +430,62 @@ pub(crate) fn restore_now(state: &mut App) {
                 safety.display()
             );
             state.backup_status = format!("Restore failed: {e}");
+        }
+    }
+}
+
+/// Timer fire (called from `on_tick` after the pumps): poll the Icecast
+/// `status-json.xsl` for this mount's listener count while live. The
+/// fetch runs on a worker thread; any failure degrades to `None`
+/// ("—" in the UI), never an error state.
+pub(crate) fn maybe_poll_listeners(state: &mut App) {
+    let elapsed = state.last_listeners_poll.map(|t| t.elapsed().as_secs());
+    if !crate::rules::listeners_due(
+        state.player.stream_state().is_live(),
+        state.listeners_polling,
+        elapsed,
+        crabcore::stream::LISTENER_POLL_SECS,
+    ) {
+        return;
+    }
+    let cfg = state.settings.stream.clone();
+    let (tx, rx) = mpsc::channel();
+    state.listeners_rx = Some(rx);
+    state.listeners_polling = true;
+    state.last_listeners_poll = Some(std::time::Instant::now());
+    if std::thread::Builder::new()
+        .name("listener-poll".into())
+        .spawn(move || {
+            let _ = tx.send(crabcore::stream::fetch_listener_count(&cfg));
+        })
+        .is_err()
+    {
+        tracing::error!("Listener poll: failed to spawn worker thread");
+        state.listeners_polling = false;
+        state.listeners_rx = None;
+    }
+}
+
+/// Reap a finished listener poll into `stream_listeners`.
+pub(crate) fn pump_listeners(state: &mut App) {
+    if !state.listeners_polling {
+        return;
+    }
+    match state.listeners_rx.as_mut() {
+        Some(rx) => match rx.try_recv() {
+            Ok(n) => {
+                state.stream_listeners = n;
+                state.listeners_polling = false;
+                state.listeners_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                state.listeners_polling = false;
+                state.listeners_rx = None;
+            }
+        },
+        None => {
+            state.listeners_polling = false;
         }
     }
 }

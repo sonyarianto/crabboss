@@ -221,6 +221,12 @@ pub(crate) struct App {
     pub(crate) input_devices: Vec<String>,
     pub(crate) mic_note: String,
     pub(crate) backup_status: String,
+    /// Last polled listener count (`None` = never polled or last poll
+    /// failed — the UI shows "—", never an error state).
+    pub(crate) stream_listeners: Option<u64>,
+    pub(crate) listeners_polling: bool,
+    pub(crate) listeners_rx: Option<Receiver<Option<u64>>>,
+    pub(crate) last_listeners_poll: Option<std::time::Instant>,
     /// Boot-time settings file warning (invalid/unreadable file). `None`
     /// on first run and on clean loads: no news is good news.
     pub(crate) settings_notice: Option<String>,

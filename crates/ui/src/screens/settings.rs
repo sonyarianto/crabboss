@@ -208,11 +208,18 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                     .on_toggle(|_| Message::StreamTlsToggle),
                 text(stream_state.label()).size(12),
                 text(if stream_state.is_live() {
+                    // Listeners come from the public status API on a slow
+                    // poll; "—" means unreachable/disabled, never an error.
+                    let listeners = state
+                        .stream_listeners
+                        .map(|n| format!("{n} listeners"))
+                        .unwrap_or_else(|| "—".into());
                     format!(
-                        "{} kbps - {:.1} MB - {}s",
+                        "{} kbps - {:.1} MB - {}s - {}",
                         stream_cfg.bitrate_kbps,
                         stream_stats.bytes_sent as f64 / 1_048_576.0,
-                        stream_stats.stream_secs
+                        stream_stats.stream_secs,
+                        listeners
                     )
                 } else {
                     String::new()

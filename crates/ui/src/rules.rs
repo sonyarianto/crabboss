@@ -156,6 +156,28 @@ pub(crate) fn autosync_due(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Listener-stats poll rule
+// ---------------------------------------------------------------------------
+
+/// A listener poll may start when the stream is live, no poll is in
+/// flight, and the interval elapsed (`None` = never polled: fire
+/// promptly). Pure: the tick passes the clock in as seconds.
+pub(crate) fn listeners_due(
+    live: bool,
+    polling: bool,
+    elapsed_secs: Option<u64>,
+    interval_secs: u64,
+) -> bool {
+    if !live || polling {
+        return false;
+    }
+    match elapsed_secs {
+        None => true,
+        Some(e) => e >= interval_secs,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +343,17 @@ mod tests {
         assert!(!autosync_due(true, false, false, None, 3600));
         assert!(!autosync_due(true, true, true, None, 3600));
         assert!(!autosync_due(true, true, true, Some(99999), 3600));
+    }
+
+    #[test]
+    fn listeners_poll_fires_when_live_due_and_idle() {
+        assert!(listeners_due(true, false, None, 30));
+        assert!(listeners_due(true, false, Some(30), 30));
+        assert!(!listeners_due(true, false, Some(29), 30));
+        // Not live, or a poll already in flight: hold either way.
+        assert!(!listeners_due(false, false, None, 30));
+        assert!(!listeners_due(false, false, Some(99999), 30));
+        assert!(!listeners_due(true, true, None, 30));
+        assert!(!listeners_due(true, true, Some(99999), 30));
     }
 }

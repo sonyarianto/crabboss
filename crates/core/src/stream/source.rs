@@ -46,7 +46,7 @@ pub struct IcecastSource {
 /// The TLS session is boxed: it dwarfs the socket, and an unbalanced enum
 /// would bloat every value.
 #[derive(Debug)]
-enum SourceStream {
+pub(crate) enum SourceStream {
     Plain(TcpStream),
     Tls(Box<native_tls::TlsStream<TcpStream>>),
 }
@@ -79,7 +79,9 @@ impl Write for SourceStream {
 impl SourceStream {
     /// Reach the raw socket through either variant (socket timeouts live
     /// there; the TLS session passes them through to the same socket).
-    fn socket(&mut self) -> &TcpStream {
+    /// Shared with the listener-stats poll, which tightens them past
+    /// the handshake grade.
+    pub(crate) fn socket(&mut self) -> &TcpStream {
         match self {
             SourceStream::Plain(s) => s,
             SourceStream::Tls(s) => s.get_ref(),
@@ -135,8 +137,8 @@ impl IcecastSource {
     /// Open the transport: plain TCP, or TLS-wrapped when the config asks
     /// (servers behind HTTPS, e.g. port 443). Timeouts go on the raw
     /// socket first so the TLS handshake itself stays bounded; SNI uses
-    /// the configured host.
-    fn open(config: &StreamConfig, addr: &str) -> Result<SourceStream> {
+    /// the configured host. Shared with the listener-stats poll.
+    pub(crate) fn open(config: &StreamConfig, addr: &str) -> Result<SourceStream> {
         // Bounded resolve + connect: a filtered port must fail here in
         // seconds, not after the OS minute-long TCP timeout.
         let sock_addr = addr
