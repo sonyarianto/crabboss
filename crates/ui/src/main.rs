@@ -77,7 +77,11 @@ fn join_title_artist(title: &str, artist: &str) -> String {
 /// either a real artist (manual play — no tag, nothing claimed) or one of
 /// our own automation sentinels, which moves to a `· via X` suffix instead
 /// of masquerading as the artist.
-fn on_air_label(title: &str, artist: &str) -> String {
+/// Track line with a source tag only when certain: the artist slot holds
+/// either a real artist (manual play — no tag, nothing claimed) or one of
+/// our own automation sentinels, which moves to a `· via X` suffix instead
+/// of masquerading as the artist. Shared by the strip, footer, and Home.
+fn track_source_label(title: &str, artist: &str) -> String {
     const SOURCES: [&str; 5] = [
         "Auto-DJ",
         "Cart",
@@ -86,10 +90,14 @@ fn on_air_label(title: &str, artist: &str) -> String {
         "Silence detector",
     ];
     if SOURCES.contains(&artist) && !title.is_empty() {
-        format!("ON AIR: {title} · via {artist}")
+        format!("{title} · via {artist}")
     } else {
-        format!("ON AIR: {}", join_title_artist(title, artist))
+        join_title_artist(title, artist)
     }
+}
+
+fn on_air_label(title: &str, artist: &str) -> String {
+    format!("ON AIR: {}", track_source_label(title, artist))
 }
 
 /// `--engine cpal` (only backend; `--engine rodio` warns and uses cpal).
@@ -2557,7 +2565,7 @@ fn view_player_panel(state: &App) -> Element<'_, Message> {
     // Horizontal broadcast strip: track line, then transport + progress +
     // time, then Auto-DJ + up-next + monitor volume.
     column![
-        text(join_title_artist(&state.now_title, &state.now_artist)).size(14),
+        text(track_source_label(&state.now_title, &state.now_artist)).size(14),
         row![
             button(text("Prev").size(13)).on_press(Message::Prev),
             button(text(play_label).size(13)).on_press(play_msg),
