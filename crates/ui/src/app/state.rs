@@ -117,6 +117,11 @@ pub(crate) struct App {
     pub(crate) is_playing: bool,
     pub(crate) now_title: String,
     pub(crate) now_artist: String,
+    /// Installed track the cached cover belongs to (`None` = nothing
+    /// cached). Compared against `engine_track` each tick; the image
+    /// decodes once per track, never per frame.
+    pub(crate) now_art_path: Option<PathBuf>,
+    pub(crate) now_art: Option<iced::widget::image::Handle>,
     pub(crate) volume: f32,
     pub(crate) autodj: bool,
     pub(crate) up_next: String,

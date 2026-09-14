@@ -224,6 +224,8 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         is_playing: false,
         now_title: "No track loaded".into(),
         now_artist: String::new(),
+        now_art_path: None,
+        now_art: None,
         volume,
         autodj,
         up_next: String::new(),

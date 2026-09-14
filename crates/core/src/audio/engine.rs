@@ -57,6 +57,12 @@ pub trait Engine {
     fn volume(&self) -> f32;
     fn state(&self) -> PlayerState;
     fn current_track(&self) -> Option<TrackInfo>;
+    /// Embedded cover art of the installed track, if the file carries
+    /// any. Read by image-capable consumers (desktop now-playing,
+    /// remote UI); the stream protocol is text-only and never sees it.
+    fn current_artwork(&self) -> Option<std::sync::Arc<crate::library::Artwork>> {
+        None
+    }
     fn has_audio_device(&self) -> bool;
     fn is_finished(&self) -> bool;
     /// Human label of the opened output (device picker display).

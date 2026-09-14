@@ -100,6 +100,16 @@ impl App {
             };
         }
 
+        // Cover art follows the installed track (cached handle per path;
+        // the image decodes once per track, never per frame).
+        if self.now_art_path != self.engine_track {
+            self.now_art_path = self.engine_track.clone();
+            self.now_art = self
+                .player
+                .current_artwork()
+                .map(|a| iced::widget::image::Handle::from_bytes(a.data.clone()));
+        }
+
         // Scheduler + ads auto-fire (dedupe per event/minute).
         if self.sched_enabled {
             let now = chrono::Local::now();

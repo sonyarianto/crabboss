@@ -259,6 +259,9 @@ struct LoaderShared {
     /// Writers sync it while holding `state`; the callback only reads it.
     state_atomic: Arc<AtomicU8>,
     current_track: Arc<Mutex<Option<TrackInfo>>>,
+    /// Same `Arc` as the engine's art slot (set at install, cleared
+    /// with the track).
+    current_artwork: Arc<Mutex<Option<Arc<crate::library::Artwork>>>>,
     silence: Arc<Mutex<SilenceMonitor>>,
     crossfade_secs: Arc<Mutex<f32>>,
     load_gen: Arc<AtomicU64>,
@@ -275,6 +278,13 @@ struct LoaderShared {
 impl LoaderShared {
     fn xfade_secs(&self) -> f32 {
         *self.crossfade_secs.lock().unwrap()
+    }
+
+    /// Refresh the cover-art slot for an installing track (tag read on
+    /// the loader thread; untagged/missing art clears the slot).
+    fn install_artwork(&self, path: &Path) {
+        let art = crate::library::artwork_for(path).map(Arc::new);
+        *self.current_artwork.lock().unwrap() = art;
     }
 
     /// Install a decoded `play` job (mirrors the old synchronous branches:
@@ -318,6 +328,7 @@ impl LoaderShared {
             self.loading.store(false, Ordering::SeqCst);
         }
         self.silence.lock().unwrap().reset();
+        self.install_artwork(&path);
         *self.current_track.lock().unwrap() = Some(TrackInfo {
             path,
             title: None,
@@ -354,6 +365,7 @@ impl LoaderShared {
         }
         drop(xf);
         self.silence.lock().unwrap().reset();
+        self.install_artwork(&path);
         *self.state.lock().unwrap() = PlayerState::Playing;
         self.state_atomic.store(STATE_PLAYING, Ordering::SeqCst);
         *self.current_track.lock().unwrap() = Some(TrackInfo {
@@ -382,6 +394,7 @@ impl LoaderShared {
             *st = PlayerState::Stopped;
             self.state_atomic.store(STATE_STOPPED, Ordering::SeqCst);
             *self.current_track.lock().unwrap() = None;
+            *self.current_artwork.lock().unwrap() = None;
         }
     }
 }
@@ -510,6 +523,11 @@ pub struct CpalEngine {
     /// reads this; every writer syncs it while holding `state`.
     state_atomic: Arc<AtomicU8>,
     current_track: Arc<Mutex<Option<TrackInfo>>>,
+    /// Embedded cover art of the installed track (`None` = untagged or
+    /// not yet installed). Written by the loader thread at install (a
+    /// tag read, never decode); read by the UI thread. The audio
+    /// callback never touches this lock.
+    current_artwork: Arc<Mutex<Option<Arc<crate::library::Artwork>>>>,
     /// Monitor volume as f32 bits: lock-free read on the audio callback.
     /// Deliberately monitor-ONLY: the stream tap sits pre-volume, so the
     /// broadcast feed keeps full program level while the operator dims (or
@@ -571,6 +589,7 @@ impl CpalEngine {
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
         let state_atomic = Arc::new(AtomicU8::new(STATE_STOPPED));
         let current_track = Arc::new(Mutex::new(None));
+        let current_artwork = Arc::new(Mutex::new(None));
         let crossfade_secs = Arc::new(Mutex::new(3.0));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let mixer = Arc::new(Mutex::new(Mixer::default()));
@@ -619,6 +638,7 @@ impl CpalEngine {
                 state: state.clone(),
                 state_atomic: state_atomic.clone(),
                 current_track: current_track.clone(),
+                current_artwork: current_artwork.clone(),
                 silence: silence.clone(),
                 crossfade_secs: crossfade_secs.clone(),
                 load_gen: load_gen.clone(),
@@ -639,6 +659,7 @@ impl CpalEngine {
             state: state.clone(),
             state_atomic: state_atomic.clone(),
             current_track: current_track.clone(),
+            current_artwork: current_artwork.clone(),
             volume: volume.clone(),
             mixer,
             loudness_lookup: None,
@@ -672,6 +693,7 @@ impl CpalEngine {
             state: self.state.clone(),
             state_atomic: self.state_atomic.clone(),
             current_track: self.current_track.clone(),
+            current_artwork: self.current_artwork.clone(),
             silence: self.silence.clone(),
             crossfade_secs: self.crossfade_secs.clone(),
             load_gen: self.load_gen.clone(),
@@ -1169,6 +1191,7 @@ impl Engine for CpalEngine {
         *self.state.lock().unwrap() = PlayerState::Stopped;
         self.state_atomic.store(STATE_STOPPED, Ordering::SeqCst);
         *self.current_track.lock().unwrap() = None;
+        *self.current_artwork.lock().unwrap() = None;
     }
 
     fn toggle_play_pause(&self) {
@@ -1197,6 +1220,10 @@ impl Engine for CpalEngine {
 
     fn current_track(&self) -> Option<TrackInfo> {
         self.current_track.lock().unwrap().clone()
+    }
+
+    fn current_artwork(&self) -> Option<Arc<crate::library::Artwork>> {
+        self.current_artwork.lock().unwrap().clone()
     }
 
     fn has_audio_device(&self) -> bool {
@@ -1964,6 +1991,22 @@ mod tests {
         assert!((cur.duration_secs.unwrap_or(0.0) - 0.5).abs() < 0.1);
         eng.stop();
         assert_eq!(eng.state(), PlayerState::Stopped);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn artwork_slot_tracks_install_and_stop() {
+        let dir = loader_test_dir("artwork");
+        let f = dir.join("a.wav");
+        write_test_wav(&f, 0.5, 44100);
+        let eng = CpalEngine::new();
+        assert!(eng.current_artwork().is_none(), "idle engine has no art");
+        eng.play(&f).unwrap();
+        // Untagged tone: install lands, art slot stays empty (not an error).
+        wait_for("playback starts", || eng.state() == PlayerState::Playing);
+        assert!(eng.current_artwork().is_none());
+        eng.stop();
+        assert!(eng.current_artwork().is_none(), "stop clears the slot");
         std::fs::remove_dir_all(&dir).ok();
     }
 

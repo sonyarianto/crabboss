@@ -71,40 +71,62 @@ fn view_player_panel(state: &App) -> Element<'_, Message> {
     } else {
         Message::Play
     };
-    // Horizontal broadcast strip: track line, then transport + progress +
-    // time, then Auto-DJ + up-next + monitor volume.
-    column![
-        text(track_source_label(&state.now_title, &state.now_artist)).size(14),
-        row![
-            button(text("Prev").size(13)).on_press(Message::Prev),
-            button(text(play_label).size(13)).on_press(play_msg),
-            button(text("Stop").size(13)).on_press(Message::Stop),
-            button(text("Next").size(13)).on_press(Message::Next),
-            progress_bar(0.0..=1.0, frac).length(Length::Fill),
-            text(format!("{} / {}", cur, tot)).size(12),
+    // Fixed cover box (layout never jumps when art appears); empty for
+    // untagged audio.
+    let cover: Element<'_, Message> = match &state.now_art {
+        Some(handle) => container(
+            iced::widget::Image::new(handle.clone())
+                .width(Length::Fixed(64.0))
+                .height(Length::Fixed(64.0)),
+        )
+        .width(Length::Fixed(64.0))
+        .height(Length::Fixed(64.0))
+        .into(),
+        None => container(iced::widget::space::horizontal())
+            .width(Length::Fixed(64.0))
+            .height(Length::Fixed(64.0))
+            .into(),
+    };
+    // Horizontal broadcast strip: cover, then track line, transport +
+    // progress + time, then Auto-DJ + up-next + monitor volume.
+    row![
+        cover,
+        column![
+            text(track_source_label(&state.now_title, &state.now_artist)).size(14),
+            row![
+                button(text("Prev").size(13)).on_press(Message::Prev),
+                button(text(play_label).size(13)).on_press(play_msg),
+                button(text("Stop").size(13)).on_press(Message::Stop),
+                button(text("Next").size(13)).on_press(Message::Next),
+                progress_bar(0.0..=1.0, frac).length(Length::Fill),
+                text(format!("{} / {}", cur, tot)).size(12),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            row![
+                checkbox(state.autodj)
+                    .label("Auto-DJ")
+                    .on_toggle(Message::AutodjToggled),
+                text(if state.up_next.is_empty() {
+                    String::new()
+                } else {
+                    format!("Up next: {}", state.up_next)
+                })
+                .size(11)
+                .width(Length::Fill),
+                text(format!("Vol {:.0}%", state.volume * 100.0)).size(12),
+                slider(0.0..=1.0, state.volume, Message::VolumeChanged)
+                    .step(0.01_f32)
+                    .width(Length::Fixed(180.0)),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
         ]
         .spacing(8)
-        .align_y(iced::Alignment::Center),
-        row![
-            checkbox(state.autodj)
-                .label("Auto-DJ")
-                .on_toggle(Message::AutodjToggled),
-            text(if state.up_next.is_empty() {
-                String::new()
-            } else {
-                format!("Up next: {}", state.up_next)
-            })
-            .size(11)
-            .width(Length::Fill),
-            text(format!("Vol {:.0}%", state.volume * 100.0)).size(12),
-            slider(0.0..=1.0, state.volume, Message::VolumeChanged)
-                .step(0.01_f32)
-                .width(Length::Fixed(180.0)),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center),
+        .width(Length::Fill),
     ]
     .spacing(8)
+    .align_y(iced::Alignment::Center)
     .padding(12)
     .into()
 }

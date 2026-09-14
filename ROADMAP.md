@@ -88,7 +88,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP + "valid until" expiry with row badges and warnings banner | ✅ |
 | Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
-| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME, PUT + SOURCE fallback, TLS, paced, reconnect, metadata) + Settings UI with live status + listener count; Shoutcast/relay/artwork open | 🟡 |
+| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME, PUT + SOURCE fallback, TLS, paced, reconnect, metadata) + Settings UI with live status + listener count + Playout cover art; Shoutcast/relay open | 🟡 |
 | Mic / line-in | Mixed input, sidechain ducking, bed music | cpal input + `rtrb` ring summed pre-limiter/tap, voice-activated ducker, live device switching, Settings mic panel | ✅ |
 | Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
 | Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
@@ -190,7 +190,10 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] Listener/connection stats in UI (local bytes/uptime plus listener
       count polled from the public status API while live; "—" when the
       API is disabled/unreachable — never an error state)
-- [ ] Artwork metadata forwarding to encoders
+- [x] Artwork metadata forwarding (embedded art pulled via `lofty` at
+      install, shown as cover in the Playout strip; the Icecast/Shoutcast
+      source protocol is text-only (`StreamTitle`), so there is no
+      encoder sink by design — not a gap)
 
 ### 1.6 Mic / Live Assist
 - [x] Mic input via `cpal` input stream, mixed into program bus (device
