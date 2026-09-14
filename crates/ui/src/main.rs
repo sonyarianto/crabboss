@@ -2330,12 +2330,19 @@ fn view_footer(state: &App) -> Element<'_, Message> {
             join_title_artist(&state.now_title, &state.now_artist)
         )
     } else {
-        "Off air".to_string()
+        "OFF AIR".to_string()
     };
-    container(text(status).size(12))
-        .padding([6, 12])
-        .width(Length::Fill)
-        .into()
+    container(
+        row![
+            text(status).size(12),
+            iced::widget::space::horizontal(),
+            text(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11),
+        ]
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([6, 12])
+    .width(Length::Fill)
+    .into()
 }
 
 /// Halloy-style left sidebar (v1: fixed position, no collapse, no badges):
