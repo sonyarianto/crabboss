@@ -5,6 +5,7 @@
 //! (one view per screen), `widgets` (shared display helpers).
 
 mod app;
+mod backup;
 mod screens;
 mod widgets;
 

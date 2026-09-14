@@ -118,6 +118,8 @@ pub(crate) enum Message {
     AutodjToggled(bool),
     // Library
     LibrarySearchChanged(String),
+    LibraryKindChanged(Option<TrackKind>),
+    LibraryMissingToggled(bool),
     LibraryTrackSelected(usize),
     LibraryTrackPlay(usize),
     ImportFiles,
@@ -205,6 +207,8 @@ pub(crate) enum Message {
     MicReleaseInc,
     MicReleaseDec,
     StationName(String),
+    BackupNow,
+    RestoreNow,
     // License
     LicenseKeyInput(String),
     ActivateLicense,
@@ -262,6 +266,8 @@ pub(crate) struct App {
     pub(crate) lib_tracks: Vec<Track>,
     pub(crate) lib_total: usize,
     pub(crate) lib_search: String,
+    pub(crate) lib_kind: Option<TrackKind>,
+    pub(crate) lib_missing_only: bool,
     pub(crate) lib_selected: Option<usize>,
     pub(crate) lib_status: String,
 
@@ -303,6 +309,9 @@ pub(crate) struct App {
     pub(crate) report_entries: Vec<crabcore::report::PlayLogEntry>,
     pub(crate) report_summary: String,
     pub(crate) report_range: usize,
+    /// Newest-first play log of the last 24h (all kinds) for the
+    /// "Recently played" strip. Refilled by `refresh_report`.
+    pub(crate) recent_plays: Vec<crabcore::report::PlayLogEntry>,
 
     // Ads
     pub(crate) ad_blocks: Vec<crabcore::ads::AdBlock>,
@@ -324,6 +333,7 @@ pub(crate) struct App {
     pub(crate) device_note: String,
     pub(crate) input_devices: Vec<String>,
     pub(crate) mic_note: String,
+    pub(crate) backup_status: String,
 
     // License UI
     pub(crate) license_status: String,
@@ -341,20 +351,26 @@ pub(crate) struct App {
 
 impl App {
     // -- persistence -------------------------------------------------------
-    fn save_settings(&mut self) {
+    pub(crate) fn save_settings(&mut self) {
         if let Err(e) = self.settings.save(&self.settings_path) {
             tracing::warn!("Settings save failed: {e}");
         }
     }
 
     fn refresh_library(&mut self) {
-        let tracks = if self.lib_search.trim().is_empty() {
+        let mut tracks = if self.lib_search.trim().is_empty() {
             self.library.get_all_tracks().unwrap_or_default()
         } else {
             self.library
                 .search(self.lib_search.trim())
                 .unwrap_or_default()
         };
+        if let Some(kind) = self.lib_kind {
+            tracks.retain(|t| t.kind == kind);
+        }
+        if self.lib_missing_only {
+            tracks.retain(|t| !PathBuf::from(&t.file_path).is_file());
+        }
         self.lib_total = self.library.get_all_tracks().unwrap_or_default().len();
         self.lib_tracks = tracks;
         self.track_count = self.lib_total;
@@ -365,7 +381,7 @@ impl App {
         }
     }
 
-    fn refresh_scheduler(&mut self) {
+    pub(crate) fn refresh_scheduler(&mut self) {
         self.sched_events = self.scheduler.list_all().unwrap_or_default();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         self.sched_warnings = self
@@ -375,7 +391,7 @@ impl App {
         self.upcoming_count = self.sched_events.iter().filter(|e| e.enabled).count();
     }
 
-    fn refresh_carts(&mut self) {
+    pub(crate) fn refresh_carts(&mut self) {
         self.cart_list = self.carts.list_all().unwrap_or_default();
     }
 
@@ -413,7 +429,7 @@ impl App {
         }
     }
 
-    fn refresh_ads(&mut self) {
+    pub(crate) fn refresh_ads(&mut self) {
         self.ad_blocks = self.ads.list_all().unwrap_or_default();
     }
 
@@ -440,9 +456,17 @@ impl App {
             }
         );
         self.report_entries = entries.into_iter().take(100).collect();
+        // Recently played: same log, last 24h, all kinds (jingles/ads get
+        // their kind tag in the view instead of being hidden).
+        let day_ago = to - chrono::Duration::hours(24);
+        self.recent_plays = crabcore::report::play_report(&self.library, day_ago, to, &[])
+            .unwrap_or_default()
+            .into_iter()
+            .take(15)
+            .collect();
     }
 
-    fn refresh_counts(&mut self) {
+    pub(crate) fn refresh_counts(&mut self) {
         self.track_count = self.library.get_all_tracks().unwrap_or_default().len();
         self.playlist_count = self.playlist_manager.list_all().unwrap_or_default().len();
         self.upcoming_count = self.sched_events.iter().filter(|e| e.enabled).count();
@@ -995,6 +1019,8 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         lib_tracks: Vec::new(),
         lib_total: 0,
         lib_search: String::new(),
+        lib_kind: None,
+        lib_missing_only: false,
         lib_selected: None,
         lib_status: String::new(),
         scanning: false,
@@ -1026,6 +1052,7 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         report_entries: Vec::new(),
         report_summary: String::new(),
         report_range: 1,
+        recent_plays: Vec::new(),
         ad_blocks: Vec::new(),
         ads_editor_open: false,
         ads_edit_idx: None,
@@ -1045,6 +1072,7 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         device_note: String::new(),
         input_devices,
         mic_note: String::new(),
+        backup_status: String::new(),
         license_status: String::new(),
         license_error: String::new(),
         license_key: String::new(),
@@ -1196,6 +1224,16 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         // -- Library ---------------------------------------------------------
         Message::LibrarySearchChanged(q) => {
             state.lib_search = q;
+            state.lib_selected = None;
+            state.refresh_library();
+        }
+        Message::LibraryKindChanged(kind) => {
+            state.lib_kind = kind;
+            state.lib_selected = None;
+            state.refresh_library();
+        }
+        Message::LibraryMissingToggled(only) => {
+            state.lib_missing_only = only;
             state.lib_selected = None;
             state.refresh_library();
         }
@@ -1950,6 +1988,48 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
             state.settings.station_name = v.clone();
             state.station_name = v;
             state.save_settings();
+        }
+        Message::BackupNow => {
+            let path = rfd::FileDialog::new()
+                .set_title("Backup station data (JSON)")
+                .set_file_name(format!(
+                    "crabboss-backup-{}.json",
+                    chrono::Local::now().format("%Y%m%d-%H%M%S")
+                ))
+                .add_filter("JSON", &["json"])
+                .save_file();
+            let Some(path) = path else {
+                return Task::none();
+            };
+            match crate::backup::write_backup(&path, &state.build_backup()) {
+                Ok(()) => {
+                    tracing::info!("Backup saved to {}", path.display());
+                    state.backup_status = format!("Backup saved to {}", path.display());
+                }
+                Err(e) => {
+                    tracing::error!("Backup failed: {e}");
+                    state.backup_status = format!("Backup failed: {e}");
+                }
+            }
+        }
+        Message::RestoreNow => {
+            let path = rfd::FileDialog::new()
+                .set_title("Restore station data (JSON)")
+                .add_filter("JSON", &["json"])
+                .pick_file();
+            let Some(path) = path else {
+                return Task::none();
+            };
+            match crate::backup::read_backup(&path).and_then(|b| state.apply_backup(b)) {
+                Ok(status) => {
+                    tracing::info!("Restore from {}: {status}", path.display());
+                    state.backup_status = status;
+                }
+                Err(e) => {
+                    tracing::error!("Restore failed: {e}");
+                    state.backup_status = format!("Restore failed: {e}");
+                }
+            }
         }
         // -- License ----------------------------------------------------------
         Message::LicenseKeyInput(v) => {

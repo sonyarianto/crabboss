@@ -8,6 +8,8 @@ description = "CrabBoss desktop UI built with Iced"
 crabcore = { path = "../core" }
 chrono = { workspace = true }
 rfd = "0.15"
+serde = { workspace = true }
+serde_json = { workspace = true }
 # SPIKE: retry the default wgpu renderer now that cpal 0.18 evicted
 # windows 0.54 from the graph (gpu-allocator should unify at 0.58).
 iced = { version = "0.14", features = ["tokio"] }

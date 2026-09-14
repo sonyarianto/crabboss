@@ -22,6 +22,21 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
     }
     range_row = range_row.push(iced::widget::space::horizontal());
     range_row = range_row.push(button(text("Export CSV").size(12)).on_press(Message::ReportExport));
+    let mut recent = column![text("Recently played (24h)").size(13)].spacing(2);
+    if state.recent_plays.is_empty() {
+        recent = recent.push(text("Nothing played in the last 24 hours.").size(12));
+    }
+    for e in &state.recent_plays {
+        recent = recent.push(
+            text(format!(
+                "{} | {} [{}]",
+                e.played_at.format("%H:%M"),
+                join_title_artist(&e.title, &e.artist),
+                e.kind.as_str()
+            ))
+            .size(12),
+        );
+    }
     let mut list = column![].spacing(2);
     for e in &state.report_entries {
         list = list.push(
@@ -36,6 +51,8 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
     }
     column![
         text("Reports").size(16),
+        recent,
+        iced::widget::rule::horizontal(1),
         range_row,
         text(&state.report_summary).size(11),
         scrollable(list).height(Length::Fill),

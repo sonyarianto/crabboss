@@ -4,9 +4,11 @@
 use std::path::PathBuf;
 
 use iced::{
-    widget::{button, column, container, row, scrollable, text, text_input},
+    widget::{button, checkbox, column, container, row, scrollable, text, text_input},
     Element, Length, Theme,
 };
+
+use crabcore::library::TrackKind;
 
 use crate::app::{App, Message};
 use crate::widgets::{fmt_dur, kind_label, track_label};
@@ -39,6 +41,27 @@ pub(crate) fn panel(state: &App, tools: bool) -> Element<'_, Message> {
     let search = text_input("Search tracks...", &state.lib_search)
         .on_input(Message::LibrarySearchChanged)
         .padding(8);
+
+    // Kind filter + missing-only: narrows the same list, no new queries.
+    let mut filters = row![text("Kind:").size(12)].spacing(6);
+    for (label, kind) in [
+        ("All", None),
+        ("Music", Some(TrackKind::Music)),
+        ("Jingles", Some(TrackKind::Jingle)),
+        ("Ads", Some(TrackKind::Ad)),
+    ] {
+        let entry = button(text(label).size(12)).on_press(Message::LibraryKindChanged(kind));
+        filters = filters.push(if state.lib_kind == kind {
+            entry.style(iced::widget::button::primary)
+        } else {
+            entry
+        });
+    }
+    filters = filters.push(
+        checkbox(state.lib_missing_only)
+            .label("Missing only")
+            .on_toggle(Message::LibraryMissingToggled),
+    );
 
     // Fixed column widths shared by the header and every row, so the list
     // reads as a table: only Title/Artist flex, everything else lines up.
@@ -134,6 +157,7 @@ pub(crate) fn panel(state: &App, tools: bool) -> Element<'_, Message> {
     column![
         header,
         search,
+        filters,
         text(&state.lib_status).size(11),
         scrollable(list).height(Length::Fill),
     ]

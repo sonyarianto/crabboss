@@ -215,3 +215,120 @@ pub(crate) fn mic_state_label(st: &MicState) -> String {
 pub(crate) fn mic_state_is_live(st: &MicState) -> bool {
     matches!(st, MicState::Live)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crabcore::library::TrackKind;
+
+    #[test]
+    fn fmt_dur_formats_mm_ss() {
+        assert_eq!(fmt_dur(None), "00:00");
+        assert_eq!(fmt_dur(Some(0.0)), "00:00");
+        assert_eq!(fmt_dur(Some(65.0)), "01:05");
+        assert_eq!(fmt_dur(Some(65.9)), "01:05");
+        assert_eq!(fmt_dur(Some(-3.0)), "00:00");
+    }
+
+    #[test]
+    fn kind_label_covers_all_kinds() {
+        assert_eq!(kind_label(TrackKind::Music), "Music");
+        assert_eq!(kind_label(TrackKind::Jingle), "Jingle");
+        assert_eq!(kind_label(TrackKind::Ad), "Ad");
+    }
+
+    #[test]
+    fn strip_audio_extension_keeps_bare_and_dotfiles() {
+        assert_eq!(strip_audio_extension("Song.mp3"), "Song");
+        assert_eq!(strip_audio_extension("archive.tar.gz"), "archive.tar");
+        assert_eq!(strip_audio_extension("noext"), "noext");
+        assert_eq!(strip_audio_extension(".hidden"), ".hidden");
+    }
+
+    #[test]
+    fn join_title_artist_never_dangles_separator() {
+        assert_eq!(join_title_artist("T", "A"), "T - A");
+        assert_eq!(join_title_artist("T", ""), "T");
+        assert_eq!(join_title_artist("", "A"), "A");
+        assert_eq!(join_title_artist("", ""), "");
+    }
+
+    #[test]
+    fn track_source_label_tags_automation_only() {
+        assert_eq!(
+            track_source_label("News", "Scheduler"),
+            "News · via Scheduler"
+        );
+        assert_eq!(
+            track_source_label("Song", "Real Artist"),
+            "Song - Real Artist"
+        );
+        assert_eq!(track_source_label("", "Auto-DJ"), "Auto-DJ");
+    }
+
+    #[test]
+    fn on_air_label_prefixes() {
+        assert_eq!(on_air_label("Song", "Band"), "ON AIR: Song - Band");
+    }
+
+    #[test]
+    fn lin_to_dbfs_unity_is_zero_and_silent_clamps() {
+        assert!((lin_to_dbfs(1.0)).abs() < 1e-4);
+        assert!((lin_to_dbfs(0.0) + 60.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn stream_bitrate_step_walks_ladder_and_clamps() {
+        assert_eq!(stream_bitrate_step(128, true), 160);
+        assert_eq!(stream_bitrate_step(128, false), 112);
+        assert_eq!(stream_bitrate_step(320, true), 320);
+        assert_eq!(stream_bitrate_step(8, false), 8);
+        assert_eq!(stream_bitrate_step(999, true), 320);
+    }
+
+    #[test]
+    fn duck_ms_step_walks_given_ladder() {
+        assert_eq!(duck_ms_step(&ATTACK_LADDER, 10.0, true), 20.0);
+        assert_eq!(duck_ms_step(&ATTACK_LADDER, 10.0, false), 5.0);
+        assert_eq!(duck_ms_step(&RELEASE_LADDER, 3000.0, true), 3000.0);
+        assert_eq!(duck_ms_step(&RELEASE_LADDER, 10.0, false), 10.0);
+    }
+
+    #[test]
+    fn action_names_cover_scheduler_indices() {
+        assert_eq!(action_name(0), "play");
+        assert_eq!(action_name(4), "queue");
+        assert_eq!(action_name(3), "command");
+        assert_eq!(action_label(3), "command");
+        assert_eq!(action_label(4), "queue");
+    }
+
+    #[test]
+    fn report_range_bounds_labels() {
+        assert_eq!(report_range_bounds(0).1, "Today");
+        assert_eq!(report_range_bounds(1).1, "Last 7 days");
+        assert_eq!(report_range_bounds(2).1, "Last 30 days");
+        assert_eq!(report_range_bounds(3).1, "All time");
+        assert_eq!(report_range_bounds(99).1, "Last 7 days");
+    }
+
+    #[test]
+    fn eq_band_label_formats() {
+        assert!(!eq_band_label(0).is_empty());
+        assert_eq!(eq_band_label(999), "0");
+    }
+
+    #[test]
+    fn short_name_takes_file_name() {
+        assert_eq!(short_name("/a/b/song.mp3"), "song.mp3");
+        assert_eq!(short_name(""), "");
+    }
+
+    #[test]
+    fn mic_state_helpers() {
+        assert!(mic_state_is_live(&MicState::Live));
+        assert!(!mic_state_is_live(&MicState::Off));
+        assert!(!mic_state_is_live(&MicState::Error("x".into())));
+        assert!(!mic_state_label(&MicState::Live).is_empty());
+    }
+}
