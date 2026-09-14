@@ -74,20 +74,63 @@ fn csv_cell(s: &str) -> String {
     }
 }
 
+/// Shared column layout for every tabular export (CSV, XLSX).
+pub const REPORT_COLUMNS: [&str; 5] = ["played_at", "title", "artist", "kind", "duration_secs"];
+
+/// One entry as plain display strings. No quoting here: each format
+/// encodes on its own terms (CSV quotes, XLSX stores typed cells).
+pub fn report_row(e: &PlayLogEntry) -> [String; 5] {
+    [
+        e.played_at.to_rfc3339(),
+        e.title.clone(),
+        e.artist.clone(),
+        e.kind.as_str().to_string(),
+        e.duration_secs.map(|d| d.to_string()).unwrap_or_default(),
+    ]
+}
+
 /// RFC-4180-ish CSV for spreadsheets / royalty bodies.
 pub fn to_csv(entries: &[PlayLogEntry]) -> String {
-    let mut out = String::from("played_at,title,artist,kind,duration_secs\n");
+    // Header from the shared layout: CSV and XLSX cannot drift apart.
+    let mut out = REPORT_COLUMNS.join(",") + "\n";
     for e in entries {
+        let r = report_row(e);
         out.push_str(&format!(
             "{},{},{},{},{}\n",
-            e.played_at.to_rfc3339(),
-            csv_cell(&e.title),
-            csv_cell(&e.artist),
-            e.kind.as_str(),
-            e.duration_secs.map(|d| d.to_string()).unwrap_or_default(),
+            csv_cell(&r[0]),
+            csv_cell(&r[1]),
+            csv_cell(&r[2]),
+            csv_cell(&r[3]),
+            csv_cell(&r[4]),
         ));
     }
     out
+}
+
+/// XLSX workbook bytes for royalty bodies that want spreadsheets: same
+/// rows and columns as [`to_csv`], values as plain strings so Excel
+/// never mangles timestamps. `String` error (not [`Result`]): a
+/// formatting failure surfaces verbatim in the export status line,
+/// while database errors stay typed upstream.
+pub fn to_xlsx(entries: &[PlayLogEntry]) -> std::result::Result<Vec<u8>, String> {
+    let mut book = rust_xlsxwriter::Workbook::new();
+    let sheet = book.add_worksheet();
+    sheet
+        .set_name("Plays")
+        .map_err(|e| format!("xlsx sheet: {e}"))?;
+    for (c, h) in REPORT_COLUMNS.iter().enumerate() {
+        sheet
+            .write_string(0, c as u16, *h)
+            .map_err(|e| format!("xlsx header: {e}"))?;
+    }
+    for (r, e) in entries.iter().enumerate() {
+        for (c, v) in report_row(e).iter().enumerate() {
+            sheet
+                .write_string((r + 1) as u32, c as u16, v)
+                .map_err(|e| format!("xlsx row {}: {e}", r + 1))?;
+        }
+    }
+    book.save_to_buffer().map_err(|e| format!("xlsx pack: {e}"))
 }
 
 #[cfg(test)]
@@ -168,6 +211,55 @@ mod tests {
         let csv = to_csv(&entries);
         assert!(csv.starts_with("played_at,title,artist,kind,duration_secs\n"));
         assert!(csv.contains("\"Say \"\"Hi\"\", Now\",\"A, B\",music,200"));
+    }
+
+    fn xlsx_entry() -> Vec<PlayLogEntry> {
+        vec![PlayLogEntry {
+            title: "Night Song".to_string(),
+            artist: "Owl".to_string(),
+            kind: TrackKind::Music,
+            played_at: DateTime::parse_from_rfc3339("2024-05-01T10:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            duration_secs: Some(200.0),
+        }]
+    }
+
+    #[test]
+    fn report_row_is_raw_csv_escapes() {
+        // Same entry, two encodings: the row carries raw values, CSV
+        // quotes them, XLSX stores them as-is.
+        let row = report_row(&xlsx_entry()[0]);
+        assert_eq!(
+            row,
+            [
+                "2024-05-01T10:00:00+00:00",
+                "Night Song",
+                "Owl",
+                "music",
+                "200",
+            ]
+        );
+        let tricky = PlayLogEntry {
+            title: "Say \"Hi\", Now".to_string(),
+            artist: "A, B".to_string(),
+            ..xlsx_entry()[0].clone()
+        };
+        let row = report_row(&tricky);
+        assert_eq!(row[1], "Say \"Hi\", Now");
+        assert!(to_csv(&[tricky]).contains("\"Say \"\"Hi\"\", Now\""));
+    }
+
+    #[test]
+    fn xlsx_packs_a_workbook() {
+        let bytes = to_xlsx(&xlsx_entry()).expect("xlsx packs");
+        // ZIP container magic; content itself is zipped XML (no reader
+        // in-tree, so the row mapping above carries the exactness).
+        assert!(bytes.starts_with(b"PK"), "not a zip container");
+        assert!(bytes.len() > 1_000, "suspiciously small: {}", bytes.len());
+        let empty = to_xlsx(&[]).expect("header-only packs");
+        assert!(empty.starts_with(b"PK"));
+        assert!(bytes.len() > empty.len(), "rows must grow the workbook");
     }
 
     #[test]

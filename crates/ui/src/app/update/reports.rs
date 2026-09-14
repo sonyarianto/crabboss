@@ -1,4 +1,4 @@
-//! Play-log reports: ranged lists, CSV export, and the 24h
+//! Play-log reports: ranged lists, CSV/XLSX export, and the 24h
 //! "recently played" strip (same log, all kinds).
 
 use crabcore::library::TrackKind;
@@ -13,9 +13,10 @@ pub(crate) fn range_changed(state: &mut App, i: usize) {
 
 pub(crate) fn export(state: &mut App) {
     let path = rfd::FileDialog::new()
-        .set_title("Export play report (CSV)")
+        .set_title("Export play report (CSV / XLSX)")
         .set_file_name("crabboss-report.csv")
         .add_filter("CSV", &["csv"])
+        .add_filter("Excel", &["xlsx"])
         .save_file();
     let Some(path) = path else {
         return;
@@ -28,7 +29,25 @@ pub(crate) fn export(state: &mut App) {
         &[TrackKind::Jingle, TrackKind::Ad],
     )
     .unwrap_or_default();
-    match std::fs::write(&path, crabcore::report::to_csv(&entries)) {
+    // Format follows the chosen extension (CSV stays the default);
+    // anything else falls back to CSV rather than failing the export.
+    let xlsx = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("xlsx"));
+    let bytes = if xlsx {
+        match crabcore::report::to_xlsx(&entries) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!("Report export failed: {e}");
+                state.report_summary = format!("Export failed: {e}");
+                return;
+            }
+        }
+    } else {
+        crabcore::report::to_csv(&entries).into_bytes()
+    };
+    match std::fs::write(&path, bytes) {
         Ok(()) => {
             tracing::info!(
                 "Report exported: {} ({} rows)",

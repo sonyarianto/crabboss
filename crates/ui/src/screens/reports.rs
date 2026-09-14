@@ -1,4 +1,4 @@
-//! Play-log reports: ranged lists plus CSV export.
+//! Play-log reports: ranged lists plus CSV/XLSX export.
 
 use iced::{
     widget::{button, column, row, scrollable, text},
@@ -21,7 +21,8 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
             range_row.push(button(text(label).size(12)).on_press(Message::ReportRangeChanged(i)));
     }
     range_row = range_row.push(iced::widget::space::horizontal());
-    range_row = range_row.push(button(text("Export CSV").size(12)).on_press(Message::ReportExport));
+    range_row =
+        range_row.push(button(text("Export CSV/XLSX").size(12)).on_press(Message::ReportExport));
     let mut recent = column![text("Recently played (24h)").size(13)].spacing(2);
     if state.recent_plays.is_empty() {
         recent = recent.push(text("Nothing played in the last 24 hours.").size(12));

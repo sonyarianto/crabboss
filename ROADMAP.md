@@ -92,7 +92,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Mic / line-in | Mixed input, sidechain ducking, bed music | cpal input + `rtrb` ring summed pre-limiter/tap, voice-activated ducker, live device switching, Settings mic panel | ✅ |
 | Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
 | Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
-| Reporting | Play logs → XLS/PDF, royalty reports | Play logging on all paths + ranged reports + CSV export (jingles/ads excluded); XLS/PDF open | ✅ |
+| Reporting | Play logs → XLS/PDF, royalty reports | Play logging on all paths + ranged reports + CSV + XLSX export (jingles/ads excluded); PDF open | ✅ |
 | Library depth | Mass tag editor, BPM scan, dupe detection, scheduled sync, health scan | Scan + missing-file health scan + loudness scan + kind auto-classify/repair + duplicate flag view + folder auto-sync; mass-tag/BPM open | 🟡 |
 | Track health | Proactive missing/corrupt detection | ✅ `missing_files()` + startup/on-demand scan, `!` row flags | ✅ |
 | UI niceties | Hotkeys, screen-reader a11y, drag-drop, waveform | Cart hotkeys 1–8 + sidebar nav + status footer; a11y/drag-drop/waveform open | 🟡 |
@@ -229,8 +229,8 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 
 ### 1.9 Reporting & Ops
 - [x] Play logging on every play path (library tap, cart fire, scheduler run, silence filler)
-- [x] Play-log reports: range presets (Today/7d/30d/All), jingle+ad exclusion, newest-100 list, CSV export
-- [ ] XLS/PDF export (CSV done — spreadsheets/royalty bodies accept it; native XLS/PDF later)
+- [x] Play-log reports: range presets (Today/7d/30d/All), jingle+ad exclusion, newest-100 list, CSV + XLSX export
+- [ ] PDF export (royalty bodies take CSV/XLSX; native PDF later)
 - [x] Settings screen: output device picker (persisted, applies on restart, with
       unplugged-device fallback, live device highlighted), station name
       (persisted, dashboard header), section sub-pages with descriptions,
