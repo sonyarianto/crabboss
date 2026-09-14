@@ -201,6 +201,32 @@ pub fn generate_next(
         .cloned())
 }
 
+/// Forecast the next `n` picks without touching playcounts: simulate
+/// successive `generate_next` calls on a CLONE of `history`, pushing each
+/// simulated pick so the forecast itself separates. This is a prediction
+/// for display (an "up next" list), not a commitment — manual overrides,
+/// scheduler fires, and fresh playcounts will diverge it. The caller owns
+/// refreshing when the world changes.
+pub fn forecast_up_next(
+    library: &Library,
+    cfg: &GenConfig,
+    history: &RuleHistory,
+    n: usize,
+) -> Vec<Track> {
+    let mut hist = history.clone();
+    let mut out = Vec::new();
+    for _ in 0..n {
+        match generate_next(library, cfg, &hist) {
+            Ok(Some(t)) => {
+                hist.push_track(&t, cfg);
+                out.push(t);
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
 fn sort_by_priority(tracks: &mut [Track], priority: PlaycountPriority) {
     tracks.sort_by(|a, b| {
         let ord = match priority {
@@ -402,5 +428,30 @@ mod tests {
         assert!(generate_next(&lib, &next_cfg(), &history)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn forecast_lists_successive_picks_with_separation() {
+        let lib = mem_lib(&[
+            ("a1.mp3", "A", "Rock", 0),
+            ("a2.mp3", "A", "Rock", 0),
+            ("b1.mp3", "B", "Pop", 0),
+        ]);
+        let cfg = next_cfg();
+        let history = RuleHistory::default();
+        // a1, then B (separated); once both artists sit in the window the
+        // relax fallback kicks in exactly like successive real picks.
+        // (Simulation never touches playcounts, so the tail repeats a1
+        // where live play would have re-ranked by count — forecasts are
+        // approximate by design.)
+        let out = forecast_up_next(&lib, &cfg, &history, 5);
+        let names: Vec<_> = out.iter().map(|t| t.file_name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["a1.mp3", "b1.mp3", "a1.mp3", "a1.mp3", "b1.mp3"]
+        );
+        // Empty library forecasts nothing.
+        let empty = Library::open(std::path::Path::new(":memory:")).unwrap();
+        assert!(forecast_up_next(&empty, &cfg, &history, 5).is_empty());
     }
 }

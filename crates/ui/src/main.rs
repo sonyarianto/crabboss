@@ -427,6 +427,11 @@ struct App {
     volume: f32,
     autodj: bool,
     up_next: String,
+    /// Forecast display: next tracks Auto-DJ would pick (recomputed when
+    /// the live track changes; a prediction, not a commitment).
+    up_next_list: Vec<Track>,
+    /// Engine track the forecast was built for (`None` = stale/never).
+    up_next_for: Option<PathBuf>,
     auto_continue: bool,
     was_playing: bool,
     /// No-repeat windows across Auto-DJ picks (plus the queued pick): every
@@ -1046,6 +1051,19 @@ impl App {
             }
         }
 
+        // Refresh the coming-up forecast when the live track changed (or
+        // never built). Forecast only makes sense with Auto-DJ on; manual
+        // mode has no predictable order, so the list stays empty there.
+        if self.up_next_for != self.engine_track {
+            self.up_next_for = self.engine_track.clone();
+            self.up_next_list = if self.autodj {
+                let cfg = self.autodj_cfg();
+                crabcore::playlist::forecast_up_next(&self.library, &cfg, &self.autodj_history, 5)
+            } else {
+                Vec::new()
+            };
+        }
+
         // Scheduler + ads auto-fire (dedupe per event/minute).
         if self.sched_enabled {
             let now = chrono::Local::now();
@@ -1368,6 +1386,8 @@ fn boot() -> (App, Task<Message>) {
         volume,
         autodj,
         up_next: String::new(),
+        up_next_list: Vec::new(),
+        up_next_for: None,
         auto_continue: false,
         was_playing: false,
         autodj_history: crabcore::playlist::RuleHistory::default(),
@@ -2735,9 +2755,23 @@ fn view_library_page(state: &App) -> Element<'_, Message> {
 }
 
 fn view_playout(state: &App) -> Element<'_, Message> {
+    // Forecast display (Auto-DJ only): what the rotation would play next,
+    // recomputed whenever the live track changes. The already-queued deck
+    // (if any) keeps its own "Up next" label in the strip above.
+    let coming_up: Element<'_, Message> = if state.up_next_list.is_empty() {
+        column![].into()
+    } else {
+        let mut col = column![text("Coming Up").size(14)].spacing(4);
+        for t in &state.up_next_list {
+            let artist = t.artist.clone().unwrap_or_default();
+            col = col.push(text(join_title_artist(&track_label(t), &artist)).size(12));
+        }
+        col.into()
+    };
     column![
         text("Playout").size(16),
         view_player_panel(state),
+        coming_up,
         container(view_library_panel(state, false))
             .width(Length::Fill)
             .height(Length::Fill),
