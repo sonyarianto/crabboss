@@ -44,6 +44,9 @@ pub enum CrabError {
     #[error("Station lists replace failed: {0}")]
     BulkReplace(String),
 
+    #[error("Invalid cart position: {0} (pads are 0-based, see WALL_SIZE)")]
+    InvalidCartPosition(i32),
+
     #[error("Data integrity error in {table} (id {id}): invalid {field} {value:?}")]
     Integrity {
         table: &'static str,

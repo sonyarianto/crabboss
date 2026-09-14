@@ -28,7 +28,7 @@ use rusqlite::{Connection, Transaction};
 use crate::error::{CrabError, Result};
 
 /// Current schema version. Bump when appending to [`MIGRATIONS`].
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// How long a connection waits on a locked database before erroring.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -59,6 +59,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 3,
         name: "tracks enrichment columns",
         apply: m3_tracks_extra_columns,
+    },
+    Migration {
+        version: 4,
+        name: "carts unique position",
+        apply: m4_carts_unique_position,
     },
 ];
 
@@ -335,7 +340,8 @@ fn m1_baseline(tx: &Transaction<'_>) -> std::result::Result<(), rusqlite::Error>
             label       TEXT NOT NULL,
             file_path   TEXT NOT NULL DEFAULT '',
             position    INTEGER NOT NULL DEFAULT 0,
-            created_at  TEXT NOT NULL
+            created_at  TEXT NOT NULL,
+            UNIQUE(position)
         );
         CREATE TABLE IF NOT EXISTS ad_blocks (
             id          TEXT PRIMARY KEY,
@@ -389,6 +395,34 @@ fn m3_tracks_extra_columns(tx: &Transaction<'_>) -> std::result::Result<(), rusq
     Ok(())
 }
 
+/// v4: one cart per pad. SQLite cannot `ALTER TABLE … ADD UNIQUE`, so a
+/// duplicate position (only possible via hand edits — the app always
+/// replaced per pad) is repaired deterministically first: last-inserted
+/// wins, matching `assign_at` semantics. Then the table is rebuilt with
+/// the constraint. Runs once per database (version-gated); fresh files
+/// already carry the constraint from v1.
+fn m4_carts_unique_position(tx: &Transaction<'_>) -> std::result::Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "DELETE FROM carts
+         WHERE rowid NOT IN (SELECT MAX(rowid) FROM carts GROUP BY position);",
+    )?;
+    tx.execute_batch(
+        "CREATE TABLE carts_new (
+            id          TEXT PRIMARY KEY,
+            label       TEXT NOT NULL,
+            file_path   TEXT NOT NULL DEFAULT '',
+            position    INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL,
+            UNIQUE(position)
+        );
+        INSERT INTO carts_new (id, label, file_path, position, created_at)
+            SELECT id, label, file_path, position, created_at FROM carts;
+        DROP TABLE carts;
+        ALTER TABLE carts_new RENAME TO carts;",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +463,15 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "missing table {table}");
         }
+        // Fresh files carry the carts UNIQUE constraint from the start.
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='carts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("UNIQUE"), "{sql}");
         // Reopen: idempotent, version untouched, no extra writes fail.
         Database::initialize(&path).unwrap();
         let v2: u32 = conn
@@ -738,6 +781,55 @@ mod tests {
         let conn = Database::open_connection(&path).unwrap();
         assert_eq!(count(&conn, "scheduled_events"), 1);
         assert_eq!(count(&conn, "carts"), 0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn v4_repairs_duplicate_positions_and_adds_unique() {
+        let path = tmp_db("crabboss-db-v4.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            // Pre-v4 carts table: no UNIQUE constraint, hand-made dupes.
+            conn.execute_batch(
+                "CREATE TABLE carts (
+                    id TEXT PRIMARY KEY, label TEXT NOT NULL,
+                    file_path TEXT NOT NULL DEFAULT '',
+                    position INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO carts (id, label, file_path, position, created_at)
+                    VALUES ('old','Old','/o.mp3',1,'2026-01-01T00:00:00Z'),
+                           ('new','New','/n.mp3',1,'2026-02-01T00:00:00Z'),
+                           ('solo','Solo','/s.mp3',2,'2026-01-01T00:00:00Z');
+                PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        }
+        Database::initialize(&path).unwrap();
+        let conn = Database::open_connection(&path).unwrap();
+        let v: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        // Last-inserted wins per position, like `assign_at`.
+        let mut labels: Vec<String> = conn
+            .prepare("SELECT label FROM carts ORDER BY position")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        labels.sort();
+        assert_eq!(labels, vec!["New".to_string(), "Solo".to_string()]);
+        // The constraint is really there now.
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='carts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("UNIQUE"), "{sql}");
         std::fs::remove_file(&path).ok();
     }
 

@@ -52,7 +52,8 @@ impl CartManager {
                     label       TEXT NOT NULL,
                     file_path   TEXT NOT NULL DEFAULT '',
                     position    INTEGER NOT NULL DEFAULT 0,
-                    created_at  TEXT NOT NULL
+                    created_at  TEXT NOT NULL,
+                    UNIQUE(position)
                 );
                 ",
         )?;
@@ -122,27 +123,25 @@ impl CartManager {
         Ok(())
     }
 
-    /// Assign a track to a pad slot (0-based). Replaces whatever was there
-    /// (carts are pads, not an ordered list). No-op when `position` is
-    /// beyond the configured wall size.
+    /// Assign a track to a pad slot (0-based), replacing whatever was
+    /// there (carts are pads, not an ordered list). Runs in one
+    /// transaction: delete + insert commit together, so a failure can
+    /// never leave the pad empty. Out-of-range positions are a loud
+    /// error — every UI caller addresses real pads.
     pub fn assign_at(&self, position: i32, label: &str, file_path: &str) -> Result<()> {
         if !(0..WALL_SIZE as i32).contains(&position) {
-            return Ok(());
+            return Err(CrabError::InvalidCartPosition(position));
         }
-        let conn = self.conn.borrow();
-        if let Ok(existing) = conn.query_row(
-            "SELECT id FROM carts WHERE position = ?1",
-            params![position],
-            |r| r.get::<_, String>(0),
-        ) {
-            conn.execute("DELETE FROM carts WHERE id = ?1", params![existing])?;
-        }
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM carts WHERE position = ?1", params![position])?;
         let id = Uuid::new_v4().to_string();
-        conn.execute(
+        tx.execute(
             "INSERT INTO carts (id, label, file_path, position, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, label, file_path, position, Utc::now().to_rfc3339()],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -173,6 +172,21 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_position_violates_unique_constraint() {
+        // The DB itself is the backstop: even hand-written SQL cannot
+        // create two pads on one position.
+        let m = CartManager::new(Connection::open_in_memory().unwrap()).unwrap();
+        m.assign_at(2, "A", "/tmp/a.mp3").unwrap();
+        let dup = m.conn.borrow().execute(
+            "INSERT INTO carts (id, label, file_path, position, created_at)
+             VALUES ('x', 'B', '/tmp/b.mp3', 2, '2026-01-01T00:00:00Z')",
+            [],
+        );
+        assert!(dup.is_err(), "UNIQUE(position) must hold");
+        assert_eq!(m.list_all().unwrap().len(), 1);
+    }
+
+    #[test]
     fn assign_at_replaces_and_respects_bounds() {
         let m = CartManager::new(Connection::open_in_memory().unwrap()).unwrap();
         m.create("Old", "/tmp/old.mp3").unwrap(); // takes position 0
@@ -181,10 +195,13 @@ mod tests {
         assert_eq!(all.len(), 1, "replace, not append");
         assert_eq!(all[0].position, 0);
         assert_eq!(all[0].label, "New");
-        // Out-of-range slots are ignored (fixed 8-pad wall).
-        m.assign_at(8, "Ghost", "/tmp/x.mp3").unwrap();
-        m.assign_at(-1, "Ghost", "/tmp/x.mp3").unwrap();
-        assert_eq!(m.list_all().unwrap().len(), 1);
+        // Out-of-range slots are a loud error (fixed 8-pad wall); the old
+        // cart stays exactly where it was.
+        assert!(m.assign_at(8, "Ghost", "/tmp/x.mp3").is_err());
+        assert!(m.assign_at(-1, "Ghost", "/tmp/x.mp3").is_err());
+        let all = m.list_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].label, "New");
         // Any free slot can be targeted directly.
         m.assign_at(5, "Slot5", "/tmp/s5.mp3").unwrap();
         let all = m.list_all().unwrap();

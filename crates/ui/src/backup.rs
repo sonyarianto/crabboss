@@ -631,11 +631,11 @@ mod tests {
                 e.expires_on.as_deref()
             )
             .is_err());
-        // `assign_at` never errors on positions by contract — agreement
-        // here means "writes nothing", which is why the validator must
-        // keep flagging out-of-range pads (the apply path skips them).
+        // Out-of-range pads: the validator flags them and the manager
+        // rejects them — agreement means the apply path skips them and
+        // the live wall is untouched either way.
         let n_before = carts.list_all().unwrap().len();
-        carts.assign_at(bad.carts[0].position, "x", "y").unwrap();
+        assert!(carts.assign_at(bad.carts[0].position, "x", "y").is_err());
         assert_eq!(carts.list_all().unwrap().len(), n_before);
         let a = &bad.ads[0];
         assert!(ads

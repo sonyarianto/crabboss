@@ -1658,6 +1658,7 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
             let label = track_label(&track);
             if let Err(e) = state.carts.assign_at(slot as i32, &label, &track.file_path) {
                 tracing::error!("Cart place failed: {}", e);
+                state.cart_status = format!("Place failed: {e}");
                 return Task::none();
             }
             state.cart_assign = false;
