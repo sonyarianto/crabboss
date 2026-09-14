@@ -337,6 +337,14 @@ pub(crate) struct App {
     pub(crate) input_devices: Vec<String>,
     pub(crate) mic_note: String,
     pub(crate) backup_status: String,
+    /// Boot-time settings file warning (invalid/unreadable file). `None`
+    /// on first run and on clean loads: no news is good news.
+    pub(crate) settings_notice: Option<String>,
+    /// Last settings save failure, cleared on the next successful save.
+    pub(crate) settings_save_error: Option<String>,
+    /// Boot file was untrusted: preserve it aside on the first save
+    /// instead of replacing it blindly.
+    pub(crate) settings_needs_quarantine: bool,
 
     // License UI
     pub(crate) license_status: String,
@@ -355,8 +363,33 @@ pub(crate) struct App {
 impl App {
     // -- persistence -------------------------------------------------------
     pub(crate) fn save_settings(&mut self) {
-        if let Err(e) = self.settings.save(&self.settings_path) {
-            tracing::warn!("Settings save failed: {e}");
+        // The boot file was untrusted (invalid/unreadable): move it aside
+        // first so this save cannot silently destroy evidence. Refuse to
+        // save at all when the preserve step itself fails.
+        if self.settings_needs_quarantine {
+            self.settings_needs_quarantine = false;
+            match crabcore::settings::quarantine_existing(&self.settings_path) {
+                Ok(Some(backup)) => {
+                    let msg = format!("Previous settings kept at {}", backup.display());
+                    tracing::warn!("{msg}");
+                    self.settings_notice = Some(msg);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let msg = format!("Settings NOT saved: cannot preserve existing file: {e}");
+                    tracing::error!("{msg}");
+                    self.settings_save_error = Some(msg);
+                    return;
+                }
+            }
+        }
+        match self.settings.save(&self.settings_path) {
+            Ok(()) => self.settings_save_error = None,
+            Err(e) => {
+                let msg = format!("Settings save failed: {e}");
+                tracing::warn!("{msg}");
+                self.settings_save_error = Some(msg);
+            }
         }
     }
 
@@ -857,7 +890,13 @@ pub(crate) fn boot() -> (App, Task<Message>) {
     let settings_path = std::env::current_dir()
         .unwrap_or_default()
         .join("settings.json");
-    let mut settings = crabcore::settings::AppSettings::load(&settings_path);
+    let load = crabcore::settings::AppSettings::load(&settings_path);
+    if let Some(w) = load.warning() {
+        tracing::warn!("Settings load: {w}");
+    }
+    let settings_needs_quarantine = load.needs_quarantine();
+    let settings_notice = load.warning();
+    let mut settings = load.settings();
 
     let engine_name = {
         let choice = engine_choice();
@@ -1076,6 +1115,9 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         input_devices,
         mic_note: String::new(),
         backup_status: String::new(),
+        settings_notice,
+        settings_save_error: None,
+        settings_needs_quarantine,
         license_status: String::new(),
         license_error: String::new(),
         license_key: String::new(),

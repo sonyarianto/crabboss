@@ -103,21 +103,31 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
 
     let sec = state.settings_section;
     let content: Element<'_, Message> = match sec {
-        SettingsSection::Station => column![
-            text(sec.label()).size(16),
-            text(sec.description()).size(11),
-            text_input("Station name", &state.settings.station_name)
-                .on_input(Message::StationName)
-                .padding(6),
-            row![
-                button(text("Backup...").size(12)).on_press(Message::BackupNow),
-                button(text("Restore...").size(12)).on_press(Message::RestoreNow),
+        SettingsSection::Station => {
+            let mut station = column![
+                text(sec.label()).size(16),
+                text(sec.description()).size(11),
+                text_input("Station name", &state.settings.station_name)
+                    .on_input(Message::StationName)
+                    .padding(6),
+                row![
+                    button(text("Backup...").size(12)).on_press(Message::BackupNow),
+                    button(text("Restore...").size(12)).on_press(Message::RestoreNow),
+                ]
+                .spacing(6),
+                text(&state.backup_status).size(11),
             ]
-            .spacing(6),
-            text(&state.backup_status).size(11),
-        ]
-        .spacing(8)
-        .into(),
+            .spacing(8);
+            // Persistence health: boot-file warnings and save failures are
+            // operator news, not log-only trivia.
+            if let Some(notice) = &state.settings_notice {
+                station = station.push(text(format!("Settings file: {notice}")).size(11));
+            }
+            if let Some(err) = &state.settings_save_error {
+                station = station.push(text(err).size(11));
+            }
+            station.into()
+        }
         SettingsSection::AudioDevice => column![
             text(sec.label()).size(16),
             text(sec.description()).size(11),

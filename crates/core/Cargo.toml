@@ -36,3 +36,6 @@ native-tls = "0.2"
 
 # Async file scanning
 walkdir = "2"
+
+# Atomic settings persistence (temp file + platform-correct replace)
+tempfile = "3"
