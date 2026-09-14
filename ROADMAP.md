@@ -96,7 +96,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Track health | Proactive missing/corrupt detection | ✅ `missing_files()` + startup/on-demand scan, `!` row flags | ✅ |
 | UI niceties | Hotkeys, screen-reader a11y, drag-drop, waveform | Cart hotkeys 1–8 + sidebar nav + status footer; a11y/drag-drop/waveform open | 🟡 |
 | Stream archive | Scheduled output recording | — | — |
-| License | Offline key, holder, tier | MVP done (checksum → ed25519 TODO) | ✅ |
+| License | Offline key, holder, tier | MVP done: checksum keys + vendor `genkey`, status labels (checksum → ed25519 TODO). NOT enforced yet: `features_enabled()` unwired, holder hardcoded — enforcement, per-station names, and expiry gating parked until the business model is decided | 🟡 |
 | File import UX | File dialog | Native `rfd` multi-select import with per-tick progress + report-export dialog | ✅ |
 | Quality gates | — | 122 tests green (library, playlist, scheduler, cart, mixer, license, stream, audio engine, settings); `cargo fmt` + `clippy -D warnings` in CI | ✅ |
 
