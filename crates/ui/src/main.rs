@@ -577,6 +577,7 @@ impl App {
                 self.now_artist = "Cart".into();
                 self.cart_status = format!("Playing {}", cart.label);
                 self.engine_track = Some(path);
+                self.up_next.clear();
             }
             Err(e) => tracing::error!("Cart play failed: {}", e),
         }
@@ -761,6 +762,7 @@ impl App {
                             self.now_title = event.target.clone();
                             self.now_artist = "Scheduler".into();
                             self.engine_track = Some(path);
+                            self.up_next.clear();
                         }
                         Err(e) => tracing::error!("Scheduler play failed: {}", e),
                     }
@@ -1126,6 +1128,7 @@ impl App {
                                 self.now_title = format!("Recovered: {}", label);
                                 self.now_artist = "Silence detector".into();
                                 self.engine_track = Some(path);
+                                self.up_next.clear();
                             }
                             Err(e) => tracing::error!("Filler play failed: {}", e),
                         }
@@ -1536,6 +1539,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         state.auto_continue = true;
                         state.is_playing = true;
                         state.engine_track = Some(cur);
+                        state.up_next.clear();
                     }
                     Err(e) => tracing::error!("Prev failed: {}", e),
                 }
@@ -1582,6 +1586,9 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         state.now_title = track_label(&track);
                         state.now_artist = track.artist.clone().unwrap_or_default();
                         state.engine_track = Some(path);
+                        // A manual play discards any prefetched deck, so its
+                        // "Up next" label dies with it.
+                        state.up_next.clear();
                     }
                     Err(e) => {
                         tracing::error!("Failed to play: {}", e);
