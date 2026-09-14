@@ -1,12 +1,14 @@
 //! Icecast/Shoutcast streaming output (ROADMAP §1.5).
 //!
 //! The cpal mix bus (post-volume, exactly what the program feed plays)
-//! is tapped into a [`StreamManager`], which encodes it to MP3 (LAME,
-//! constant bitrate) and pushes it to an Icecast server as a source
+//! is tapped into a [`StreamManager`], which encodes it to MP3 (LAME)
+//! or Opus (in Ogg, constant bitrate) and pushes it to an Icecast server as a source
 //! client — `PUT` protocol with legacy `SOURCE` fallback, paced at
 //! real time as the Icecast spec requires.
 
 mod encoder;
+mod encoder_mp3;
+mod encoder_opus;
 mod manager;
 mod source;
 
@@ -16,12 +18,13 @@ pub use source::IcecastSource;
 
 use serde::{Deserialize, Serialize};
 
-/// Encoder/container for the stream (MP3 via LAME for now).
+/// Encoder/container for the stream (MP3 via LAME, Opus in Ogg).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamFormat {
     #[default]
     Mp3,
+    Opus,
 }
 
 impl StreamFormat {
@@ -29,6 +32,15 @@ impl StreamFormat {
     pub fn content_type(self) -> &'static str {
         match self {
             StreamFormat::Mp3 => "audio/mpeg",
+            StreamFormat::Opus => "audio/ogg; codecs=opus",
+        }
+    }
+
+    /// Short UI label.
+    pub fn label(self) -> &'static str {
+        match self {
+            StreamFormat::Mp3 => "MP3",
+            StreamFormat::Opus => "Opus",
         }
     }
 }
@@ -201,5 +213,16 @@ mod tests {
     #[test]
     fn content_type_for_mp3() {
         assert_eq!(StreamFormat::Mp3.content_type(), "audio/mpeg");
+    }
+
+    #[test]
+    fn opus_format_labels_serializes_and_streams() {
+        assert_eq!(StreamFormat::Opus.content_type(), "audio/ogg; codecs=opus");
+        assert_eq!(StreamFormat::Opus.label(), "Opus");
+        let json = serde_json::to_string(&StreamFormat::Opus).unwrap();
+        assert_eq!(json, "\"opus\"");
+        // Old settings.json files have no `format` key: still MP3.
+        let cfg: StreamConfig = serde_json::from_str(r#"{"bitrate_kbps":128}"#).unwrap();
+        assert_eq!(cfg.format, StreamFormat::Mp3);
     }
 }

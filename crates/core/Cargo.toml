@@ -27,6 +27,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Streaming (Icecast source client, ROADMAP §1.5)
 mp3lame-encoder = { workspace = true }
+opus = "0.4"
+ogg = "0.9"
 base64 = { workspace = true }
 # TLS for Icecast servers behind HTTPS (port 443): OS-native stack
 # (SChannel on Windows), so no OpenSSL setup is needed there.

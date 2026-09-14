@@ -75,6 +75,9 @@ crabboss/
   # Fedora
   sudo dnf install alsa-lib-devel
   ```
+- CMake + a C toolchain (Windows: VS Build Tools; `winget install Kitware.CMake`):
+  needed to compile the bundled Opus encoder for the Opus stream output.
+  MP3-only builds don't need it, but the workspace always builds both.
 
 ### Build & Run
 

@@ -2,8 +2,8 @@
 //!
 //! The cpal callback pushes the post-DSP program mix into a lock-free
 //! ring buffer ([`rtrb`]) — never blocks, never allocates on the audio
-//! thread. A background thread drains it, encodes to MP3, and sends to
-//! the Icecast server paced in real time (the source must behave like a
+//! thread. A background thread drains it, encodes (MP3 or Opus, per the
+//! stream config), and sends to the Icecast server paced in real time (the source must behave like a
 //! live feed). Drops and server restarts trigger bounded reconnects.
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use rtrb::RingBuffer;
 
-use crate::stream::encoder::Mp3Encoder;
+use crate::stream::encoder::build_encoder;
 use crate::stream::source::IcecastSource;
 use crate::stream::{StreamConfig, StreamState, StreamStats};
 
@@ -20,7 +20,8 @@ use crate::stream::{StreamConfig, StreamState, StreamStats};
 /// Large enough to ride out a reconnect, small enough to stay bounded.
 const RING_SAMPLES: usize = 1 << 21;
 
-/// Encode granularity: one MPEG Layer III frame of audio per batch.
+/// Encode granularity in frames per batch (one MP3 frame's worth; the
+/// Opus path buffers internally to its own 20 ms frames).
 const DRAIN_FRAMES: usize = 1152;
 
 /// Idle sleep when the ring is starved (callback hasn't produced yet).
@@ -271,7 +272,7 @@ fn sender_loop(
         };
 
         // --- Encoder ---
-        let mut encoder = match Mp3Encoder::new(&cfg, device_rate) {
+        let mut encoder = match build_encoder(&cfg, device_rate) {
             Ok(e) => e,
             Err(e) => {
                 fail(&state, &last_error, &e.to_string());
@@ -325,7 +326,7 @@ fn sender_loop(
                 }
             }
 
-            let mp3 = match encoder.encode(&scratch) {
+            let bytes = match encoder.encode(&scratch) {
                 Ok(b) => b,
                 Err(e) => {
                     fail(&state, &last_error, &e.to_string());
@@ -334,13 +335,13 @@ fn sender_loop(
                 }
             };
 
-            if let Err(e) = source.send(mp3) {
+            if let Err(e) = source.send(bytes) {
                 // Connection dropped mid-stream: fall through to reconnect.
                 tracing::warn!("Stream send failed: {e}");
                 *last_error.lock().unwrap() = e.to_string();
                 state.store(STATE_ERROR, Ordering::Relaxed);
-                // Best effort: keep the MP3 bitstream legal across the
-                // reconnect by flushing any encoder tail.
+                // Best effort: keep the container bitstream legal across
+                // the reconnect by flushing any encoder tail.
                 if let Ok(tail) = encoder.flush() {
                     let _ = source.send(tail);
                 }
@@ -348,7 +349,7 @@ fn sender_loop(
             }
             stats
                 .bytes_sent
-                .fetch_add(mp3.len() as u64, Ordering::Relaxed);
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
             stats
                 .stream_secs
                 .store(started.elapsed().as_secs(), Ordering::Relaxed);

@@ -14,10 +14,12 @@ use crabcore::audio::{
 };
 use crabcore::library::{Library, Track, TrackKind};
 use crabcore::playlist::PlaylistManager;
+use crabcore::stream::StreamFormat;
 
 use crate::widgets::{
-    action_name, duck_ms_step, engine_choice, report_range_bounds, stream_bitrate_step,
-    strip_audio_extension, track_label, LoudnessDone, ATTACK_LADDER, RELEASE_LADDER,
+    action_name, duck_ms_step, engine_choice, opus_bitrate_step, opus_snap_bitrate,
+    report_range_bounds, stream_bitrate_step, strip_audio_extension, track_label, LoudnessDone,
+    ATTACK_LADDER, RELEASE_LADDER,
 };
 
 // ---------------------------------------------------------------------------
@@ -192,6 +194,7 @@ pub(crate) enum Message {
     StreamPassword(String),
     StreamBitrateInc,
     StreamBitrateDec,
+    StreamFormatChanged(StreamFormat),
     MicToggle,
     MicRefreshDevices,
     MicSelectDevice(String),
@@ -1883,16 +1886,33 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::StreamBitrateInc => {
-            state.settings.stream.bitrate_kbps =
-                stream_bitrate_step(state.settings.stream.bitrate_kbps, true);
+            state.settings.stream.bitrate_kbps = match state.settings.stream.format {
+                StreamFormat::Opus => opus_bitrate_step(state.settings.stream.bitrate_kbps, true),
+                StreamFormat::Mp3 => stream_bitrate_step(state.settings.stream.bitrate_kbps, true),
+            };
             state.save_settings();
             state
                 .player
                 .set_stream_config(state.settings.stream.clone());
         }
         Message::StreamBitrateDec => {
-            state.settings.stream.bitrate_kbps =
-                stream_bitrate_step(state.settings.stream.bitrate_kbps, false);
+            state.settings.stream.bitrate_kbps = match state.settings.stream.format {
+                StreamFormat::Opus => opus_bitrate_step(state.settings.stream.bitrate_kbps, false),
+                StreamFormat::Mp3 => stream_bitrate_step(state.settings.stream.bitrate_kbps, false),
+            };
+            state.save_settings();
+            state
+                .player
+                .set_stream_config(state.settings.stream.clone());
+        }
+        Message::StreamFormatChanged(format) => {
+            // Takes effect on the next start (a new encoder + headers wrap
+            // the fresh connection); restart the stream to apply it live.
+            state.settings.stream.format = format;
+            if format == StreamFormat::Opus {
+                state.settings.stream.bitrate_kbps =
+                    opus_snap_bitrate(state.settings.stream.bitrate_kbps);
+            }
             state.save_settings();
             state
                 .player

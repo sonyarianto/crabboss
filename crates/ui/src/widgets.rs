@@ -122,6 +122,32 @@ pub(crate) fn stream_bitrate_step(current: u32, up: bool) -> u32 {
     }
 }
 
+/// Opus CBR ladder in kbps: speech-usable at the bottom, transparent
+/// stereo music at the top. Narrower than the MP3 ladder on purpose —
+/// Opus needs far fewer bits for the same quality.
+pub(crate) const OPUS_LADDER: [u32; 8] = [24, 32, 48, 64, 80, 96, 128, 160];
+
+pub(crate) fn opus_bitrate_step(current: u32, up: bool) -> u32 {
+    let idx = OPUS_LADDER
+        .iter()
+        .position(|&b| b >= current)
+        .unwrap_or(OPUS_LADDER.len() - 1);
+    match up {
+        true => OPUS_LADDER[(idx + 1).min(OPUS_LADDER.len() - 1)],
+        false => OPUS_LADDER[idx.saturating_sub(1)],
+    }
+}
+
+/// Snap an arbitrary kbps (e.g. carried over from the MP3 ladder when
+/// switching formats) to the nearest Opus rung.
+pub(crate) fn opus_snap_bitrate(kbps: u32) -> u32 {
+    OPUS_LADDER
+        .iter()
+        .min_by_key(|&&b| b.abs_diff(kbps))
+        .copied()
+        .unwrap_or(96)
+}
+
 pub(crate) fn duck_ms_step(ladder: &[f32], current: f32, up: bool) -> f32 {
     let idx = ladder
         .iter()
@@ -284,6 +310,24 @@ mod tests {
         assert_eq!(stream_bitrate_step(320, true), 320);
         assert_eq!(stream_bitrate_step(8, false), 8);
         assert_eq!(stream_bitrate_step(999, true), 320);
+    }
+
+    #[test]
+    fn opus_bitrate_step_walks_narrower_ladder() {
+        assert_eq!(opus_bitrate_step(96, true), 128);
+        assert_eq!(opus_bitrate_step(96, false), 80);
+        assert_eq!(opus_bitrate_step(160, true), 160);
+        assert_eq!(opus_bitrate_step(24, false), 24);
+        assert_eq!(opus_bitrate_step(320, true), 160);
+        assert_eq!(opus_bitrate_step(8, false), 24);
+    }
+
+    #[test]
+    fn opus_snap_bitrate_picks_nearest_rung() {
+        assert_eq!(opus_snap_bitrate(128), 128);
+        assert_eq!(opus_snap_bitrate(320), 160);
+        assert_eq!(opus_snap_bitrate(100), 96);
+        assert_eq!(opus_snap_bitrate(0), 24);
     }
 
     #[test]

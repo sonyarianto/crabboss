@@ -6,6 +6,7 @@ use iced::{
 };
 
 use crabcore::audio::EQ_BAND_COUNT;
+use crabcore::stream::StreamFormat;
 
 use crate::app::{App, Message, SettingsSection};
 use crate::widgets::{eq_band_label, lin_to_dbfs, mic_state_is_live, mic_state_label, stepper};
@@ -42,6 +43,17 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
         let name = d.clone();
         let entry = button(text(d).size(12)).on_press(Message::MicSelectDevice(name));
         inputs = inputs.push(if *d == cur_mic {
+            entry.style(iced::widget::button::primary)
+        } else {
+            entry
+        });
+    }
+
+    let mut format_row = row![text("Format:").size(12)].spacing(6);
+    for format in [StreamFormat::Mp3, StreamFormat::Opus] {
+        let entry =
+            button(text(format.label()).size(12)).on_press(Message::StreamFormatChanged(format));
+        format_row = format_row.push(if stream_cfg.format == format {
             entry.style(iced::widget::button::primary)
         } else {
             entry
@@ -215,6 +227,8 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                 Message::StreamBitrateDec,
                 Message::StreamBitrateInc
             ),
+            format_row,
+            text("Opus sounds better per bit; mounts often end in .opus. Format applies on stream restart.").size(11),
         ]
         .spacing(8)
         .into(),
