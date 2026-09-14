@@ -73,6 +73,25 @@ fn join_title_artist(title: &str, artist: &str) -> String {
     }
 }
 
+/// On-air line with a source tag only when certain: the artist slot holds
+/// either a real artist (manual play — no tag, nothing claimed) or one of
+/// our own automation sentinels, which moves to a `· via X` suffix instead
+/// of masquerading as the artist.
+fn on_air_label(title: &str, artist: &str) -> String {
+    const SOURCES: [&str; 5] = [
+        "Auto-DJ",
+        "Cart",
+        "Scheduler",
+        "Ad break",
+        "Silence detector",
+    ];
+    if SOURCES.contains(&artist) && !title.is_empty() {
+        format!("ON AIR: {title} · via {artist}")
+    } else {
+        format!("ON AIR: {}", join_title_artist(title, artist))
+    }
+}
+
 /// `--engine cpal` (only backend; `--engine rodio` warns and uses cpal).
 fn engine_choice() -> String {
     let mut args = std::env::args().skip(1);
@@ -2385,10 +2404,7 @@ fn view(state: &App) -> Element<'_, Message> {
 /// grow stream/mic indicators later. v1 carries only the on-air status.
 fn view_footer(state: &App) -> Element<'_, Message> {
     let status = if state.is_playing {
-        format!(
-            "ON AIR: {}",
-            join_title_artist(&state.now_title, &state.now_artist)
-        )
+        on_air_label(&state.now_title, &state.now_artist)
     } else {
         "OFF AIR".to_string()
     };
@@ -2447,10 +2463,7 @@ fn view_sidebar(state: &App) -> Element<'_, Message> {
 
 fn view_home(state: &App) -> Element<'_, Message> {
     let status = if state.is_playing {
-        format!(
-            "ON AIR: {}",
-            join_title_artist(&state.now_title, &state.now_artist)
-        )
+        on_air_label(&state.now_title, &state.now_artist)
     } else {
         "Off air".to_string()
     };
