@@ -2336,7 +2336,7 @@ fn view_footer(state: &App) -> Element<'_, Message> {
         row![
             text(status).size(12),
             iced::widget::space::horizontal(),
-            text(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11),
+            text(format!("Version {}", env!("CARGO_PKG_VERSION"))).size(11),
         ]
         .align_y(iced::Alignment::Center),
     )
