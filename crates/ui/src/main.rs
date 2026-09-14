@@ -2714,20 +2714,6 @@ fn view_library_panel(state: &App, tools: bool) -> Element<'_, Message> {
     column![
         header,
         search,
-        text(if state.now_title == "No track loaded" {
-            String::new()
-        } else {
-            format!(
-                "{}: {}",
-                if state.is_playing {
-                    "Playing"
-                } else {
-                    "Paused"
-                },
-                join_title_artist(&state.now_title, &state.now_artist)
-            )
-        })
-        .size(11),
         text(&state.lib_status).size(11),
         scrollable(list).height(Length::Fill),
     ]
