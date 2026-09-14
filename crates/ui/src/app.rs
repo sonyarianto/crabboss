@@ -192,6 +192,7 @@ pub(crate) enum Message {
     StreamPort(String),
     StreamMount(String),
     StreamPassword(String),
+    StreamPasswordClear,
     StreamBitrateInc,
     StreamBitrateDec,
     StreamFormatChanged(StreamFormat),
@@ -1917,15 +1918,24 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
                 .set_stream_config(state.settings.stream.clone());
         }
         Message::StreamPassword(v) => {
-            // Empty edits are ignored so the saved password cannot be
-            // wiped by clearing the field; there is no length cap.
-            if !v.is_empty() {
-                state.settings.stream.password = v;
-                state.save_settings();
-                state
-                    .player
-                    .set_stream_config(state.settings.stream.clone());
+            // An emptied field clears the password for real: there is no
+            // implicit "keep the old secret" — wiping is explicit by
+            // deleting the text or pressing Clear.
+            state.settings.stream.password = v;
+            state.save_settings();
+            state
+                .player
+                .set_stream_config(state.settings.stream.clone());
+        }
+        Message::StreamPasswordClear => {
+            if !state.settings.stream.password.is_empty() {
+                tracing::info!("Stream password cleared by operator");
             }
+            state.settings.stream.password.clear();
+            state.save_settings();
+            state
+                .player
+                .set_stream_config(state.settings.stream.clone());
         }
         Message::StreamBitrateInc => {
             state.settings.stream.bitrate_kbps = match state.settings.stream.format {

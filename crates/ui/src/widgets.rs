@@ -238,6 +238,16 @@ pub(crate) fn mic_state_label(st: &MicState) -> String {
     format!("{:?}", st)
 }
 
+/// Password saved-state line: tells whether a secret is stored without
+/// ever showing its value.
+pub(crate) fn stream_password_status(saved: bool) -> &'static str {
+    if saved {
+        "Password: saved"
+    } else {
+        "Password: not set (stream auth will fail)"
+    }
+}
+
 pub(crate) fn mic_state_is_live(st: &MicState) -> bool {
     matches!(st, MicState::Live)
 }
@@ -366,6 +376,13 @@ mod tests {
     fn short_name_takes_file_name() {
         assert_eq!(short_name("/a/b/song.mp3"), "song.mp3");
         assert_eq!(short_name(""), "");
+    }
+
+    #[test]
+    fn stream_password_status_never_shows_value() {
+        assert_eq!(stream_password_status(true), "Password: saved");
+        let empty = stream_password_status(false);
+        assert!(empty.contains("not set"), "{empty}");
     }
 
     #[test]

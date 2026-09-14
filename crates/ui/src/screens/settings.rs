@@ -9,7 +9,9 @@ use crabcore::audio::EQ_BAND_COUNT;
 use crabcore::stream::StreamFormat;
 
 use crate::app::{App, Message, SettingsSection};
-use crate::widgets::{eq_band_label, lin_to_dbfs, mic_state_is_live, mic_state_label, stepper};
+use crate::widgets::{
+    eq_band_label, lin_to_dbfs, mic_state_is_live, mic_state_label, stepper, stream_password_status,
+};
 
 pub(crate) fn view(state: &App) -> Element<'_, Message> {
     let s = &state.settings;
@@ -231,7 +233,14 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                 .padding(6),
             text_input("Password", &stream_cfg.password)
                 .on_input(Message::StreamPassword)
+                .secure(true)
                 .padding(6),
+            row![
+                button(text("Clear password").size(12))
+                    .on_press(Message::StreamPasswordClear),
+                text(stream_password_status(!stream_cfg.password.is_empty())).size(11),
+            ]
+            .spacing(8),
             stepper(
                 format!("Bitrate: {} kbps", stream_cfg.bitrate_kbps),
                 Message::StreamBitrateDec,

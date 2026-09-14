@@ -46,7 +46,12 @@ impl StreamFormat {
 }
 
 /// Stream server + mount configuration (persisted in settings.json).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written to redact `password`: never let the secret
+/// near logs, panic messages, or test output. Serialization still
+/// carries the real value (Stage A keeps a local plaintext settings
+/// file by design — see the `password` field docs).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StreamConfig {
     /// Master switch: manager runs when true.
@@ -57,6 +62,11 @@ pub struct StreamConfig {
     pub mount: String,
     /// Source username (Icecast default: `source`).
     pub username: String,
+    /// Source password, stored **plaintext** in the local settings.json
+    /// for now (Stage A hardening). Anyone who can read the settings
+    /// file, a backup of it, or a `Debug` dump from before this impl
+    /// can impersonate this source. A platform credential store
+    /// (Stage B) will replace this with a reference.
     pub password: String,
     /// Wrap the connection in TLS (for servers behind HTTPS, e.g. port 443).
     /// Uses the OS-native TLS stack with SNI set to `host`.
@@ -70,6 +80,26 @@ pub struct StreamConfig {
     /// Constant bitrate in kbps (encoder picks the nearest supported).
     pub bitrate_kbps: u32,
     pub format: StreamFormat,
+}
+
+impl std::fmt::Debug for StreamConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamConfig")
+            .field("enabled", &self.enabled)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("mount", &self.mount)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("tls", &self.tls)
+            .field("name", &self.name)
+            .field("genre", &self.genre)
+            .field("description", &self.description)
+            .field("public", &self.public)
+            .field("bitrate_kbps", &self.bitrate_kbps)
+            .field("format", &self.format)
+            .finish()
+    }
 }
 
 impl Default for StreamConfig {
@@ -224,5 +254,22 @@ mod tests {
         // Old settings.json files have no `format` key: still MP3.
         let cfg: StreamConfig = serde_json::from_str(r#"{"bitrate_kbps":128}"#).unwrap();
         assert_eq!(cfg.format, StreamFormat::Mp3);
+    }
+
+    #[test]
+    fn debug_redacts_password_but_keeps_other_fields() {
+        let cfg = StreamConfig {
+            password: "hunter2".into(),
+            host: "cast.example.com".into(),
+            ..Default::default()
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("hunter2"), "secret leaked: {dbg}");
+        assert!(dbg.contains("<redacted>"));
+        assert!(dbg.contains("cast.example.com"));
+        // Serialization still carries the real value: Stage A keeps a
+        // local plaintext settings file by explicit design.
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("hunter2"));
     }
 }

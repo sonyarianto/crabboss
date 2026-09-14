@@ -95,6 +95,13 @@ cargo run -p crabui
 > Prefs live in `settings.json` (auto-created on first change — never commit
 > yours, it holds machine devices and secrets). `settings.example.json`
 > documents every tunable with defaults.
+>
+> > **Security note (Stage A):** the Icecast source password is stored
+> > **plaintext** in the local `settings.json` (and in backups of it).
+> > Anyone who can read that file can impersonate your stream source.
+> > A platform credential store (Stage B) will replace this with a
+> > reference; until then, protect the file with OS permissions and do
+> > not share it.
 
 ## Supported Audio Formats
 
