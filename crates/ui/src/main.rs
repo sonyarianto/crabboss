@@ -2766,7 +2766,9 @@ fn view_playout(state: &App) -> Element<'_, Message> {
             let artist = t.artist.clone().unwrap_or_default();
             col = col.push(text(join_title_artist(&track_label(t), &artist)).size(12));
         }
-        col.into()
+        // Left padding matching the library header below (outer 8 + here 8),
+        // so the section doesn't sit left of its neighbors.
+        col.padding(iced::padding::left(8)).into()
     };
     column![
         text("Playout").size(16),
