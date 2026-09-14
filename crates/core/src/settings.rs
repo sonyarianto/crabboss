@@ -196,7 +196,12 @@ pub fn quarantine_existing(path: &Path) -> std::io::Result<Option<PathBuf>> {
     Ok(Some(backup))
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Write `bytes` to `path` atomically via a temporary sibling file
+/// (`sync_all`, then a platform-correct replace). Shared primitive for
+/// everything that persists station data (settings, backups): on any
+/// failure the previous target is left untouched and the temp file is
+/// removed.
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())

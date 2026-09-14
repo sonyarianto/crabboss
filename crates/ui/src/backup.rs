@@ -4,7 +4,15 @@
 //! The core store types have no serde impls on purpose (SQLite is the
 //! source of truth), so this module maps them to plain DTOs and applies
 //! restores through the existing manager APIs (`create`/`delete`/…).
-//! Validation rules therefore stay in exactly one place: the managers.
+//!
+//! Policy is **best-effort with validation first** (P0.3a): every row is
+//! validated before anything is mutated, invalid rows are skipped with a
+//! reason in the status line, and valid rows are applied. One bad row
+//! never vetoes the whole restore. What this does NOT yet do is
+//! transactional all-or-nothing across the three lists (P0.3b): each
+//! list is still replaced wholesale, so an I/O failure mid-apply (after
+//! validation passed) can leave that list partial. That needs the shared
+//! transaction boundary from centralized SQLite bootstrap (P1.2).
 //!
 //! Restore applies settings live like `boot` does, except the audio
 //! output device: switching outputs means reopening the engine, which is
@@ -63,7 +71,9 @@ pub(crate) struct AdBackup {
 pub(crate) fn write_backup(path: &Path, backup: &Backup) -> std::io::Result<()> {
     let text = serde_json::to_string_pretty(backup)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, text)
+    // Atomic like settings: a failed backup never truncates the previous
+    // backup file.
+    crabcore::settings::atomic_write(path, text.as_bytes())
 }
 
 pub(crate) fn read_backup(path: &Path) -> Result<Backup, String> {
@@ -78,6 +88,101 @@ pub(crate) fn read_backup(path: &Path) -> Result<Backup, String> {
         ));
     }
     Ok(backup)
+}
+
+/// One backup row that will not survive the manager on apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ValidationIssue {
+    pub(crate) section: &'static str,
+    pub(crate) index: usize,
+    pub(crate) name: String,
+    pub(crate) reason: String,
+}
+
+fn issue(
+    section: &'static str,
+    index: usize,
+    name: &str,
+    reason: impl Into<String>,
+) -> ValidationIssue {
+    ValidationIssue {
+        section,
+        index,
+        name: name.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn parse_backup_date(s: &str) -> Result<chrono::NaiveDate, String> {
+    chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
+        .map_err(|_| format!("bad date '{s}', want YYYY-MM-DD"))
+}
+
+/// Validate every row against the same rules the managers enforce, so a
+/// restore plan is known before anything is mutated. (Manager I/O errors
+/// can still occur at apply time; those are reported per row as well.)
+pub(crate) fn validate_backup(b: &Backup) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+    for (i, e) in b.scheduler.iter().enumerate() {
+        if e.name.trim().is_empty() {
+            issues.push(issue("scheduler", i, &e.name, "name is empty"));
+        }
+        if !crabcore::scheduler::validate_hhmm(&e.start_time) {
+            issues.push(issue(
+                "scheduler",
+                i,
+                &e.name,
+                format!("bad time '{}', want HH:MM", e.start_time),
+            ));
+        }
+        if let Err(err) = crabcore::scheduler::parse_expires(e.expires_on.as_deref()) {
+            issues.push(issue("scheduler", i, &e.name, err.to_string()));
+        }
+    }
+    for (i, c) in b.carts.iter().enumerate() {
+        if !(0..WALL_SIZE as i32).contains(&c.position) {
+            issues.push(issue(
+                "carts",
+                i,
+                &c.label,
+                format!("bad position {}", c.position),
+            ));
+        }
+    }
+    for (i, a) in b.ads.iter().enumerate() {
+        if a.name.trim().is_empty() {
+            issues.push(issue("ads", i, &a.name, "name is empty"));
+        }
+        if a.spot_path.trim().is_empty() {
+            issues.push(issue("ads", i, &a.name, "spot audio is required"));
+        }
+        if !crabcore::scheduler::validate_hhmm(&a.play_time) {
+            issues.push(issue(
+                "ads",
+                i,
+                &a.name,
+                format!("bad time '{}', want HH:MM", a.play_time),
+            ));
+        }
+        match (
+            parse_backup_date(&a.start_date),
+            parse_backup_date(&a.end_date),
+        ) {
+            (Ok(start), Ok(end)) if end < start => {
+                issues.push(issue("ads", i, &a.name, "end date is before start date"));
+            }
+            (Err(e), _) => issues.push(issue("ads", i, &a.name, format!("bad start date: {e}"))),
+            (_, Err(e)) => issues.push(issue("ads", i, &a.name, format!("bad end date: {e}"))),
+            _ => {}
+        }
+    }
+    issues
+}
+
+fn is_flagged(issues: &[ValidationIssue], section: &'static str, index: usize) -> bool {
+    issues
+        .iter()
+        .any(|iss| iss.section == section && iss.index == index)
 }
 
 impl App {
@@ -125,10 +230,23 @@ impl App {
         }
     }
 
-    /// Replace settings + all three lists from a backup. Invalid rows are
-    /// skipped with a warning (manager validation decides). Returns the
+    /// Replace settings + all three lists from a backup. Every row is
+    /// validated before anything is mutated; invalid rows are skipped
+    /// with a reason (best-effort policy, P0.3a). Manager I/O failures at
+    /// apply time are reported per row the same way. Returns the
     /// user-facing status line.
     pub(crate) fn apply_backup(&mut self, backup: Backup) -> Result<String, String> {
+        // -- Validate everything before touching live state ------------------
+        let issues = validate_backup(&backup);
+        for iss in &issues {
+            tracing::warn!(
+                "Restore will skip {} #{} '{}': {}",
+                iss.section,
+                iss.index,
+                iss.name,
+                iss.reason
+            );
+        }
         // -- Settings (live-apply mirrors boot) -------------------------------
         let device_changed = self.settings.output_device != backup.settings.output_device;
         let target_changed =
@@ -180,7 +298,11 @@ impl App {
             }
         }
         let (mut ok_s, mut skip_s) = (0usize, 0usize);
-        for e in &backup.scheduler {
+        for (i, e) in backup.scheduler.iter().enumerate() {
+            if is_flagged(&issues, "scheduler", i) {
+                skip_s += 1;
+                continue;
+            }
             match self.scheduler.create(
                 &e.name,
                 &e.action_type,
@@ -211,9 +333,8 @@ impl App {
             }
         }
         let (mut ok_c, mut skip_c) = (0usize, 0usize);
-        for c in &backup.carts {
-            if !(0..WALL_SIZE as i32).contains(&c.position) {
-                tracing::warn!("Restore skipped cart '{}': bad position", c.label);
+        for (i, c) in backup.carts.iter().enumerate() {
+            if is_flagged(&issues, "carts", i) {
                 skip_c += 1;
                 continue;
             }
@@ -235,7 +356,11 @@ impl App {
             }
         }
         let (mut ok_a, mut skip_a) = (0usize, 0usize);
-        for a in &backup.ads {
+        for (i, a) in backup.ads.iter().enumerate() {
+            if is_flagged(&issues, "ads", i) {
+                skip_a += 1;
+                continue;
+            }
             match self.ads.create(
                 &a.name,
                 &a.spot_path,
@@ -274,11 +399,186 @@ impl App {
         ];
         let skipped = skip_s + skip_c + skip_a;
         if skipped > 0 {
-            parts.push(format!("{skipped} invalid skipped (see log)"));
+            // Status line stays readable: first three reasons inline, the
+            // rest in the log (already warned above, one line per row).
+            let shown: Vec<String> = issues
+                .iter()
+                .take(3)
+                .map(|iss| format!("{} '{}': {}", iss.section, iss.name, iss.reason))
+                .collect();
+            parts.push(format!("{skipped} invalid skipped ({})", shown.join("; ")));
         }
         if device_changed {
             parts.push("restart to switch audio device".to_string());
         }
         Ok(format!("Restored: {}", parts.join(", ")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn good_backup() -> Backup {
+        Backup {
+            version: BACKUP_VERSION,
+            settings: crabcore::settings::AppSettings::default(),
+            scheduler: vec![SchedBackup {
+                name: "Morning".into(),
+                action_type: "play".into(),
+                target: "x.mp3".into(),
+                start_time: "08:00".into(),
+                days: "Daily".into(),
+                expires_on: None,
+                enabled: true,
+            }],
+            carts: vec![CartBackup {
+                label: "Pad".into(),
+                file_path: "C:/a.mp3".into(),
+                position: 0,
+            }],
+            ads: vec![AdBackup {
+                name: "Break".into(),
+                spot_path: "C:/s.mp3".into(),
+                intro_path: None,
+                outro_path: None,
+                start_date: "2026-01-01".into(),
+                end_date: "2026-12-31".into(),
+                play_time: "09:00".into(),
+                days: "Daily".into(),
+                enabled: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn validate_accepts_clean_backup() {
+        assert!(validate_backup(&good_backup()).is_empty());
+    }
+
+    #[test]
+    fn validate_flags_scheduler_rows_with_index() {
+        let mut b = good_backup();
+        b.scheduler.push(SchedBackup {
+            name: "   ".into(),
+            action_type: "play".into(),
+            target: "x.mp3".into(),
+            start_time: "25:99".into(),
+            days: "Daily".into(),
+            expires_on: Some("soon".into()),
+            enabled: true,
+        });
+        let issues = validate_backup(&b);
+        // Row 0 is clean; row 1 collects all three problems.
+        assert!(issues.iter().all(|iss| iss.index == 1));
+        assert_eq!(issues.len(), 3);
+        let reasons: Vec<_> = issues.iter().map(|iss| iss.reason.as_str()).collect();
+        assert!(reasons.iter().any(|r| r.contains("name is empty")));
+        assert!(reasons.iter().any(|r| r.contains("want HH:MM")));
+        assert!(reasons.iter().any(|r| r.contains("want YYYY-MM-DD")));
+        assert!(issues.iter().all(|iss| iss.section == "scheduler"));
+    }
+
+    #[test]
+    fn validate_flags_cart_positions() {
+        let mut b = good_backup();
+        b.carts.clear();
+        for pos in [-1, 0, 7, 8, 99] {
+            b.carts.push(CartBackup {
+                label: format!("pad {pos}"),
+                file_path: "C:/a.mp3".into(),
+                position: pos,
+            });
+        }
+        let bad: Vec<i32> = validate_backup(&b)
+            .iter()
+            .filter(|iss| iss.section == "carts")
+            .map(|iss| b.carts[iss.index].position)
+            .collect();
+        assert_eq!(bad, vec![-1, 8, 99]);
+    }
+
+    #[test]
+    fn validate_flags_ad_rows() {
+        let mut b = good_backup();
+        b.ads.push(AdBackup {
+            name: "".into(),
+            spot_path: "  ".into(),
+            intro_path: None,
+            outro_path: None,
+            start_date: "2026-13-45".into(),
+            end_date: "2026-01-01".into(),
+            play_time: "9am".into(),
+            days: "Daily".into(),
+            enabled: true,
+        });
+        let issues: Vec<_> = validate_backup(&b)
+            .into_iter()
+            .filter(|iss| iss.section == "ads")
+            .collect();
+        assert_eq!(issues.len(), 4);
+        let reasons: Vec<_> = issues.iter().map(|iss| iss.reason.as_str()).collect();
+        assert!(reasons.iter().any(|r| r.contains("name is empty")));
+        assert!(reasons.iter().any(|r| r.contains("spot audio is required")));
+        assert!(reasons.iter().any(|r| r.contains("want HH:MM")));
+        assert!(reasons.iter().any(|r| r.contains("bad start date")));
+        // End-before-start is its own issue, not a parse failure.
+        let mut b = good_backup();
+        b.ads[0].start_date = "2026-12-31".into();
+        b.ads[0].end_date = "2026-01-01".into();
+        let issues = validate_backup(&b);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].reason.contains("end date is before start date"));
+    }
+
+    #[test]
+    fn backup_write_read_roundtrip() {
+        let dir = std::env::temp_dir().join("crabboss-backup-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("backup.json");
+        let original = good_backup();
+        write_backup(&path, &original).unwrap();
+        let back = read_backup(&path).expect("written backup reads back");
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            serde_json::to_string(&original).unwrap()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_rejects_malformed_and_future_version() {
+        let dir = std::env::temp_dir().join("crabboss-backup-bad");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, b"{not json").unwrap();
+        let err = read_backup(&bad).expect_err("malformed rejects");
+        assert!(err.contains("not a CrabBoss backup"), "{err}");
+        let mut future = good_backup();
+        future.version = BACKUP_VERSION + 1;
+        let path = dir.join("future.json");
+        write_backup(&path, &future).unwrap();
+        let err = read_backup(&path).expect_err("future version rejects");
+        assert!(err.contains("unsupported backup version"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_failure_keeps_old_backup_file() {
+        let dir = std::env::temp_dir().join("crabboss-backup-atomic");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("backup.json");
+        std::fs::write(&path, b"{\"version\":1}").unwrap();
+        let bad_target = dir.join("no-such-dir").join("backup.json");
+        assert!(write_backup(&bad_target, &good_backup()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"version\":1}");
+        // No temporary sibling left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.to_string_lossy() != "backup.json")
+            .collect();
+        assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
