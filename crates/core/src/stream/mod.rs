@@ -49,8 +49,8 @@ impl StreamFormat {
 ///
 /// `Debug` is hand-written to redact `password`: never let the secret
 /// near logs, panic messages, or test output. Serialization still
-/// carries the real value (Stage A keeps a local plaintext settings
-/// file by design — see the `password` field docs).
+/// carries the real value (plaintext settings file by explicit owner
+/// decision — no credential-store stage planned).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StreamConfig {
@@ -63,10 +63,10 @@ pub struct StreamConfig {
     /// Source username (Icecast default: `source`).
     pub username: String,
     /// Source password, stored **plaintext** in the local settings.json
-    /// for now (Stage A hardening). Anyone who can read the settings
-    /// file, a backup of it, or a `Debug` dump from before this impl
-    /// can impersonate this source. A platform credential store
-    /// (Stage B) will replace this with a reference.
+    /// by explicit owner decision (2026-09-14: no credential-store
+    /// stage). Anyone who can read the settings file or a backup of it
+    /// can impersonate this source — protect the data dir + backups
+    /// with OS file permissions and do not share them.
     pub password: String,
     /// Wrap the connection in TLS (for servers behind HTTPS, e.g. port 443).
     /// Uses the OS-native TLS stack with SNI set to `host`.

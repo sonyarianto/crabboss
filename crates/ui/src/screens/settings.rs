@@ -234,7 +234,6 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                 .padding(6),
             text_input("Password", &stream_cfg.password)
                 .on_input(Message::StreamPassword)
-                .secure(true)
                 .padding(6),
             row![
                 button(text("Clear password").size(12))
