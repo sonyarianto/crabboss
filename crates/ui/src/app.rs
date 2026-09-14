@@ -400,12 +400,20 @@ impl App {
     }
 
     fn refresh_library(&mut self) {
-        let mut tracks = if self.lib_search.trim().is_empty() {
-            self.library.get_all_tracks().unwrap_or_default()
+        // Live-state screen: on a read failure keep the last-known list
+        // and say so, instead of showing an empty library as if valid.
+        let mut tracks = match if self.lib_search.trim().is_empty() {
+            self.library.get_all_tracks()
         } else {
-            self.library
-                .search(self.lib_search.trim())
-                .unwrap_or_default()
+            self.library.search(self.lib_search.trim())
+        } {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = format!("Library read failed: {e}");
+                tracing::warn!("{msg}");
+                self.lib_status = msg;
+                return;
+            }
         };
         if let Some(kind) = self.lib_kind {
             tracks.retain(|t| t.kind == kind);
@@ -413,7 +421,16 @@ impl App {
         if self.lib_missing_only {
             tracks.retain(|t| !PathBuf::from(&t.file_path).is_file());
         }
-        self.lib_total = self.library.get_all_tracks().unwrap_or_default().len();
+        match self.library.get_all_tracks() {
+            Ok(all) => {
+                self.lib_total = all.len();
+            }
+            Err(e) => {
+                let msg = format!("Library count failed: {e}");
+                tracing::warn!("{msg}");
+                self.lib_status = msg;
+            }
+        }
         self.lib_tracks = tracks;
         self.track_count = self.lib_total;
         if let Some(sel) = self.lib_selected {
@@ -424,17 +441,36 @@ impl App {
     }
 
     pub(crate) fn refresh_scheduler(&mut self) {
-        self.sched_events = self.scheduler.list_all().unwrap_or_default();
+        match self.scheduler.list_all() {
+            Ok(events) => self.sched_events = events,
+            Err(e) => {
+                let msg = format!("Scheduler read failed: {e}");
+                tracing::warn!("{msg}");
+                self.sched_warnings = vec![msg];
+                return;
+            }
+        }
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        self.sched_warnings = self
-            .scheduler
-            .expiry_warnings(&today, 3)
-            .unwrap_or_default();
+        match self.scheduler.expiry_warnings(&today, 3) {
+            Ok(warnings) => self.sched_warnings = warnings,
+            Err(e) => {
+                let msg = format!("Scheduler warnings failed: {e}");
+                tracing::warn!("{msg}");
+                self.sched_warnings = vec![msg];
+            }
+        }
         self.upcoming_count = self.sched_events.iter().filter(|e| e.enabled).count();
     }
 
     pub(crate) fn refresh_carts(&mut self) {
-        self.cart_list = self.carts.list_all().unwrap_or_default();
+        match self.carts.list_all() {
+            Ok(list) => self.cart_list = list,
+            Err(e) => {
+                let msg = format!("Carts read failed: {e}");
+                tracing::warn!("{msg}");
+                self.cart_status = msg;
+            }
+        }
     }
 
     fn play_cart(&mut self, i: usize) {
@@ -472,19 +508,41 @@ impl App {
     }
 
     pub(crate) fn refresh_ads(&mut self) {
-        self.ad_blocks = self.ads.list_all().unwrap_or_default();
+        match self.ads.list_all() {
+            Ok(blocks) => self.ad_blocks = blocks,
+            Err(e) => {
+                let msg = format!("Ads read failed: {e}");
+                tracing::warn!("{msg}");
+                self.ads_error = msg;
+            }
+        }
     }
 
     fn refresh_report(&mut self) {
+        // Generated snapshot (not live state): on a read failure the
+        // screen clears and says so, instead of showing a stale or
+        // half-built report as if valid.
+        let fail = |me: &mut Self, e: &crabcore::CrabError| {
+            let msg = format!("Report read failed: {e}");
+            tracing::warn!("{msg}");
+            me.report_summary = msg;
+            me.report_entries.clear();
+            me.recent_plays.clear();
+        };
         let (from, label) = report_range_bounds(self.report_range);
         let to = chrono::Utc::now();
-        let entries = crabcore::report::play_report(
+        let entries = match crabcore::report::play_report(
             &self.library,
             from,
             to,
             &[TrackKind::Jingle, TrackKind::Ad],
-        )
-        .unwrap_or_default();
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                fail(self, &e);
+                return;
+            }
+        };
         let airtime: f64 = entries.iter().filter_map(|e| e.duration_secs).sum();
         self.report_summary = format!(
             "{}: {} plays - {:.0} min music airtime (jingles/ads excluded{})",
@@ -501,11 +559,13 @@ impl App {
         // Recently played: same log, last 24h, all kinds (jingles/ads get
         // their kind tag in the view instead of being hidden).
         let day_ago = to - chrono::Duration::hours(24);
-        self.recent_plays = crabcore::report::play_report(&self.library, day_ago, to, &[])
-            .unwrap_or_default()
-            .into_iter()
-            .take(15)
-            .collect();
+        self.recent_plays = match crabcore::report::play_report(&self.library, day_ago, to, &[]) {
+            Ok(r) => r.into_iter().take(15).collect(),
+            Err(e) => {
+                fail(self, &e);
+                return;
+            }
+        };
     }
 
     pub(crate) fn refresh_counts(&mut self) {

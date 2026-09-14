@@ -43,6 +43,14 @@ pub enum CrabError {
 
     #[error("Station lists replace failed: {0}")]
     BulkReplace(String),
+
+    #[error("Data integrity error in {table} (id {id}): invalid {field} {value:?}")]
+    Integrity {
+        table: &'static str,
+        id: String,
+        field: &'static str,
+        value: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CrabError>;

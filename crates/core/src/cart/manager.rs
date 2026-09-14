@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use uuid::Uuid;
 
-use crate::error::Result;
+use crate::error::{CrabError, Result};
 
 /// Cart wall size (RadioBOSS-style fixed pad grid).
 pub const WALL_SIZE: usize = 8;
@@ -91,22 +91,27 @@ impl CartManager {
             "SELECT id, label, file_path, position, created_at
              FROM carts ORDER BY position",
         )?;
-        let carts = stmt
-            .query_map([], |row| {
-                Ok(Cart {
-                    id: row.get(0)?,
-                    label: row.get(1)?,
-                    file_path: row.get(2)?,
-                    position: row.get(3)?,
-                    created_at: row
-                        .get::<_, String>(4)
-                        .ok()
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now),
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rows = stmt.query([])?;
+        let mut carts = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let created_raw: String = row.get(4)?;
+            let created_at = DateTime::parse_from_rfc3339(&created_raw)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|_| CrabError::Integrity {
+                    table: "carts",
+                    id: id.clone(),
+                    field: "created_at",
+                    value: created_raw,
+                })?;
+            carts.push(Cart {
+                id,
+                label: row.get(1)?,
+                file_path: row.get(2)?,
+                position: row.get(3)?,
+                created_at,
+            });
+        }
         Ok(carts)
     }
 
@@ -195,5 +200,33 @@ mod tests {
             ("Slot5b", "/tmp/s5b.mp3")
         );
         assert!(!all.iter().any(|c| c.position == 7));
+    }
+
+    #[test]
+    fn malformed_created_at_is_integrity_error() {
+        let m = CartManager::new(Connection::open_in_memory().unwrap()).unwrap();
+        m.conn
+            .borrow()
+            .execute(
+                "INSERT INTO carts (id, label, file_path, position, created_at)
+                 VALUES ('b1','Bad','/tmp/b.mp3',0,'not-a-time')",
+                [],
+            )
+            .unwrap();
+        let err = m.list_all().expect_err("bad timestamp must fail");
+        match err {
+            crate::error::CrabError::Integrity {
+                table,
+                id,
+                field,
+                value,
+            } => {
+                assert_eq!(table, "carts");
+                assert_eq!(id, "b1");
+                assert_eq!(field, "created_at");
+                assert_eq!(value, "not-a-time");
+            }
+            other => panic!("expected Integrity error, got {other:?}"),
+        }
     }
 }

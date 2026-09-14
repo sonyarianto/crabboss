@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use rusqlite::params;
 
-use crate::error::Result;
+use crate::error::{CrabError, Result};
 use crate::library::{Library, TrackKind};
 
 /// One played item in a report (newest first).
@@ -33,26 +33,34 @@ pub fn play_report(
          WHERE p.played_at >= ?1 AND p.played_at <= ?2
          ORDER BY p.played_at DESC",
     )?;
-    let rows = stmt
-        .query_map(params![from.to_rfc3339(), to.to_rfc3339()], |row| {
-            let title: Option<String> = row.get(0)?;
-            let file_name: String = row.get(1)?;
-            let artist: Option<String> = row.get(2)?;
-            let kind: String = row.get(3)?;
-            let played_at: String = row.get(4)?;
-            let duration: Option<f64> = row.get(5)?;
-            Ok(PlayLogEntry {
-                title: title.unwrap_or(file_name),
-                artist: artist.unwrap_or_default(),
-                kind: TrackKind::parse(&kind),
-                played_at: DateTime::parse_from_rfc3339(&played_at)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
-                duration_secs: duration,
-            })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(rows
+    let mut rows = stmt.query(params![from.to_rfc3339(), to.to_rfc3339()])?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next()? {
+        let title: Option<String> = row.get(0)?;
+        let file_name: String = row.get(1)?;
+        let artist: Option<String> = row.get(2)?;
+        let kind: String = row.get(3)?;
+        let played_at: String = row.get(4)?;
+        let duration: Option<f64> = row.get(5)?;
+        let played_at = DateTime::parse_from_rfc3339(&played_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|_| CrabError::Integrity {
+                // No numeric play_log id on the entry: the file
+                // name identifies the row for the operator.
+                table: "play_log",
+                id: file_name.clone(),
+                field: "played_at",
+                value: played_at,
+            })?;
+        entries.push(PlayLogEntry {
+            title: title.unwrap_or(file_name),
+            artist: artist.unwrap_or_default(),
+            kind: TrackKind::parse(&kind),
+            played_at,
+            duration_secs: duration,
+        });
+    }
+    Ok(entries
         .into_iter()
         .filter(|e| !exclude.contains(&e.kind))
         .collect())
@@ -160,5 +168,40 @@ mod tests {
         let csv = to_csv(&entries);
         assert!(csv.starts_with("played_at,title,artist,kind,duration_secs\n"));
         assert!(csv.contains("\"Say \"\"Hi\"\", Now\",\"A, B\",music,200"));
+    }
+
+    #[test]
+    fn malformed_played_at_is_integrity_error() {
+        let lib = seed();
+        // Malformed but lexicographically inside the query window (the
+        // range predicate compares strings, so an out-of-window value
+        // would simply be filtered, never mapped).
+        lib.conn()
+            .execute(
+                "INSERT INTO play_log (track_id, played_at, duration)
+                 VALUES ('t1', '2026-13-45T99:99:99Z', 180.0)",
+                [],
+            )
+            .unwrap();
+        let from = DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let err = play_report(&lib, from, to, &[]).expect_err("bad timestamp must fail");
+        match err {
+            crate::error::CrabError::Integrity {
+                table,
+                field,
+                value,
+                ..
+            } => {
+                assert_eq!(table, "play_log");
+                assert_eq!(field, "played_at");
+                assert_eq!(value, "2026-13-45T99:99:99Z");
+            }
+            other => panic!("expected Integrity error, got {other:?}"),
+        }
     }
 }

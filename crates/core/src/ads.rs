@@ -12,7 +12,7 @@ use chrono::NaiveDate;
 use rusqlite::{params, Connection};
 use uuid::Uuid;
 
-use crate::error::Result;
+use crate::error::{CrabError, Result};
 use crate::scheduler::validate_hhmm;
 
 /// One commercial break.
@@ -184,26 +184,40 @@ impl AdsManager {
                     start_date, end_date, play_time, days, enabled
              FROM ad_blocks ORDER BY play_time, name",
         )?;
-        let blocks = stmt
-            .query_map([], |row| {
-                let start: String = row.get(5)?;
-                let end: String = row.get(6)?;
-                Ok(AdBlock {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    spot_path: row.get(2)?,
-                    intro_path: Self::opt(&row.get::<_, String>(3)?),
-                    outro_path: Self::opt(&row.get::<_, String>(4)?),
-                    start_date: NaiveDate::parse_from_str(&start, "%Y-%m-%d")
-                        .unwrap_or(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap()),
-                    end_date: NaiveDate::parse_from_str(&end, "%Y-%m-%d")
-                        .unwrap_or(NaiveDate::from_ymd_opt(2099, 12, 31).unwrap()),
-                    play_time: row.get(7)?,
-                    days: row.get(8)?,
-                    enabled: row.get::<_, i32>(9)? != 0,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rows = stmt.query([])?;
+        let mut blocks = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let start: String = row.get(5)?;
+            let end: String = row.get(6)?;
+            let start_date = NaiveDate::parse_from_str(&start, "%Y-%m-%d").map_err(|_| {
+                CrabError::Integrity {
+                    table: "ad_blocks",
+                    id: id.clone(),
+                    field: "start_date",
+                    value: start,
+                }
+            })?;
+            let end_date =
+                NaiveDate::parse_from_str(&end, "%Y-%m-%d").map_err(|_| CrabError::Integrity {
+                    table: "ad_blocks",
+                    id: id.clone(),
+                    field: "end_date",
+                    value: end,
+                })?;
+            blocks.push(AdBlock {
+                id,
+                name: row.get(1)?,
+                spot_path: row.get(2)?,
+                intro_path: Self::opt(&row.get::<_, String>(3)?),
+                outro_path: Self::opt(&row.get::<_, String>(4)?),
+                start_date,
+                end_date,
+                play_time: row.get(7)?,
+                days: row.get(8)?,
+                enabled: row.get::<_, i32>(9)? != 0,
+            });
+        }
         Ok(blocks)
     }
 
@@ -417,5 +431,35 @@ mod tests {
         assert!(chain[1].ends_with("crabboss-ad-spot.tmp"));
         std::fs::remove_file(&intro).ok();
         std::fs::remove_file(&spot).ok();
+    }
+
+    #[test]
+    fn malformed_dates_are_integrity_error() {
+        let m = mem_manager();
+        m.conn
+            .borrow()
+            .execute(
+                "INSERT INTO ad_blocks
+                 (id, name, spot_path, intro_path, outro_path,
+                  start_date, end_date, play_time, days, enabled)
+                 VALUES ('b1','Bad','/tmp/s.mp3','','','whenever','2026-12-31','09:00','Daily',1)",
+                [],
+            )
+            .unwrap();
+        let err = m.list_all().expect_err("bad date must fail");
+        match err {
+            crate::error::CrabError::Integrity {
+                table,
+                id,
+                field,
+                value,
+            } => {
+                assert_eq!(table, "ad_blocks");
+                assert_eq!(id, "b1");
+                assert_eq!(field, "start_date");
+                assert_eq!(value, "whenever");
+            }
+            other => panic!("expected Integrity error, got {other:?}"),
+        }
     }
 }

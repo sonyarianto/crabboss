@@ -7,7 +7,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{params, Connection};
 use uuid::Uuid;
 
-use crate::error::Result;
+use crate::error::{CrabError, Result};
 
 /// A scheduled automation event (mirrors RadioBOSS Scheduler tab row).
 #[derive(Debug, Clone)]
@@ -260,26 +260,31 @@ impl SchedulerManager {
             "SELECT id, name, action_type, target, start_time, days, enabled, created_at, expires_on
              FROM scheduled_events ORDER BY start_time, name",
         )?;
-        let events = stmt
-            .query_map([], |row| {
-                Ok(ScheduledEvent {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    action_type: row.get(2)?,
-                    target: row.get(3)?,
-                    start_time: row.get(4)?,
-                    days: row.get(5)?,
-                    enabled: row.get::<_, i32>(6)? != 0,
-                    created_at: row
-                        .get::<_, String>(7)
-                        .ok()
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now),
-                    expires_on: row.get::<_, Option<String>>(8)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rows = stmt.query([])?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let created_raw: String = row.get(7)?;
+            let created_at = DateTime::parse_from_rfc3339(&created_raw)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|_| CrabError::Integrity {
+                    table: "scheduled_events",
+                    id: id.clone(),
+                    field: "created_at",
+                    value: created_raw,
+                })?;
+            events.push(ScheduledEvent {
+                id,
+                name: row.get(1)?,
+                action_type: row.get(2)?,
+                target: row.get(3)?,
+                start_time: row.get(4)?,
+                days: row.get(5)?,
+                enabled: row.get::<_, i32>(6)? != 0,
+                created_at,
+                expires_on: row.get::<_, Option<String>>(8)?,
+            });
+        }
         Ok(events)
     }
 
@@ -558,5 +563,34 @@ mod tests {
         );
         assert!(parse_expires(Some("31-12-2026")).is_err());
         assert!(parse_expires(Some("soon")).is_err());
+    }
+
+    #[test]
+    fn malformed_created_at_is_integrity_error() {
+        let m = mem_manager();
+        m.conn
+            .borrow()
+            .execute(
+                "INSERT INTO scheduled_events
+                 (id, name, action_type, target, start_time, days, enabled, created_at)
+                 VALUES ('b1','Bad','play','x','08:00','Daily',1,'not-a-time')",
+                [],
+            )
+            .unwrap();
+        let err = m.list_all().expect_err("bad timestamp must fail");
+        match err {
+            crate::error::CrabError::Integrity {
+                table,
+                id,
+                field,
+                value,
+            } => {
+                assert_eq!(table, "scheduled_events");
+                assert_eq!(id, "b1");
+                assert_eq!(field, "created_at");
+                assert_eq!(value, "not-a-time");
+            }
+            other => panic!("expected Integrity error, got {other:?}"),
+        }
     }
 }

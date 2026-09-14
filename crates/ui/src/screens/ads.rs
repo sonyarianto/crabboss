@@ -44,6 +44,11 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
     .spacing(8),]
     .spacing(8)
     .padding(12);
+    // List-level errors (e.g. corrupt rows) surface here; the editor
+    // shows `ads_error` inside itself while open, so don't double up.
+    if !state.ads_editor_open && !state.ads_error.is_empty() {
+        col = col.push(text(&state.ads_error).size(11));
+    }
     col = col.push(scrollable(list).height(Length::Shrink));
     if state.ads_editor_open {
         let mut day_row = row![].spacing(8);

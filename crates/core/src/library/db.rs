@@ -3,10 +3,10 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use crate::error::Result;
+use crate::error::{CrabError, Result};
 
 /// What a track *is* for station purposes. Jingles/bumpers/sweepers/IDs
 /// and ads are plain audio files — `kind` only changes how the station
@@ -406,9 +406,11 @@ impl Library {
              WHERE loudness_lufs IS NULL
              ORDER BY file_name LIMIT ?1",
         )?;
-        let tracks = stmt
-            .query_map(params![limit as i64], Self::map_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rows = stmt.query(params![limit as i64])?;
+        let mut tracks = Vec::new();
+        while let Some(row) = rows.next()? {
+            tracks.push(Self::map_row(row)?);
+        }
         Ok(tracks)
     }
 
@@ -426,16 +428,17 @@ impl Library {
     /// Tracks with a stored loudness measurement (id + gain in dB),
     /// queried by exact file path — used to look up per-deck playback gain.
     pub fn loudness_gain_by_path(&self, path: &str) -> Result<Option<f32>> {
-        let gain: Option<f64> = self
+        // `optional()`: only "no such row" becomes `Ok(None)`; a real
+        // SQL failure stays an error instead of masquerading as "no gain".
+        let gain: Option<Option<f64>> = self
             .conn
             .query_row(
                 "SELECT loudness_gain_db FROM tracks WHERE file_path = ?1",
                 params![path],
                 |row| row.get(0),
             )
-            .ok()
-            .flatten();
-        Ok(gain.map(|v| v as f32))
+            .optional()?;
+        Ok(gain.flatten().map(|v| v as f32))
     }
 
     /// Override daypart eligibility (`start`/`end` hours, `days` like `Daily`
@@ -465,15 +468,25 @@ impl Library {
                     loudness_lufs, loudness_gain_db
              FROM tracks WHERE kind = ?1 ORDER BY file_name",
         )?;
-        let tracks = stmt
-            .query_map(params![kind.as_str()], Self::map_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rows = stmt.query(params![kind.as_str()])?;
+        let mut tracks = Vec::new();
+        while let Some(row) = rows.next()? {
+            tracks.push(Self::map_row(row)?);
+        }
         Ok(tracks)
     }
 
-    fn map_row(row: &rusqlite::Row) -> std::result::Result<Track, rusqlite::Error> {
+    fn map_row(row: &rusqlite::Row) -> Result<Track> {
+        let id: String = row.get(0)?;
+        // Contextual integrity errors need the row id up front.
+        let bad = |field: &'static str, value: String| CrabError::Integrity {
+            table: "tracks",
+            id: id.clone(),
+            field,
+            value,
+        };
         Ok(Track {
-            id: row.get(0)?,
+            id: id.clone(),
             file_path: row.get(1)?,
             file_name: row.get(2)?,
             title: row.get(3)?,
@@ -487,7 +500,12 @@ impl Library {
             file_size: row.get(10)?,
             sample_rate: row.get(11)?,
             channels: row.get(12)?,
+            // `TrackKind::parse` is total by design (unknown -> Music),
+            // so an unrecognized kind label stays a benign default.
             kind: TrackKind::parse(&row.get::<_, String>(13).unwrap_or_default()),
+            // Numeric optionals only fail on SQLite type mismatch (our
+            // writers always store INTEGER/NULL); a corrupt type falls
+            // back to None rather than failing the whole list.
             daypart_start: row
                 .get::<_, Option<i64>>(17)
                 .ok()
@@ -512,9 +530,15 @@ impl Library {
                 .flatten()
                 .map(|v| v as f32),
             tags: Vec::new(),
-            added_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(14)?)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
+            added_at: {
+                let raw: String = row.get(14)?;
+                DateTime::parse_from_rfc3339(&raw)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|_| bad("added_at", raw))?
+            },
+            // `last_played_at` is display-only (play history lives in
+            // `play_log`); a malformed value degrades to None instead of
+            // failing the list.
             last_played_at: row
                 .get::<_, Option<String>>(15)?
                 .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
@@ -534,9 +558,11 @@ impl Library {
              FROM tracks ORDER BY artist, album, title",
         )?;
 
-        let tracks = stmt
-            .query_map([], Self::map_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rows = stmt.query([])?;
+        let mut tracks = Vec::new();
+        while let Some(row) = rows.next()? {
+            tracks.push(Self::map_row(row)?);
+        }
 
         Ok(tracks)
     }
@@ -552,9 +578,12 @@ impl Library {
              FROM tracks WHERE id = ?1",
         )?;
 
-        let mut rows = stmt.query_map(params![id], Self::map_row)?;
-
-        Ok(rows.next().transpose()?)
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::map_row(row)?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Find a track by its exact file path (used to log cart/scheduler plays).
@@ -567,8 +596,12 @@ impl Library {
                     loudness_lufs, loudness_gain_db
              FROM tracks WHERE file_path = ?1",
         )?;
-        let mut rows = stmt.query_map(params![path], Self::map_row)?;
-        Ok(rows.next().transpose()?)
+        let mut rows = stmt.query(params![path])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::map_row(row)?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Search tracks by query string (matches title, artist, album, filename).
@@ -586,9 +619,11 @@ impl Library {
              ORDER BY title",
         )?;
 
-        let tracks = stmt
-            .query_map(params![like], Self::map_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rows = stmt.query(params![like])?;
+        let mut tracks = Vec::new();
+        while let Some(row) = rows.next()? {
+            tracks.push(Self::map_row(row)?);
+        }
 
         Ok(tracks)
     }
@@ -957,6 +992,56 @@ mod tests {
         let all = lib.get_all_tracks().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].kind, TrackKind::Music);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn malformed_added_at_is_integrity_error_with_context() {
+        let dir = std::env::temp_dir().join(format!("crabboss-badadded-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = Library::open(&dir.join("lib.db")).unwrap();
+        lib.conn
+            .execute(
+                "INSERT INTO tracks (id, file_path, file_name, added_at)
+                 VALUES ('bad1', '/m/bad.mp3', 'bad.mp3', 'yesterday-ish')",
+                [],
+            )
+            .unwrap();
+        let err = lib.get_all_tracks().expect_err("bad timestamp must fail");
+        match err {
+            crate::error::CrabError::Integrity {
+                table,
+                id,
+                field,
+                value,
+            } => {
+                assert_eq!(table, "tracks");
+                assert_eq!(id, "bad1");
+                assert_eq!(field, "added_at");
+                assert_eq!(value, "yesterday-ish");
+            }
+            other => panic!("expected Integrity error, got {other:?}"),
+        }
+        // Same row poisons every list path, not just get_all_tracks.
+        assert!(lib.find_by_path("/m/bad.mp3").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn loudness_lookup_distinguishes_missing_row_from_sql_failure() {
+        let dir = std::env::temp_dir().join(format!("crabboss-loudmiss-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lib.db");
+        let lib = Library::open(&path).unwrap();
+        // No such track: clean None, not an error.
+        assert_eq!(lib.loudness_gain_by_path("/m/ghost.mp3").unwrap(), None);
+        // Blow away the table behind the Library's back: a real SQL
+        // failure must surface as Err, never as a silent None.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch("DROP TABLE tracks;").unwrap();
+        }
+        assert!(lib.loudness_gain_by_path("/m/ghost.mp3").is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use uuid::Uuid;
 
-use crate::error::Result;
+use crate::error::{CrabError, Result};
 use crate::library::TrackId;
 
 /// A playlist item (a track reference with ordering).
@@ -28,6 +28,20 @@ pub struct Playlist {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub items: Vec<PlaylistItem>,
+}
+
+/// Parse an RFC-3339 timestamp column, or fail with row context instead
+/// of silently substituting "now" (a wrong timestamp rewrites playlist
+/// ordering/display with no trace).
+fn parse_stamp(id: &str, field: &'static str, raw: String) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|_| CrabError::Integrity {
+            table: "playlists",
+            id: id.to_string(),
+            field,
+            value: raw,
+        })
 }
 
 /// Manages playlists backed by SQLite.
@@ -107,22 +121,21 @@ impl PlaylistManager {
              ORDER BY name",
         )?;
 
-        let playlists = stmt
-            .query_map([], |row| {
-                Ok(Playlist {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
-                    updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
-                    items: Vec::new(),
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rows = stmt.query([])?;
+        let mut playlists = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let created_raw: String = row.get(3)?;
+            let updated_raw: String = row.get(4)?;
+            playlists.push(Playlist {
+                id: id.clone(),
+                name: row.get(1)?,
+                description: row.get(2)?,
+                created_at: parse_stamp(&id, "created_at", created_raw)?,
+                updated_at: parse_stamp(&id, "updated_at", updated_raw)?,
+                items: Vec::new(),
+            });
+        }
 
         Ok(playlists)
     }
@@ -136,23 +149,21 @@ impl PlaylistManager {
              WHERE id = ?1",
         )?;
 
-        let mut rows = stmt.query_map(params![playlist_id], |row| {
-            Ok(Playlist {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
-                updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
-                items: Vec::new(),
-            })
-        })?;
-
-        let mut playlist = match rows.next().transpose()? {
-            Some(p) => p,
+        let mut rows = stmt.query(params![playlist_id])?;
+        let mut playlist = match rows.next()? {
+            Some(row) => {
+                let id: String = row.get(0)?;
+                let created_raw: String = row.get(3)?;
+                let updated_raw: String = row.get(4)?;
+                Playlist {
+                    id: id.clone(),
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                    created_at: parse_stamp(&id, "created_at", created_raw)?,
+                    updated_at: parse_stamp(&id, "updated_at", updated_raw)?,
+                    items: Vec::new(),
+                }
+            }
             None => return Ok(None),
         };
 
@@ -327,5 +338,33 @@ mod tests {
         // The playlist itself survives, just emptied.
         assert!(pm.get_with_items(&pl.id).unwrap().unwrap().items.is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn malformed_timestamps_are_integrity_error() {
+        let pm = mem_manager();
+        pm.conn
+            .borrow()
+            .execute(
+                "INSERT INTO playlists (id, name, description, created_at, updated_at)
+                 VALUES ('b1','Bad',NULL,'not-a-time','also-bad')",
+                [],
+            )
+            .unwrap();
+        let err = pm.list_all().expect_err("bad timestamp must fail");
+        match err {
+            crate::error::CrabError::Integrity {
+                table,
+                id,
+                field,
+                value,
+            } => {
+                assert_eq!(table, "playlists");
+                assert_eq!(id, "b1");
+                assert_eq!(field, "created_at");
+                assert_eq!(value, "not-a-time");
+            }
+            other => panic!("expected Integrity error, got {other:?}"),
+        }
     }
 }
