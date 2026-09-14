@@ -65,6 +65,52 @@ fn title_key(t: &Track) -> String {
     )
 }
 
+/// No-repeat windows carried ACROSS `generate` calls. `generate` itself
+/// starts empty every time (right for one-shot rotations); one-at-a-time
+/// flows like Auto-DJ thread a single `RuleHistory` through successive
+/// picks so separation actually bites — otherwise every pick sees virgin
+/// windows and the rules never fire.
+#[derive(Debug, Clone, Default)]
+pub struct RuleHistory {
+    artists: VecDeque<String>,
+    titles: VecDeque<String>,
+    albums: VecDeque<String>,
+    genres: VecDeque<String>,
+}
+
+impl RuleHistory {
+    /// Record a track handed to the engine (played or queued to play) so
+    /// later picks separate from it. Empty keys never match (`within`),
+    /// so untagged files can't poison the windows.
+    pub fn push_track(&mut self, t: &Track, cfg: &GenConfig) {
+        push_key(
+            &mut self.artists,
+            t.artist.clone().unwrap_or_default(),
+            cfg.artist_window,
+        );
+        push_key(&mut self.titles, title_key(t), cfg.title_window);
+        push_key(
+            &mut self.albums,
+            t.album.clone().unwrap_or_default(),
+            cfg.album_window,
+        );
+        push_key(
+            &mut self.genres,
+            t.genre.clone().unwrap_or_default(),
+            cfg.genre_gap,
+        );
+    }
+
+    /// True when `t` clears every window (same predicate `generate` uses
+    /// per slot, so single picks and rotations agree).
+    fn allows(&self, t: &Track) -> bool {
+        !within(&self.artists, &t.artist.clone().unwrap_or_default())
+            && !within(&self.titles, &title_key(t))
+            && !within(&self.albums, &t.album.clone().unwrap_or_default())
+            && !within(&self.genres, &t.genre.clone().unwrap_or_default())
+    }
+}
+
 /// Build a rotation. Always terminates: when no candidate satisfies every
 /// rule, the best-ranked candidate is taken (rules relax, never block).
 pub fn generate(library: &Library, cfg: &GenConfig) -> Result<Vec<Track>> {
@@ -85,33 +131,9 @@ pub fn generate(library: &Library, cfg: &GenConfig) -> Result<Vec<Track>> {
     sort_by_priority(&mut jingles, cfg.priority);
 
     let mut out: Vec<Track> = Vec::new();
-    let mut artists: VecDeque<String> = VecDeque::new();
-    let mut titles: VecDeque<String> = VecDeque::new();
-    let mut albums: VecDeque<String> = VecDeque::new();
-    let mut genres: VecDeque<String> = VecDeque::new();
+    let mut history = RuleHistory::default();
     let mut music_since_jingle = 0usize;
     let mut jingle_cursor = 0usize;
-
-    let push = |t: &Track,
-                artists: &mut VecDeque<String>,
-                titles: &mut VecDeque<String>,
-                albums: &mut VecDeque<String>,
-                genres: &mut VecDeque<String>,
-                out: &mut Vec<Track>| {
-        push_key(
-            artists,
-            t.artist.clone().unwrap_or_default(),
-            cfg.artist_window,
-        );
-        push_key(titles, title_key(t), cfg.title_window);
-        push_key(
-            albums,
-            t.album.clone().unwrap_or_default(),
-            cfg.album_window,
-        );
-        push_key(genres, t.genre.clone().unwrap_or_default(), cfg.genre_gap);
-        out.push(t.clone());
-    };
 
     while out.len() < cfg.target_tracks {
         // Jingle slot (round-robin, skip if it just played).
@@ -119,7 +141,7 @@ pub fn generate(library: &Library, cfg: &GenConfig) -> Result<Vec<Track>> {
             let mut picked = None;
             for i in 0..jingles.len() {
                 let idx = (jingle_cursor + i) % jingles.len();
-                let last_title = titles.back().cloned().unwrap_or_default();
+                let last_title = history.titles.back().cloned().unwrap_or_default();
                 if jingles.len() == 1 || title_key(&jingles[idx]) != last_title {
                     picked = Some(idx);
                     break;
@@ -128,14 +150,8 @@ pub fn generate(library: &Library, cfg: &GenConfig) -> Result<Vec<Track>> {
             if let Some(idx) = picked {
                 jingle_cursor = idx + 1;
                 let j = jingles[idx].clone();
-                push(
-                    &j,
-                    &mut artists,
-                    &mut titles,
-                    &mut albums,
-                    &mut genres,
-                    &mut out,
-                );
+                history.push_track(&j, cfg);
+                out.push(j);
                 music_since_jingle = 0;
                 continue;
             }
@@ -143,30 +159,46 @@ pub fn generate(library: &Library, cfg: &GenConfig) -> Result<Vec<Track>> {
         // Music slot: first ranked candidate satisfying every rule, else relax.
         let choice = music
             .iter()
-            .find(|t| {
-                !within(&artists, &t.artist.clone().unwrap_or_default())
-                    && !within(&titles, &title_key(t))
-                    && !within(&albums, &t.album.clone().unwrap_or_default())
-                    && !within(&genres, &t.genre.clone().unwrap_or_default())
-            })
+            .find(|t| history.allows(t))
             .or_else(|| music.first())
             .cloned();
         match choice {
             Some(t) => {
-                push(
-                    &t,
-                    &mut artists,
-                    &mut titles,
-                    &mut albums,
-                    &mut genres,
-                    &mut out,
-                );
+                history.push_track(&t, cfg);
+                out.push(t);
                 music_since_jingle += 1;
             }
             None => break,
         }
     }
     Ok(out)
+}
+
+/// One next pick honoring `history` across calls (music only, no jingle
+/// slot). This is the Auto-DJ primitive: the caller threads a single
+/// `RuleHistory` through successive picks and pushes each handed-to-engine
+/// track back into it, so separation actually bites one-at-a-time.
+/// Same ranking (daypart → playcount priority) and relax fallback as
+/// `generate`; `None` only when the library has no eligible music.
+pub fn generate_next(
+    library: &Library,
+    cfg: &GenConfig,
+    history: &RuleHistory,
+) -> Result<Option<Track>> {
+    let mut music: Vec<Track> = library
+        .list_by_kind(TrackKind::Music)?
+        .into_iter()
+        .filter(|t| t.eligible_at(cfg.hour, &cfg.weekday))
+        .collect();
+    if music.is_empty() {
+        return Ok(None);
+    }
+    sort_by_priority(&mut music, cfg.priority);
+    Ok(music
+        .iter()
+        .find(|t| history.allows(t))
+        .or_else(|| music.first())
+        .cloned())
 }
 
 fn sort_by_priority(tracks: &mut [Track], priority: PlaycountPriority) {
@@ -325,5 +357,50 @@ mod tests {
     fn empty_library_gives_empty() {
         let lib = Library::open(std::path::Path::new(":memory:")).unwrap();
         assert!(generate(&lib, &GenConfig::default()).unwrap().is_empty());
+    }
+
+    fn next_cfg() -> GenConfig {
+        // Isolate the artist rule: everything else wide open.
+        GenConfig {
+            target_tracks: 1,
+            artist_window: 2,
+            title_window: 0,
+            album_window: 0,
+            genre_gap: 0,
+            jingles_every: 0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn generate_next_honors_seeded_history() {
+        let lib = mem_lib(&[
+            ("a1.mp3", "A", "Rock", 0),
+            ("a2.mp3", "A", "Rock", 0),
+            ("b1.mp3", "B", "Pop", 0),
+        ]);
+        let cfg = next_cfg();
+        let mut history = RuleHistory::default();
+        // Fresh history: filename order wins.
+        let first = generate_next(&lib, &cfg, &history).unwrap().unwrap();
+        assert_eq!(first.file_name, "a1.mp3");
+        // Once A played, the window excludes it: B jumps the queue even
+        // though A has a second unplayed track.
+        history.push_track(&first, &cfg);
+        let second = generate_next(&lib, &cfg, &history).unwrap().unwrap();
+        assert_eq!(second.file_name, "b1.mp3");
+        // Window full (A, B): relaxes to the top-ranked instead of stalling.
+        history.push_track(&second, &cfg);
+        let third = generate_next(&lib, &cfg, &history).unwrap().unwrap();
+        assert_eq!(third.file_name, "a1.mp3");
+    }
+
+    #[test]
+    fn generate_next_empty_library_is_none() {
+        let lib = Library::open(std::path::Path::new(":memory:")).unwrap();
+        let history = RuleHistory::default();
+        assert!(generate_next(&lib, &next_cfg(), &history)
+            .unwrap()
+            .is_none());
     }
 }

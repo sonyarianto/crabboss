@@ -402,6 +402,13 @@ struct App {
     up_next: String,
     auto_continue: bool,
     was_playing: bool,
+    /// No-repeat windows across Auto-DJ picks (plus the queued pick): every
+    /// track handed to the engine is pushed here so separation bites.
+    autodj_history: crabcore::playlist::RuleHistory,
+    /// Engine-side current track path as last seen. Direct play paths set
+    /// it synchronously; the tick reconciler adopts anything else (promoted
+    /// queued decks) with proper logging + labels.
+    engine_track: Option<PathBuf>,
 
     // Library
     lib_tracks: Vec<Track>,
@@ -550,6 +557,7 @@ impl App {
                 self.now_title = cart.label.clone();
                 self.now_artist = "Cart".into();
                 self.cart_status = format!("Playing {}", cart.label);
+                self.engine_track = Some(path);
             }
             Err(e) => tracing::error!("Cart play failed: {}", e),
         }
@@ -592,16 +600,21 @@ impl App {
 
     // -- Auto-DJ ------------------------------------------------------------
     fn autodj_pick(&self) -> Option<Track> {
+        crabcore::playlist::generate_next(&self.library, &self.autodj_cfg(), &self.autodj_history)
+            .ok()
+            .flatten()
+    }
+
+    /// One-pick config shared by the pick and the history push sites, so
+    /// the rule windows recorded always match the rules picked with.
+    fn autodj_cfg(&self) -> crabcore::playlist::GenConfig {
         let now = chrono::Local::now();
-        let cfg = crabcore::playlist::GenConfig {
+        crabcore::playlist::GenConfig {
             target_tracks: 1,
             hour: now.format("%H").to_string().parse().unwrap_or(12),
             weekday: now.format("%a").to_string(),
             ..Default::default()
-        };
-        crabcore::playlist::generate(&self.library, &cfg)
-            .ok()
-            .and_then(|mut v| v.pop())
+        }
     }
 
     fn autodj_play_now(&mut self) {
@@ -628,6 +641,8 @@ impl App {
                     .filter(|a| !a.trim().is_empty())
                     .unwrap_or_else(|| "Auto-DJ".into());
                 self.up_next.clear();
+                self.autodj_history.push_track(&pick, &self.autodj_cfg());
+                self.engine_track = Some(path);
             }
             Err(e) => tracing::error!("Auto-DJ play failed: {}", e),
         }
@@ -726,6 +741,7 @@ impl App {
                             self.is_playing = true;
                             self.now_title = event.target.clone();
                             self.now_artist = "Scheduler".into();
+                            self.engine_track = Some(path);
                         }
                         Err(e) => tracing::error!("Scheduler play failed: {}", e),
                     }
@@ -969,6 +985,38 @@ impl App {
         }
         let _ = (pos, dur, has_dur);
 
+        // Adopt engine-side track changes the UI didn't make (promoted
+        // queued decks): proper play logging + labels for tracks that
+        // started without a direct play path. Direct play paths record
+        // engine_track synchronously, so only promotions land here.
+        // Gated on Playing with nothing decoding to avoid false hits
+        // mid-handoff (old deck still sounding, new path already known).
+        let engine_path = self.player.current_track().map(|t| t.path);
+        match (&engine_path, &self.engine_track) {
+            (Some(p), Some(known)) if p == known => {}
+            (None, None) => {}
+            (None, Some(_)) => {
+                self.engine_track = None;
+            }
+            _ => {
+                let settled =
+                    self.player.state() == PlayerState::Playing && self.player.load_inflight() == 0;
+                if settled {
+                    if let Some(p) = &engine_path {
+                        if let Ok(Some(t)) = self.library.find_by_path(&p.to_string_lossy()) {
+                            tracing::info!("Promoted queued deck: {}", t.file_path);
+                            let _ = self.library.record_play(&t.id, t.duration_secs);
+                            self.is_playing = true;
+                            self.now_title = track_label(&t);
+                            self.now_artist = t.artist.clone().unwrap_or_default();
+                            self.up_next.clear();
+                        }
+                    }
+                    self.engine_track = engine_path;
+                }
+            }
+        }
+
         // Scheduler + ads auto-fire (dedupe per event/minute).
         if self.sched_enabled {
             let now = chrono::Local::now();
@@ -1058,6 +1106,7 @@ impl App {
                                 self.is_playing = true;
                                 self.now_title = format!("Recovered: {}", label);
                                 self.now_artist = "Silence detector".into();
+                                self.engine_track = Some(path);
                             }
                             Err(e) => tracing::error!("Filler play failed: {}", e),
                         }
@@ -1105,6 +1154,11 @@ impl App {
                     let label = track_label(&pick);
                     tracing::info!("Auto-DJ queued: {}", label);
                     self.up_next = label;
+                    // Count it now: it will sound, and the next pick must
+                    // already separate from it (a supersede discarding it
+                    // just leaves a harmless ghost in soft windows).
+                    let cfg = self.autodj_cfg();
+                    self.autodj_history.push_track(&pick, &cfg);
                 }
                 Err(e) => tracing::warn!("Auto-DJ queue failed: {}", e),
             }
@@ -1286,6 +1340,8 @@ fn boot() -> (App, Task<Message>) {
         up_next: String::new(),
         auto_continue: false,
         was_playing: false,
+        autodj_history: crabcore::playlist::RuleHistory::default(),
+        engine_track: None,
         lib_tracks: Vec::new(),
         lib_total: 0,
         lib_search: String::new(),
@@ -1423,6 +1479,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                                 state.is_playing = true;
                                 state.now_title = track_label(&track);
                                 state.now_artist = track.artist.clone().unwrap_or_default();
+                                state.engine_track = Some(path);
                             }
                             Err(e) => {
                                 tracing::error!("Failed to play: {}", e);
@@ -1447,6 +1504,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             state.now_title = "No track loaded".into();
             state.now_artist.clear();
             state.up_next.clear();
+            state.engine_track = None;
         }
         Message::Next => {
             state.auto_continue = true;
@@ -1458,6 +1516,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     Ok(()) => {
                         state.auto_continue = true;
                         state.is_playing = true;
+                        state.engine_track = Some(cur);
                     }
                     Err(e) => tracing::error!("Prev failed: {}", e),
                 }
@@ -1503,6 +1562,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         state.is_playing = true;
                         state.now_title = track_label(&track);
                         state.now_artist = track.artist.clone().unwrap_or_default();
+                        state.engine_track = Some(path);
                     }
                     Err(e) => {
                         tracing::error!("Failed to play: {}", e);

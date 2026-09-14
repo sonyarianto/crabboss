@@ -5,5 +5,5 @@
 mod generator;
 mod manager;
 
-pub use generator::{generate, GenConfig, PlaycountPriority};
+pub use generator::{generate, generate_next, GenConfig, PlaycountPriority, RuleHistory};
 pub use manager::{Playlist, PlaylistItem, PlaylistManager};
