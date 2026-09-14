@@ -1422,12 +1422,7 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
                 state.se_target = e.target;
                 state.se_expires = e.expires_on.unwrap_or_default();
                 let mask = crabcore::scheduler::mask_from_days(&e.days);
-                for b in 0..7 {
-                    state.se_days[b] = mask & (1 << b) != 0;
-                }
-                if mask == 127 {
-                    state.se_days = [true; 7];
-                }
+                state.se_days = crate::rules::days_from_bits(mask);
                 state.sched_error.clear();
                 state.sched_editor_open = true;
             }
@@ -1453,13 +1448,7 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         }
         Message::SchedulerSave => {
             use crabcore::scheduler::days_from_mask;
-            let mut mask = 0u8;
-            for (i, on) in state.se_days.iter().enumerate() {
-                if *on {
-                    mask |= 1 << i;
-                }
-            }
-            let days = days_from_mask(mask);
+            let days = days_from_mask(crate::rules::days_to_mask(state.se_days));
             let action = action_name(state.se_action);
             let expires = state.se_expires.trim().to_string();
             let res = match state.sched_edit_idx {
@@ -1666,9 +1655,7 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
                 state.ab_end = b.end_date.to_string();
                 state.ab_time = b.play_time;
                 let mask = crabcore::scheduler::mask_from_days(&b.days);
-                for d in 0..7 {
-                    state.ab_days[d] = mask & (1 << d) != 0;
-                }
+                state.ab_days = crate::rules::days_from_bits(mask);
                 if mask == 127 {
                     state.ab_days = [true; 7];
                 }
@@ -1694,13 +1681,7 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         }
         Message::AdsSave => {
             use crabcore::scheduler::days_from_mask;
-            let mut mask = 0u8;
-            for (i, on) in state.ab_days.iter().enumerate() {
-                if *on {
-                    mask |= 1 << i;
-                }
-            }
-            let days = days_from_mask(mask);
+            let days = days_from_mask(crate::rules::days_to_mask(state.ab_days));
             let res = match state.ads_edit_idx {
                 None => state
                     .ads
@@ -2212,10 +2193,7 @@ impl App {
                         // The pending source (recorded at queue time) follows
                         // the deck onto the air, so the `· via X` tag stays
                         // truthful; consumed here either way.
-                        let source = self
-                            .pending_source
-                            .take()
-                            .unwrap_or_else(|| "Auto-DJ".into());
+                        let source = crate::rules::take_pending_source(&mut self.pending_source);
                         if let Ok(Some(t)) = self.library.find_by_path(&p.to_string_lossy()) {
                             tracing::info!("Promoted queued deck: {}", t.file_path);
                             let _ = self.library.record_play(&t.id, t.duration_secs);
@@ -2252,7 +2230,7 @@ impl App {
             let now = chrono::Local::now();
             let hhmm = now.format("%H:%M").to_string();
             let weekday = now.format("%a").to_string();
-            let minute_key = now.format("%Y-%m-%d %H:%M").to_string();
+            let minute_key = crate::rules::minute_key(&now.naive_local());
             let today = now.format("%Y-%m-%d").to_string();
             let due: Vec<(String, usize)> = self
                 .scheduler
@@ -2260,12 +2238,7 @@ impl App {
                 .unwrap_or_default()
                 .into_iter()
                 .filter_map(|e| {
-                    let already = self
-                        .fired
-                        .get(&e.id)
-                        .map(|m| m == &minute_key)
-                        .unwrap_or(false);
-                    if already {
+                    if crate::rules::fired_this_minute(&self.fired, &e.id, &minute_key) {
                         return None;
                     }
                     self.sched_events
@@ -2275,8 +2248,9 @@ impl App {
                 })
                 .collect();
             for (id, idx) in due {
-                self.fired.insert(id, minute_key.clone());
-                self.fire_scheduled_event(idx);
+                if crate::rules::claim_fire_slot(&mut self.fired, &id, &minute_key) {
+                    self.fire_scheduled_event(idx);
+                }
             }
             if let Ok(date) = chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d") {
                 let due_ads: Vec<(String, usize)> = self
@@ -2285,12 +2259,7 @@ impl App {
                     .unwrap_or_default()
                     .into_iter()
                     .filter_map(|b| {
-                        let already = self
-                            .fired_ads
-                            .get(&b.id)
-                            .map(|m| m == &minute_key)
-                            .unwrap_or(false);
-                        if already {
+                        if crate::rules::fired_this_minute(&self.fired_ads, &b.id, &minute_key) {
                             return None;
                         }
                         self.ad_blocks
@@ -2300,8 +2269,9 @@ impl App {
                     })
                     .collect();
                 for (id, idx) in due_ads {
-                    self.fired_ads.insert(id, minute_key.clone());
-                    self.fire_ad_block(idx);
+                    if crate::rules::claim_fire_slot(&mut self.fired_ads, &id, &minute_key) {
+                        self.fire_ad_block(idx);
+                    }
                 }
             }
         }
@@ -2351,36 +2321,35 @@ impl App {
             }
         }
 
-        // Auto-DJ continuity + prefetch.
-        if !self.autodj || !self.auto_continue {
-            self.was_playing = playing;
-            return;
-        }
-        let eof_transition = finished && (playing || self.was_playing);
-        self.was_playing = playing;
-        if eof_transition {
-            self.autodj_play_now();
-            return;
-        }
-        if !playing {
-            return;
-        }
-        // Installed decks plus decode jobs still in flight: `queue()` returns
-        // the moment the job is submitted, so without the in-flight count the
-        // 200 ms tick would re-queue the same pick every tick until the first
-        // decode lands, stacking duplicate decks behind the live one.
-        let pending = self.player.pending_count() + self.player.load_inflight();
-        let has_queue = self.player.has_queue();
+        // Auto-DJ continuity + prefetch. The decision table lives in
+        // `rules.rs` and is pinned by tests; this block only acts on it.
         let dur_opt = if has_dur { Some(dur) } else { None };
-        if !crabcore::audio::needs_prefetch(pos, dur_opt, pending, has_queue, 8.0) {
-            return;
+        let tick = crate::rules::AutodjTick {
+            autodj: self.autodj,
+            auto_continue: self.auto_continue,
+            playing,
+            finished,
+            was_playing: self.was_playing,
+            pos,
+            dur: dur_opt,
+            pending: self.player.pending_count() + self.player.load_inflight(),
+            has_queue: self.player.has_queue(),
+        };
+        let (action, next_was) = crate::rules::autodj_tick_action(&tick);
+        self.was_playing = next_was;
+        match action {
+            crate::rules::AutodjAction::PlayNow => {
+                self.autodj_play_now();
+                return;
+            }
+            crate::rules::AutodjAction::Idle => return,
+            crate::rules::AutodjAction::Prefetch => {}
         }
         let pick = self.autodj_pick();
         if let Some(pick) = pick {
-            let path = PathBuf::from(&pick.file_path);
-            if !path.is_file() {
+            let Some(path) = crate::rules::pick_engine_path(&pick.file_path) else {
                 return;
-            }
+            };
             match self.player.queue(&path) {
                 Ok(()) => {
                     let label = track_label(&pick);
@@ -2393,6 +2362,33 @@ impl App {
                 }
                 Err(e) => tracing::warn!("Auto-DJ queue failed: {}", e),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+    use iced::keyboard::{Key, Modifiers};
+
+    fn hotkey(c: &str) -> Option<Message> {
+        cart_hotkey(Key::Character(c.into()), Modifiers::empty())
+    }
+
+    #[test]
+    fn cart_hotkeys_map_1_to_8_onto_pads_0_to_7() {
+        for (key, pad) in ["1", "2", "3", "4", "5", "6", "7", "8"].iter().zip(0..8) {
+            assert!(
+                matches!(hotkey(key), Some(Message::CartHotkey(i)) if i == pad),
+                "{key} must fire pad {pad}"
+            );
+        }
+    }
+
+    #[test]
+    fn cart_hotkeys_ignore_other_characters() {
+        for key in ["0", "9", "a", "!", " "] {
+            assert!(hotkey(key).is_none(), "{key} must not fire a pad");
         }
     }
 }

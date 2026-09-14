@@ -6,6 +6,7 @@
 
 mod app;
 mod backup;
+mod rules;
 mod screens;
 mod widgets;
 
