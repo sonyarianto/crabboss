@@ -2704,6 +2704,7 @@ fn view_library_panel(state: &App, tools: bool) -> Element<'_, Message> {
                 text(kind_label(t.kind)).size(12).width(KIND_W),
                 button(text(title).size(12))
                     .style(iced::widget::button::text)
+                    .padding(0)
                     .width(Length::Fill)
                     .on_press(Message::LibraryTrackSelected(i)),
                 text(artist).size(12).width(Length::Fill),
