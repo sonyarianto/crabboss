@@ -112,12 +112,13 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                 text_input("Station name", &state.settings.station_name)
                     .on_input(Message::StationName)
                     .padding(6),
-                row![
-                    button(text("Backup...").size(12)).on_press(Message::BackupNow),
-                    button(text("Restore...").size(12)).on_press(Message::RestoreNow),
-                ]
-                .spacing(6),
-                text(&state.backup_status).size(11),
+            row![
+                button(text("Backup...").size(12)).on_press(Message::BackupNow),
+                button(text("Restore...").size(12)).on_press(Message::RestoreNow),
+            ]
+            .spacing(6),
+            text(&state.backup_status).size(11),
+            text(format!("Data: {}", state.data_dir.display())).size(11),
             ]
             .spacing(8);
             // Persistence health: boot-file warnings and save failures are

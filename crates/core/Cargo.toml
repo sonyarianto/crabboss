@@ -39,3 +39,4 @@ walkdir = "2"
 
 # Atomic settings persistence (temp file + platform-correct replace)
 tempfile = "3"
+dirs = "7.0.0"

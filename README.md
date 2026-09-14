@@ -92,9 +92,14 @@ cargo build --workspace
 cargo run -p crabui
 ```
 
-> Prefs live in `settings.json` (auto-created on first change — never commit
-> yours, it holds machine devices and secrets). `settings.example.json`
-> documents every tunable with defaults.
+> Prefs live in `settings.json` under the per-user data dir
+> (`%LOCALAPPDATA%\CrabBoss` on Windows — shown in Settings → Station
+> as "Data:"), auto-created on first change. On first run after this
+> change, existing `settings.json` / `crabboss.db` next to the app are
+> copied there once (never overwritten). `--data-dir <path>` overrides
+> the location for portable installs. Never commit yours: it holds
+> machine devices and secrets. `settings.example.json` documents every
+> tunable with defaults.
 >
 > > **Security note (Stage A):** the Icecast source password is stored
 > > **plaintext** in the local `settings.json` (and in backups of it).

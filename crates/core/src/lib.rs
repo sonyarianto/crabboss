@@ -8,6 +8,7 @@ pub mod cart;
 pub mod error;
 pub mod library;
 pub mod license;
+pub mod paths;
 pub mod playlist;
 pub mod report;
 pub mod scheduler;

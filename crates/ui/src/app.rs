@@ -232,6 +232,8 @@ pub(crate) struct App {
     pub(crate) ads: crabcore::ads::AdsManager,
     pub(crate) settings: crabcore::settings::AppSettings,
     pub(crate) settings_path: PathBuf,
+    /// Stable data root (settings + database live under it).
+    pub(crate) data_dir: PathBuf,
     pub(crate) license: crabcore::license::LicenseStore,
 
     pub(crate) screen: Screen,
@@ -888,9 +890,40 @@ pub(crate) fn boot() -> (App, Task<Message>) {
 
     tracing::info!("CrabBoss starting up...");
 
-    let settings_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("settings.json");
+    // Stable data locations (P1.1): one root per install, not per
+    // working directory. Legacy current-directory files migrate once.
+    let legacy_dir = std::env::current_dir().unwrap_or_default();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let paths = crabcore::paths::resolve_from(&args, &legacy_dir);
+    tracing::info!("Data dir: {}", paths.root.display());
+    if let Err(e) = paths.ensure_root() {
+        tracing::error!("Cannot create data dir {}: {e}", paths.root.display());
+    }
+    let migration = paths.migrate_legacy(&legacy_dir);
+    for (label, outcome) in [
+        ("settings", &migration.settings),
+        ("database", &migration.database),
+    ] {
+        match outcome {
+            crabcore::paths::FileMigration::Copied { from, to } => {
+                tracing::info!(
+                    "Migrated legacy {label}: {} -> {}",
+                    from.display(),
+                    to.display()
+                );
+            }
+            crabcore::paths::FileMigration::Failed { from, error } => {
+                tracing::error!(
+                    "Legacy {label} migration failed ({}): {error}",
+                    from.display()
+                );
+            }
+            crabcore::paths::FileMigration::SkippedExisting
+            | crabcore::paths::FileMigration::SkippedNoLegacy => {}
+        }
+    }
+    let data_dir = paths.root.clone();
+    let settings_path = paths.settings.clone();
     let load = crabcore::settings::AppSettings::load(&settings_path);
     if let Some(w) = load.warning() {
         tracing::warn!("Settings load: {w}");
@@ -935,9 +968,7 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         }
     }
 
-    let db_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("crabboss.db");
+    let db_path = paths.database.clone();
     let library = Library::open(&db_path).expect("Failed to open library database");
     tracing::info!("Library loaded from: {}", db_path.display());
 
@@ -1011,9 +1042,9 @@ pub(crate) fn boot() -> (App, Task<Message>) {
 
     let ads = crabcore::ads::AdsManager::open(&db_path).expect("Failed to open ads store");
 
-    let license_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("license.json");
+    // License stays at the legacy location on purpose (out of scope
+    // until a separate product decision moves it).
+    let license_path = paths.license.clone();
     let license = crabcore::license::LicenseStore::open(&license_path);
 
     let volume = {
@@ -1041,6 +1072,7 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         ads,
         settings,
         settings_path,
+        data_dir,
         license,
         screen: Screen::Home,
         settings_section: SettingsSection::default(),
