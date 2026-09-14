@@ -62,6 +62,11 @@ pub(crate) fn panel(state: &App, tools: bool) -> Element<'_, Message> {
             .label("Missing only")
             .on_toggle(Message::LibraryMissingToggled),
     );
+    filters = filters.push(
+        checkbox(state.lib_dupes_only)
+            .label("Duplicates only")
+            .on_toggle(Message::LibraryDupesToggled),
+    );
 
     // Fixed column widths shared by the header and every row, so the list
     // reads as a table: only Title/Artist flex, everything else lines up.

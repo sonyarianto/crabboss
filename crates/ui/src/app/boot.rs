@@ -239,6 +239,8 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         lib_search: String::new(),
         lib_kind: None,
         lib_missing_only: false,
+        lib_dupes_only: false,
+        lib_dupe_groups: 0,
         lib_selected: None,
         lib_status: String::new(),
         scanning: false,

@@ -28,6 +28,24 @@ pub(crate) fn missing_toggled(state: &mut App, only: bool) {
     state.refresh_library();
 }
 
+pub(crate) fn dupes_toggled(state: &mut App, only: bool) {
+    state.lib_dupes_only = only;
+    state.lib_selected = None;
+    state.refresh_library();
+    if only {
+        let n = state.lib_dupe_groups;
+        let shown = state.lib_tracks.len();
+        state.lib_status = if n == 0 {
+            "No possible duplicates found".into()
+        } else {
+            format!(
+                "{n} possible duplicate group{} ({shown} tracks) - review only, nothing auto-deleted",
+                if n == 1 { "" } else { "s" }
+            )
+        };
+    }
+}
+
 pub(crate) fn track_selected(state: &mut App, i: usize) {
     state.lib_selected = Some(i);
 }
@@ -143,11 +161,26 @@ impl App {
         match self.library.get_all_tracks() {
             Ok(all) => {
                 self.lib_total = all.len();
+                if self.lib_dupes_only {
+                    // Duplicates are a library-wide property: group the
+                    // full set, then narrow the already-filtered list to
+                    // members. Grouping runs only while the filter is on.
+                    let groups = crabcore::library::find_duplicate_groups(
+                        &all,
+                        crabcore::library::DURATION_TOLERANCE_SECS,
+                    );
+                    self.lib_dupe_groups = groups.len();
+                    let ids = crabcore::library::duplicate_ids(&groups);
+                    tracks.retain(|t| ids.contains(&t.id));
+                } else {
+                    self.lib_dupe_groups = 0;
+                }
             }
             Err(e) => {
                 let msg = format!("Library count failed: {e}");
                 tracing::warn!("{msg}");
                 self.lib_status = msg;
+                self.lib_dupe_groups = 0;
             }
         }
         self.lib_tracks = tracks;

@@ -25,6 +25,7 @@ pub(crate) enum Message {
     LibrarySearchChanged(String),
     LibraryKindChanged(Option<TrackKind>),
     LibraryMissingToggled(bool),
+    LibraryDupesToggled(bool),
     LibraryTrackSelected(usize),
     LibraryTrackPlay(usize),
     ImportFiles,

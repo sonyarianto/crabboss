@@ -50,6 +50,7 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::LibrarySearchChanged(q) => library::search_changed(state, q),
         Message::LibraryKindChanged(kind) => library::kind_changed(state, kind),
         Message::LibraryMissingToggled(only) => library::missing_toggled(state, only),
+        Message::LibraryDupesToggled(only) => library::dupes_toggled(state, only),
         Message::LibraryTrackSelected(i) => library::track_selected(state, i),
         Message::LibraryTrackPlay(i) => library::track_play(state, i),
         Message::ImportFiles => library::import_files(state),

@@ -146,6 +146,10 @@ pub(crate) struct App {
     pub(crate) lib_search: String,
     pub(crate) lib_kind: Option<TrackKind>,
     pub(crate) lib_missing_only: bool,
+    pub(crate) lib_dupes_only: bool,
+    /// Possible-duplicate group count from the last refresh (0 when the
+    /// filter is off or the read failed).
+    pub(crate) lib_dupe_groups: usize,
     pub(crate) lib_selected: Option<usize>,
     pub(crate) lib_status: String,
 

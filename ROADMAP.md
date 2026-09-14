@@ -93,7 +93,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
 | Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
 | Reporting | Play logs → XLS/PDF, royalty reports | Play logging on all paths + ranged reports + CSV export (jingles/ads excluded); XLS/PDF open | ✅ |
-| Library depth | Mass tag editor, BPM scan, dupe detection, scheduled sync, health scan | Scan + missing-file health scan + loudness scan + kind auto-classify/repair; mass-tag/BPM/dupes/auto-sync open | 🟡 |
+| Library depth | Mass tag editor, BPM scan, dupe detection, scheduled sync, health scan | Scan + missing-file health scan + loudness scan + kind auto-classify/repair + duplicate flag view; mass-tag/BPM/auto-sync open | 🟡 |
 | Track health | Proactive missing/corrupt detection | ✅ `missing_files()` + startup/on-demand scan, `!` row flags | ✅ |
 | UI niceties | Hotkeys, screen-reader a11y, drag-drop, waveform | Cart hotkeys 1–8 + sidebar nav + status footer; a11y/drag-drop/waveform open | 🟡 |
 | Stream archive | Scheduled output recording | — | — |
@@ -215,7 +215,9 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 ### 1.8 Library depth
 - [ ] Mass tag editor (multi-select batch edit)
 - [ ] BPM detection/scan
-- [ ] Duplicate track detection
+- [x] Duplicate track detection (MVP: normalized title/artist + duration
+      gate, "Duplicates only" flag view — human decides, nothing
+      auto-deleted; content-hash confirmation open)
 - [ ] Scheduled folder auto-sync (timer re-scan, not just manual import)
 
 ### 1.9 Reporting & Ops
