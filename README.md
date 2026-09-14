@@ -13,10 +13,10 @@ A professional radio station management application inspired by RadioBoss, featu
 - ✅ **Advertisement Scheduler** — Dated blocks with intro→spot→outro chained breaks
 - ✅ **Cart Wall** — 8 pads with hotkeys, progress, assign-from-library
 - ✅ **12-Band EQ + Limiter + Loudness** — Program EQ, brickwall limiter, BS.1770/R128 normalization
-- ✅ **Streaming Output** — Icecast source client (MP3) with auto-reconnect and Settings UI
+- ✅ **Streaming Output** — Icecast source client (MP3, plain + TLS) with auto-reconnect and Settings UI
 - ✅ **Microphone/Line-In** — Live input with voice-activated ducking and bed mix
 - ✅ **Reports** — Play logs with ranged reports + CSV export
-- ✅ **Dark Theme UI** — Modern dark radio-station theme via Iced
+- ✅ **Dark Theme UI** — Modern dark radio-station theme via Iced (sidebar navigation, on-air status footer, aligned library table)
 
 ### Coming Soon
 
@@ -87,6 +87,10 @@ cargo build --workspace
 # Run
 cargo run -p crabui
 ```
+
+> Prefs live in `settings.json` (auto-created on first change — never commit
+> yours, it holds machine devices and secrets). `settings.example.json`
+> documents every tunable with defaults.
 
 ## Supported Audio Formats
 

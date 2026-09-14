@@ -1,0 +1,50 @@
+{
+  "output_device": null,
+  "station_name": "CrabBoss FM",
+  "crossfade_secs": 3.0,
+  "silence_threshold_secs": 10.0,
+  "autodj": true,
+  "eq_enabled": false,
+  "eq_gains_db": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "limiter_ceiling": 0.99,
+  "loudness_norm": true,
+  "loudness_target_lufs": -9.0,
+  "stream": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 8000,
+    "mount": "/stream",
+    "username": "source",
+    "password": "",
+    "tls": false,
+    "name": "CrabBoss FM",
+    "genre": "",
+    "description": "",
+    "public": false,
+    "bitrate_kbps": 128,
+    "format": "mp3"
+  },
+  "mic": {
+    "enabled": false,
+    "device": null,
+    "level": 1.0,
+    "duck_enabled": true,
+    "duck_threshold_db": -30.0,
+    "duck_depth_db": 12.0,
+    "attack_ms": 10.0,
+    "release_ms": 400.0
+  }
+}

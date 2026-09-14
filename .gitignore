@@ -6,3 +6,7 @@
 *.db
 *.db-journal
 .env
+# Local reference screenshots (RadioBOSS UI inspiration, not app assets)
+/radioboss/
+# Local runtime prefs (machine devices + secrets); see settings.example.json
+/settings.json

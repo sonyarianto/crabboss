@@ -49,7 +49,7 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
 
 - [x] Fix `Player::stop()` sink recreation bug
 - [x] `CpalEngine` MVP (play/pause/volume parity) — rubato resample TODO
-- [x] Router: Home / Playout / Media Manager / Scheduler / Cart Wall screens
+- [x] Router: Home / Playout / Library / Scheduler / Cart Wall / Reports / Ads / Settings screens + sidebar nav + on-air footer
 - [x] License key activation (offline, `CB-XXXX-XXXX-XXXX`)
 - [x] Library: `scan_directory()` via `walkdir`, live list + search model, `rfd` import dialog, tap-to-play
 - [x] Playlist store wired (`PlaylistManager::open`, Home counts) + unit tests
@@ -62,7 +62,8 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
 - [x] Auto-DJ continuity: 200 ms tick with live progress, prefetch handoff
       (cpal, 8 s horizon), single-outstanding prefetch guard (in-flight
       decodes count as pending — no duplicate queue storms), EOF restart,
-      Next/Prev, persisted ON/OFF + Up-next
+      Next/Prev, cold start (Play / Auto-DJ toggle begin the first pick),
+      persisted ON/OFF + Up-next
 - [x] Ad scheduler (dated blocks with intros/outros, chained breaks — see §1.3)
 - [x] Icecast/Shoutcast output (see §1.5)
 - [x] Mic/line-in input with ducking (see §1.6)
@@ -84,7 +85,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP + "valid until" expiry with row badges and warnings banner | ✅ |
 | Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
-| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME, PUT + SOURCE fallback, reconnect, metadata) + Settings UI with live status; Shoutcast/relay/listener stats open | 🟡 |
+| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME, PUT + SOURCE fallback, TLS, paced, reconnect, metadata) + Settings UI with live status; Shoutcast/relay/listener stats open | 🟡 |
 | Mic / line-in | Mixed input, sidechain ducking, bed music | cpal input + `rtrb` ring summed pre-limiter/tap, voice-activated ducker, live device switching, Settings mic panel | ✅ |
 | Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
 | Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
@@ -95,7 +96,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Stream archive | Scheduled output recording | — | — |
 | License | Offline key, holder, tier | MVP done (checksum → ed25519 TODO) | ✅ |
 | File import UX | File dialog | Native `rfd` multi-select import with per-tick progress + report-export dialog | ✅ |
-| Quality gates | — | 113 tests green (library, playlist, scheduler, cart, mixer, license, stream, audio engine); `cargo fmt` + `clippy -D warnings` in CI | ✅ |
+| Quality gates | — | 119 tests green (library, playlist, scheduler, cart, mixer, license, stream, audio engine, settings); `cargo fmt` + `clippy -D warnings` in CI | ✅ |
 
 Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardware, see §2).
 
@@ -120,6 +121,9 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       announces + `Buffering`); live handoffs keep the old deck sounding
       until the new deck lands as a crossfade, superseded/stopped loads are
       discarded, pause-mid-load sticks for an explicit resume
+- [x] Monitor-independent volume: the local knob dims speakers only; the
+      program bus + stream tap stay at full level (monitor the delayed web
+      stream at zero local volume without doubling or dimming the broadcast)
 - [ ] Wire `library.search()` results into the Iced list (currently a no-op) — ✅ done (live list + search filter + tap-to-play)
 
 ### 1.2 Playlist Generator (real scope, not a checkbox)
@@ -154,8 +158,10 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] Icecast source client (encode + push): MP3/LAME CBR encoder tapped off the
       post-DSP cpal mix bus (pre-monitor-volume), lock-free `rtrb` ring → sender
       thread with real-time pacing, Icecast 2.4 `PUT` with legacy `SOURCE`
-      fallback, mount in the request path, split-`100-continue`-proof
-      handshake, optional TLS (OS-native stack, SNI) for HTTPS servers,
+      fallback, mount in the request path, `100`-means-go handshake
+      (the final 200 may only arrive at teardown; silence past a short
+      grace proceeds optimistically, EOF stays a rejection), bounded
+      TCP connect, optional TLS (OS-native stack, SNI) for HTTPS servers,
       in-band `StreamTitle` metadata, bounded reconnects (5, backoff)
 - [x] Settings UI: STREAM ON/OFF toggle (auto-start on launch when enabled),
       host/port/mount/password/username fields (persisted), TLS toggle for
@@ -204,13 +210,14 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] Play-log reports: range presets (Today/7d/30d/All), jingle+ad exclusion, newest-100 list, CSV export
 - [ ] XLS/PDF export (CSV done — spreadsheets/royalty bodies accept it; native XLS/PDF later)
 - [x] Settings screen: output device picker (persisted, applies on restart, with
-      unplugged-device fallback), station name (persisted, dashboard header),
+      unplugged-device fallback, live device highlighted), station name
+      (persisted, dashboard header), section sub-pages with descriptions,
       engine display, crossfade + silence-alarm
       steppers (persisted, applied live), license section
 - [x] `rfd` native file dialog for import (+ report export)
 
 ### 1.10 Quality gates
-- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — 113 tests green: kind classification + repair, loudness store/count, migrations, generator rules, manager CRUD, audio engine (loader generations, tap sharing, prefetch guard)
+- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — 119 tests green: kind classification + repair, loudness store/count, migrations, generator rules, manager CRUD, audio engine (loader generations, tap sharing, prefetch guard, handshake matrix), settings (incl. example-file drift guard)
 - [x] `cargo fmt` + `clippy` in CI (`-D warnings`, zero warnings) + `ci.yml` (fmt/clippy/test on push+PR)
 
 ## 2. Beyond Parity — Where CrabBoss Wins

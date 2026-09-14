@@ -222,4 +222,20 @@ mod tests {
         std::fs::remove_file(&clamped).ok();
         std::fs::remove_file(&eq_clamp).ok();
     }
+
+    #[test]
+    fn example_settings_loads_with_documented_defaults() {
+        // Guards settings.example.json against drift: it must parse and
+        // match the documented defaults.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../settings.example.json");
+        let s = AppSettings::load(&path);
+        assert_eq!(s.station_name, "CrabBoss FM");
+        assert!((s.crossfade_secs - 3.0).abs() < 1e-6);
+        assert!(!s.stream.enabled);
+        assert_eq!(s.stream.port, 8000);
+        assert_eq!(s.stream.mount, "/stream");
+        assert!(!s.stream.tls);
+        assert!((s.loudness_target_lufs + 9.0).abs() < 1e-6);
+        assert!(!s.mic.enabled);
+    }
 }
