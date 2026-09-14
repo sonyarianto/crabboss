@@ -638,14 +638,17 @@ impl App {
     }
 
     // -- Auto-DJ ------------------------------------------------------------
-    fn autodj_pick(&self) -> Option<Track> {
-        crabcore::playlist::generate_next(&self.library, &self.autodj_cfg(), &self.autodj_history)
-            .ok()
-            .flatten()
+    fn autodj_pick(&mut self) -> Option<Track> {
+        crabcore::playlist::generate_next(
+            &self.library,
+            &self.autodj_cfg(),
+            &mut self.autodj_history,
+        )
+        .ok()
+        .flatten()
     }
 
-    /// One-pick config shared by the pick and the history push sites, so
-    /// the rule windows recorded always match the rules picked with.
+    /// One-pick config for Auto-DJ rotation (current hour/weekday).
     fn autodj_cfg(&self) -> crabcore::playlist::GenConfig {
         let now = chrono::Local::now();
         crabcore::playlist::GenConfig {
@@ -680,9 +683,9 @@ impl App {
                     .filter(|a| !a.trim().is_empty())
                     .unwrap_or_else(|| "Auto-DJ".into());
                 self.up_next.clear();
-                self.autodj_history.push_track(&pick, &self.autodj_cfg());
                 self.engine_track = Some(path);
                 // Direct play discards any pending queue (and its source).
+                // (History already advanced inside generate_next.)
                 self.pending_source = None;
             }
             Err(e) => tracing::error!("Auto-DJ play failed: {}", e),
@@ -1224,11 +1227,9 @@ impl App {
                     let label = track_label(&pick);
                     tracing::info!("Auto-DJ queued: {}", label);
                     self.up_next = label;
-                    // Count it now: it will sound, and the next pick must
-                    // already separate from it (a supersede discarding it
-                    // just leaves a harmless ghost in soft windows).
-                    let cfg = self.autodj_cfg();
-                    self.autodj_history.push_track(&pick, &cfg);
+                    // History advanced inside generate_next; a supersede
+                    // discarding this deck just leaves a harmless ghost in
+                    // soft windows.
                     self.pending_source = Some("Auto-DJ".into());
                 }
                 Err(e) => tracing::warn!("Auto-DJ queue failed: {}", e),

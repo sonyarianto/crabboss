@@ -181,6 +181,12 @@ pub struct Track {
 }
 
 /// The music library backed by SQLite.
+///
+/// Write discipline (deliberate, do not "fix" with a pool): every write
+/// below runs on the UI thread. Background workers (loudness scan, import
+/// pump) only read files and compute; results come back over channels and
+/// the UI thread performs all writes. So a single `Connection` with no
+/// extra locking is correct — SQLite's own locks are never contended.
 pub struct Library {
     conn: Connection,
 }
