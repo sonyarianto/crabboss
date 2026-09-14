@@ -2481,7 +2481,9 @@ fn view_player_panel(state: &App) -> Element<'_, Message> {
         .spacing(8),
         row![
             text(format!("Vol {:.0}%", state.volume * 100.0)).size(12),
-            slider(0.0..=1.0, state.volume, Message::VolumeChanged).width(Length::Fill),
+            slider(0.0..=1.0, state.volume, Message::VolumeChanged)
+                .step(0.01_f32)
+                .width(Length::Fill),
         ]
         .spacing(8),
         row![

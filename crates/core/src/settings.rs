@@ -227,7 +227,8 @@ mod tests {
     fn example_settings_loads_with_documented_defaults() {
         // Guards settings.example.json against drift: it must parse and
         // match the documented defaults.
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../settings.example.json");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../settings.example.json");
         let s = AppSettings::load(&path);
         assert_eq!(s.station_name, "CrabBoss FM");
         assert!((s.crossfade_secs - 3.0).abs() < 1e-6);
