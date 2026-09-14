@@ -251,6 +251,12 @@ pub(crate) struct App {
     pub(crate) playlist_count: usize,
     pub(crate) upcoming_count: usize,
 
+    // Rotation generator panel (Home): per-daypart hour + track count
+    // (session knobs, not persisted) plus the last fire status.
+    pub(crate) gen_hours: [u8; 4],
+    pub(crate) gen_counts: [usize; 4],
+    pub(crate) gen_status: String,
+
     pub(crate) last_recovery: Option<String>,
     pub(crate) tick_count: u64,
 }

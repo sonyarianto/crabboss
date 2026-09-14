@@ -10,6 +10,7 @@ use super::{App, Message};
 
 pub(crate) mod ads;
 pub(crate) mod carts;
+pub(crate) mod generator;
 pub(crate) mod library;
 pub(crate) mod reports;
 pub(crate) mod scheduler;
@@ -61,6 +62,13 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::AutoSyncIntervalDec => library::autosync_interval_step(state, false),
         Message::WatchFolderAdd => library::watch_folder_add(state),
         Message::WatchFolderRemove(i) => library::watch_folder_remove(state, i),
+        // -- Rotation generator --------------------------------------------------
+        Message::GenHourInc(i) => generator::hour_step(state, i, true),
+        Message::GenHourDec(i) => generator::hour_step(state, i, false),
+        Message::GenCountInc(i) => generator::count_step(state, i, true),
+        Message::GenCountDec(i) => generator::count_step(state, i, false),
+        Message::GenFire(i) => generator::fire_one(state, i),
+        Message::GenFireAll => generator::fire_all(state),
         // -- Scheduler -------------------------------------------------------
         Message::SchedulerMasterToggled(en) => scheduler::master_toggled(state, en),
         Message::SchedulerToggleEvent(i) => scheduler::toggle_event(state, i),

@@ -36,6 +36,13 @@ pub(crate) enum Message {
     AutoSyncIntervalDec,
     WatchFolderAdd,
     WatchFolderRemove(usize),
+    // Rotation generator (Home panel)
+    GenHourInc(usize),
+    GenHourDec(usize),
+    GenCountInc(usize),
+    GenCountDec(usize),
+    GenFire(usize),
+    GenFireAll,
     // Scheduler
     SchedulerMasterToggled(bool),
     SchedulerToggleEvent(usize),

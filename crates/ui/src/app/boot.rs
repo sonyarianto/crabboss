@@ -311,6 +311,14 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         track_count,
         playlist_count,
         upcoming_count: 0,
+        gen_hours: [
+            crate::app::update::generator::DAYPARTS[0].hour,
+            crate::app::update::generator::DAYPARTS[1].hour,
+            crate::app::update::generator::DAYPARTS[2].hour,
+            crate::app::update::generator::DAYPARTS[3].hour,
+        ],
+        gen_counts: [crate::app::update::generator::DEFAULT_GEN_COUNT; 4],
+        gen_status: String::new(),
         last_recovery: None,
         tick_count: 0,
     };

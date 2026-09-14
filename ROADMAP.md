@@ -58,7 +58,7 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
 - [x] Cart Wall MVP: 8 pads, instant play, jingle-first seeding/loading with kind badges
 - [x] Crossfader + gapless (see §1.1 — stereo dual-cursor engine, equal-power/linear curves, background decode loader)
 - [x] 12-band EQ + limiter (see §1.1)
-- [x] Playlist auto-generator with rotation rules (engine done: repeat/separation/priority/daypart/jingles; UI presets open)
+- [x] Playlist auto-generator with rotation rules (engine done: repeat/separation/priority/daypart/jingles; Home panel fires 4 dayparts at once)
 - [x] Auto-DJ continuity: 200 ms tick with live progress, prefetch handoff
       (cpal, 8 s horizon), single-outstanding prefetch guard (in-flight
       decodes count as pending — no duplicate queue storms), `RuleHistory`
