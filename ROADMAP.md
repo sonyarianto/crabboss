@@ -51,7 +51,7 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
 - [x] `CpalEngine` MVP (play/pause/volume parity) — rubato resample TODO
 - [x] Router: Home / Playout / Library / Scheduler / Cart Wall / Reports / Ads / Settings screens + sidebar nav + on-air footer
 - [x] License key activation (offline, `CB-XXXX-XXXX-XXXX`)
-- [x] Library: `scan_directory()` via `walkdir`, live list + search model, `rfd` import dialog, tap-to-play
+- [x] Library: `scan_directory()` via `walkdir`, live list + search model, aligned Kind/Title/Artist/Dur/Gain columns, `rfd` import dialog, tap-to-play
 - [x] Playlist store wired (`PlaylistManager::open`, Home counts) + unit tests
 - [x] Scheduler MVP: event list, Add/Edit dialog (time/action/days), auto-tick firing `generate`/`load`/`play`
 - [x] Track kinds (music/jingle/ad): auto-classify on import, `set_kind`, pre-kind DB migration
@@ -61,9 +61,11 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
 - [x] Playlist auto-generator with rotation rules (engine done: repeat/separation/priority/daypart/jingles; UI presets open)
 - [x] Auto-DJ continuity: 200 ms tick with live progress, prefetch handoff
       (cpal, 8 s horizon), single-outstanding prefetch guard (in-flight
-      decodes count as pending — no duplicate queue storms), EOF restart,
-      Next/Prev, cold start (Play / Auto-DJ toggle begin the first pick),
-      persisted ON/OFF + Up-next
+      decodes count as pending — no duplicate queue storms), `RuleHistory`
+      separation across picks + Coming-Up forecast list, promotion
+      reconcile (queued decks get logged + labeled with their source),
+      EOF restart, Next/Prev, cold start (Play / Auto-DJ toggle begin
+      the first pick), persisted ON/OFF + Up-next
 - [x] Ad scheduler (dated blocks with intros/outros, chained breaks — see §1.3)
 - [x] Icecast/Shoutcast output (see §1.5)
 - [x] Mic/line-in input with ducking (see §1.6)
@@ -91,12 +93,12 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
 | Reporting | Play logs → XLS/PDF, royalty reports | Play logging on all paths + ranged reports + CSV export (jingles/ads excluded); XLS/PDF open | ✅ |
 | Library depth | Mass tag editor, BPM scan, dupe detection, scheduled sync, health scan | Scan + missing-file health scan + loudness scan + kind auto-classify/repair; mass-tag/BPM/dupes/auto-sync open | 🟡 |
-| Track health | Proactive missing/corrupt detection | ✅ `missing_files()` + startup/on-demand scan, ⚠ row flags | ✅ |
-| UI niceties | Hotkeys, screen-reader a11y, drag-drop, waveform | — | — |
+| Track health | Proactive missing/corrupt detection | ✅ `missing_files()` + startup/on-demand scan, `!` row flags | ✅ |
+| UI niceties | Hotkeys, screen-reader a11y, drag-drop, waveform | Cart hotkeys 1–8 + sidebar nav + status footer; a11y/drag-drop/waveform open | 🟡 |
 | Stream archive | Scheduled output recording | — | — |
 | License | Offline key, holder, tier | MVP done (checksum → ed25519 TODO) | ✅ |
 | File import UX | File dialog | Native `rfd` multi-select import with per-tick progress + report-export dialog | ✅ |
-| Quality gates | — | 119 tests green (library, playlist, scheduler, cart, mixer, license, stream, audio engine, settings); `cargo fmt` + `clippy -D warnings` in CI | ✅ |
+| Quality gates | — | 122 tests green (library, playlist, scheduler, cart, mixer, license, stream, audio engine, settings); `cargo fmt` + `clippy -D warnings` in CI | ✅ |
 
 Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardware, see §2).
 
@@ -111,8 +113,8 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       Settings steppers, persisted + live-applied, cpal-only) + limiter
       (per-frame brickwall attack with metered release, ceiling stepper in dBFS)
 - [x] Loudness normalization (ReplayGain-style): BS.1770 K-weighting +
-      R128 gating meter (`LoudnessMeter`, validated against the ITU mono-sine
-      −3.01 LUFS anchor), 🔊 Loudness scan button in Media/Playout writes
+       R128 gating meter (`LoudnessMeter`, validated against the ITU mono-sine
+       −3.01 LUFS anchor), 🔊 Loudness scan button in the Library header writes
       per-track LUFS + gain toward the adjustable target (default −9 LUFS,
       RadioBOSS-style; −23 broadcast floor available) into the library (responsive
       background-thread scan with live progress), gain badge per library row, applied at
@@ -132,6 +134,9 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] Playcount-priority weighting (LeastPlayed MIN-style / MostPlayed MAX-style)
 - [x] Dayparting: per-track hours + days, wrap-past-midnight aware (`set_daypart`, honored by generator)
 - [x] Scheduler `generate` builds a real rotation and persists it as a playlist
+- [x] One-at-a-time Auto-DJ primitives: `RuleHistory` threads no-repeat
+      windows across picks (`generate_next`), `forecast_up_next` simulates
+      coming picks on cloned history for the Coming-Up display
 - [ ] Multi-playlist generation UI (several dayparts/rotations at once)
 
 ### 1.3 Ads, Scheduler & Cart depth
@@ -184,8 +189,8 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       resample fallback, lock-free `rtrb` ring with a latency bound;
       summed pre-limiter + pre-stream-tap so the broadcast feed hears it)
 - [x] Sidechain ducking: auto-lower music bed when mic is active
-      (voice-activated peak envelope + threshold/depth/attack/release,
-      live meter + ▼ indicator, duck ON/OFF)
+       (voice-activated peak envelope + threshold/depth/attack/release,
+       live meter + `ducking` tag, duck ON/OFF)
 - [x] Mic "bed" music under live breaks (voice sums over the ducked
       program bus and passes over a silent bed for talk breaks)
 - [x] Settings UI: MIC ON/OFF toggle (auto-start on launch when enabled),
@@ -197,7 +202,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       10 s default threshold); the 200 ms UI tick auto-recovers dead air
       with a filler music track (rate-limited 1/min).
 - [x] Background library health scan: `missing_files()` + startup scan, on-demand
-      `✓ Health` button in Media/Playout, ⚠ prefixes on missing rows
+      `✓ Health` button in the Library header, `!` prefixes on missing rows
 
 ### 1.8 Library depth
 - [ ] Mass tag editor (multi-select batch edit)
@@ -217,7 +222,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] `rfd` native file dialog for import (+ report export)
 
 ### 1.10 Quality gates
-- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — 119 tests green: kind classification + repair, loudness store/count, migrations, generator rules, manager CRUD, audio engine (loader generations, tap sharing, prefetch guard, handshake matrix), settings (incl. example-file drift guard)
+- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — 122 tests green: kind classification + repair, loudness store/count, migrations, generator rules (incl. cross-pick `RuleHistory` + forecast), manager CRUD, audio engine (loader generations, tap sharing, prefetch guard, handshake matrix), settings (incl. example-file drift guard)
 - [x] `cargo fmt` + `clippy` in CI (`-D warnings`, zero warnings) + `ci.yml` (fmt/clippy/test on push+PR)
 
 ## 2. Beyond Parity — Where CrabBoss Wins

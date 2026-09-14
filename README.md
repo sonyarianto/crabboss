@@ -9,7 +9,7 @@ A professional radio station management application inspired by RadioBoss, featu
 - ✅ **Audio Playback** — Play, pause, stop, volume via cpal; stereo gapless engine with equal-power crossfade and background decoding (UI never freezes)
 - ✅ **Music Library** — SQLite database with metadata extraction, search, health scan, loudness analysis, auto-classification (music/jingle/ad)
 - ✅ **Playlist Management** — Create, edit, and manage playlists; auto-generator with rotation rules (no-repeat, separation, playcount priority, dayparting, jingle slots)
-- ✅ **Scheduler** — Time + weekday events with expiration, Auto-DJ continuity with prefetch handoff
+- ✅ **Scheduler** — Time + weekday events with expiration, Auto-DJ continuity with prefetch handoff and Coming-Up forecast
 - ✅ **Advertisement Scheduler** — Dated blocks with intro→spot→outro chained breaks
 - ✅ **Cart Wall** — 8 pads with hotkeys, progress, assign-from-library
 - ✅ **12-Band EQ + Limiter + Loudness** — Program EQ, brickwall limiter, BS.1770/R128 normalization
@@ -102,6 +102,7 @@ Thanks to symphonia and lofty, CrabBoss supports:
 - **OGG Vorbis**
 - **WAV** (Waveform Audio)
 - **AIFF** (Audio Interchange File Format)
+- **M4A** (MPEG-4 Audio)
 - **Opus**
 - **WavPack**
 - **Musepack**
