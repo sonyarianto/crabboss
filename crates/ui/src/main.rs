@@ -1397,10 +1397,44 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
         }
         // -- Transport ------------------------------------------------------
         Message::Play => {
-            if state.player.state() == PlayerState::Paused {
-                state.player.resume();
+            match state.player.state() {
+                PlayerState::Paused => {
+                    state.player.resume();
+                    state.is_playing = true;
+                }
+                PlayerState::Playing | PlayerState::Buffering => {
+                    state.is_playing = true;
+                }
+                PlayerState::Stopped => {
+                    // Cold start: a bare Play with nothing loaded was a
+                    // silent no-op (the tick overwrote is_playing right
+                    // back). Play the selected track, else an Auto-DJ pick;
+                    // continuity follows the toggle, not the button.
+                    if let Some(track) = state
+                        .lib_selected
+                        .and_then(|i| state.lib_tracks.get(i))
+                        .cloned()
+                    {
+                        let path = PathBuf::from(&track.file_path);
+                        match state.player.play(&path) {
+                            Ok(()) => {
+                                let _ = state.library.record_play(&track.id, track.duration_secs);
+                                state.auto_continue = state.autodj;
+                                state.is_playing = true;
+                                state.now_title = track_label(&track);
+                                state.now_artist = track.artist.clone().unwrap_or_default();
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to play: {}", e);
+                                state.lib_status = format!("Play failed: {}", e);
+                            }
+                        }
+                    } else {
+                        state.autodj_play_now();
+                        state.auto_continue = state.autodj;
+                    }
+                }
             }
-            state.is_playing = true;
         }
         Message::Pause => {
             state.player.pause();
@@ -1440,6 +1474,11 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             tracing::info!("Auto-DJ {}", if en { "ON" } else { "OFF" });
             if !en {
                 state.up_next.clear();
+            } else if state.player.state() == PlayerState::Stopped {
+                // Kick off playback: without a first track there is never
+                // an EOF transition for continuity to continue from.
+                state.autodj_play_now();
+                state.auto_continue = true;
             }
         }
         // -- Library ---------------------------------------------------------
