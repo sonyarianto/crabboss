@@ -175,6 +175,31 @@ pub fn generate_demo_key() -> String {
     format!("CB-DEMO-DEMO-{}", checksum_for(data8))
 }
 
+/// Mint a key for an 8-char payload (vendor tool for handing keys to
+/// stations). Tier follows the same prefix convention as validation:
+/// `PRO*`/`STD*` → perpetual, `DEMO*`/`TRIAL*`/other → 30-day trial.
+/// NOTE: checksum secret ships in this source, so this is tamper-evident
+/// labeling for friendly stations — not copy protection. Real signatures
+/// (ed25519) are still TODO.
+pub fn generate_key_for(payload8: &str) -> Result<String> {
+    let norm: String = payload8
+        .to_uppercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if norm.len() != 8 {
+        return Err(CrabError::Library(
+            "Key payload must be 8 letters/digits (e.g. PROSTN01)".into(),
+        ));
+    }
+    Ok(format!(
+        "CB-{}-{}-{}",
+        &norm[0..4],
+        &norm[4..8],
+        checksum_for(&norm)
+    ))
+}
+
 /// File-backed license store (`license.json` next to the DB).
 #[derive(Debug, Clone)]
 pub struct LicenseStore {
@@ -245,5 +270,20 @@ mod tests {
     fn rejects_bad_format() {
         assert!(validate_key("HELLO").is_err());
         assert!(validate_key("CB-SHORT").is_err());
+    }
+
+    #[test]
+    fn vendor_key_mints_validatable_tiers() {
+        let pro = generate_key_for("PROSTN01").unwrap();
+        let (canonical, tier, validity) = validate_key(&pro).unwrap();
+        assert_eq!(canonical, pro);
+        assert_eq!(tier, LicenseTier::Pro);
+        assert!(validity.is_none());
+        let trial = generate_key_for("TRIAL001").unwrap();
+        let (_, tier, validity) = validate_key(&trial).unwrap();
+        assert_eq!(tier, LicenseTier::Trial);
+        assert_eq!(validity.map(|d| d.num_days()), Some(30));
+        assert!(generate_key_for("short").is_err());
+        assert!(generate_key_for("way-too-long-payload").is_err());
     }
 }
