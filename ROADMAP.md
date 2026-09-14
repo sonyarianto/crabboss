@@ -158,10 +158,16 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       handshake, optional TLS (OS-native stack, SNI) for HTTPS servers,
       in-band `StreamTitle` metadata, bounded reconnects (5, backoff)
 - [x] Settings UI: STREAM ON/OFF toggle (auto-start on launch when enabled),
-      host/port/mount/password fields (Enter commits, persisted), bitrate
-      ladder stepper (8–320 kbps), live status (⏳ Connecting/🔴 Live/⚠ error)
-      + bytes/uptime stats; stream tap handle shared with the audio
-      callback (fixed silent dead-air-while-Live)
+      host/port/mount/password/username fields (persisted), TLS toggle for
+      HTTPS servers, bitrate ladder stepper (8–320 kbps), live status
+      (⏳ Connecting/🔴 Live/⚠ error) + bytes/uptime stats; stream tap
+      handle shared with the audio callback (fixed silent dead-air-while-Live)
+- [x] Deployment lesson (verified live): L7 reverse proxies (Traefik/nginx)
+      may pass source headers + statuses yet swallow the never-ending PUT
+      body — server then kills the starved source on socket timeout while
+      the client sees RST seconds after handshake. Run the source path
+      direct to the pod (plain HTTP, e.g. :8000) or via TCP passthrough;
+      keep HTTPS for listeners
 - [ ] Shoutcast v1/v2 source client
 - [ ] Listener/connection stats in UI (local bytes/uptime done; listener counts need Icecast admin/JSON API)
 - [ ] Artwork metadata forwarding to encoders
