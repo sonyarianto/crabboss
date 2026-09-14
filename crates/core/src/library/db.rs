@@ -1,6 +1,6 @@
 //! SQLite-backed music library
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -663,10 +663,48 @@ impl Library {
     /// Recursively scan a directory for audio files and add them to the library.
     /// Returns the count of successfully added tracks.
     pub fn scan_directory(&self, dir: &Path) -> Result<usize> {
-        const AUDIO_EXTENSIONS: &[&str] = &[
-            "mp3", "flac", "aac", "ogg", "wav", "aiff", "opus", "wv", "mpc", "m4a",
-        ];
         let mut added = 0;
+        for path in collect_audio_files(&[dir.to_path_buf()]).1 {
+            match self.add_track(&path) {
+                Ok(_) => added += 1,
+                Err(e) => tracing::warn!("Skipping {}: {}", path.display(), e),
+            }
+        }
+        tracing::info!("Scanned {}: {} tracks added", dir.display(), added);
+        Ok(added)
+    }
+}
+
+/// Audio extensions the library recognizes anywhere: manual scan,
+/// folder auto-sync, and (as a subset) the import dialog. One list so
+/// the timer and the manual paths never disagree on what counts.
+pub const AUDIO_EXTENSIONS: &[&str] = &[
+    "mp3", "flac", "aac", "ogg", "wav", "aiff", "opus", "wv", "mpc", "m4a",
+];
+
+/// True when `path` carries a recognized audio extension. Pure (no
+/// filesystem access): the sync worker calls this on entries already
+/// known to be files.
+pub fn is_audio_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| AUDIO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Walk `dirs` for candidate audio files without touching the database
+/// (safe on a background thread; the UI thread owns the connection).
+/// Returns `(folders_scanned, sorted_deduped_paths)`. Missing folders
+/// are warned and skipped, never fatal.
+pub fn collect_audio_files(dirs: &[PathBuf]) -> (usize, Vec<PathBuf>) {
+    let mut scanned = 0;
+    let mut out: Vec<PathBuf> = Vec::new();
+    for dir in dirs {
+        if !dir.is_dir() {
+            tracing::warn!("Auto-sync skipping missing folder {}", dir.display());
+            continue;
+        }
+        scanned += 1;
         for entry in walkdir::WalkDir::new(dir)
             .follow_links(true)
             .into_iter()
@@ -676,22 +714,14 @@ impl Library {
                 continue;
             }
             let path = entry.path();
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            if !AUDIO_EXTENSIONS.contains(&ext.as_str()) {
-                continue;
-            }
-            match self.add_track(path) {
-                Ok(_) => added += 1,
-                Err(e) => tracing::warn!("Skipping {}: {}", path.display(), e),
+            if is_audio_path(path) {
+                out.push(path.to_path_buf());
             }
         }
-        tracing::info!("Scanned {}: {} tracks added", dir.display(), added);
-        Ok(added)
     }
+    out.sort();
+    out.dedup();
+    (scanned, out)
 }
 
 /// Read metadata from an audio file using lofty.
@@ -786,6 +816,34 @@ mod tests {
         assert_eq!(j("/music/Iklan/sirup.mp3"), TrackKind::Ad);
         assert_eq!(j("/music/coke_spot.mp3"), TrackKind::Ad);
         assert_eq!(j("/music/promo_mix.mp3"), TrackKind::Ad);
+    }
+
+    #[test]
+    fn audio_path_matches_scan_extensions() {
+        assert!(is_audio_path(Path::new("/mix/song.mp3")));
+        assert!(is_audio_path(Path::new("/mix/song.FLAC")));
+        assert!(is_audio_path(Path::new("/mix/take.opus")));
+        assert!(!is_audio_path(Path::new("/mix/cover.jpg")));
+        assert!(!is_audio_path(Path::new("/mix/playlist.m3u")));
+        assert!(!is_audio_path(Path::new("/mix/no-extension")));
+    }
+
+    #[test]
+    fn collect_audio_files_skips_missing_and_non_audio() {
+        let dir = std::env::temp_dir().join(format!("crabboss-collect-{}", uuid::Uuid::new_v4()));
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(dir.join("a.mp3"), b"x").unwrap();
+        std::fs::write(dir.join("b.txt"), b"x").unwrap();
+        std::fs::write(sub.join("c.flac"), b"x").unwrap();
+        let missing = dir.join("gone");
+        let (scanned, mut paths) =
+            collect_audio_files(&[dir.clone(), missing.clone(), dir.clone()]);
+        // The missing folder warns and skips; the repeated folder dedupes.
+        assert_eq!(scanned, 2);
+        paths.sort();
+        assert_eq!(paths, vec![dir.join("a.mp3"), sub.join("c.flac")]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

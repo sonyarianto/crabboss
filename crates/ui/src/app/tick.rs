@@ -17,6 +17,8 @@ impl App {
         self.tick_count += 1;
         self.pump_loudness();
         self.pump_import();
+        self.pump_autosync();
+        super::update::library::maybe_autosync(self);
 
         let pos = self.player.position_secs();
         let (dur, has_dur) = match self.player.current_track() {

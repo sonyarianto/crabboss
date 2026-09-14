@@ -11,7 +11,7 @@ use crabcore::audio::Engine;
 use crabcore::library::{Library, Track, TrackKind};
 use crabcore::playlist::{PlaylistManager, RuleHistory};
 
-use crate::widgets::LoudnessDone;
+use crate::widgets::{LoudnessDone, SyncFound};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Screen {
@@ -165,6 +165,11 @@ pub(crate) struct App {
     pub(crate) import_added: usize,
     pub(crate) import_skipped: usize,
     pub(crate) import_total: usize,
+
+    // Folder auto-sync (timer walk; results queue via import above)
+    pub(crate) syncing: bool,
+    pub(crate) sync_rx: Option<Receiver<SyncFound>>,
+    pub(crate) last_auto_sync: Option<std::time::Instant>,
 
     // Scheduler
     pub(crate) sched_enabled: bool,

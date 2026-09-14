@@ -132,6 +132,30 @@ pub(crate) fn pick_engine_path(file_path: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+// ---------------------------------------------------------------------------
+// Folder auto-sync fire rule
+// ---------------------------------------------------------------------------
+
+/// A sync pass may start when the toggle is on, at least one folder is
+/// watched, no import/scan/sync worker is running, and the interval
+/// elapsed (`None` = never synced: fire promptly). Pure: the tick
+/// passes the clock in as seconds so tests pin it without sleeping.
+pub(crate) fn autosync_due(
+    enabled: bool,
+    has_folders: bool,
+    busy: bool,
+    elapsed_secs: Option<u64>,
+    interval_secs: u64,
+) -> bool {
+    if !enabled || !has_folders || busy {
+        return false;
+    }
+    match elapsed_secs {
+        None => true,
+        Some(e) => e >= interval_secs,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +307,19 @@ mod tests {
         std::fs::write(&p, b"x").unwrap();
         assert_eq!(pick_engine_path(&p.to_string_lossy()), Some(p.clone()));
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn autosync_fires_when_due_and_idle() {
+        // First pass with folders watched: fire promptly.
+        assert!(autosync_due(true, true, false, None, 3600));
+        // Interval elapsed: fire; a second early: hold.
+        assert!(autosync_due(true, true, false, Some(3600), 3600));
+        assert!(!autosync_due(true, true, false, Some(3599), 3600));
+        // Guards: toggle off, no folders, or anything running.
+        assert!(!autosync_due(false, true, false, None, 3600));
+        assert!(!autosync_due(true, false, false, None, 3600));
+        assert!(!autosync_due(true, true, true, None, 3600));
+        assert!(!autosync_due(true, true, true, Some(99999), 3600));
     }
 }

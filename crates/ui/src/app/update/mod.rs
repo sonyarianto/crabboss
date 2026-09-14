@@ -56,6 +56,11 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::ImportFiles => library::import_files(state),
         Message::HealthCheck => library::health_check(state),
         Message::LoudnessScan => library::loudness_scan(state),
+        Message::AutoSyncToggled(on) => library::autosync_toggled(state, on),
+        Message::AutoSyncIntervalInc => library::autosync_interval_step(state, true),
+        Message::AutoSyncIntervalDec => library::autosync_interval_step(state, false),
+        Message::WatchFolderAdd => library::watch_folder_add(state),
+        Message::WatchFolderRemove(i) => library::watch_folder_remove(state, i),
         // -- Scheduler -------------------------------------------------------
         Message::SchedulerMasterToggled(en) => scheduler::master_toggled(state, en),
         Message::SchedulerToggleEvent(i) => scheduler::toggle_event(state, i),

@@ -5,5 +5,6 @@
 mod db;
 mod dupes;
 
+pub use db::{collect_audio_files, is_audio_path, AUDIO_EXTENSIONS};
 pub use db::{Library, Track, TrackId, TrackKind};
 pub use dupes::{duplicate_ids, find_duplicate_groups, DuplicateGroup, DURATION_TOLERANCE_SECS};

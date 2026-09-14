@@ -20,6 +20,13 @@ pub(crate) struct LoudnessDone {
     pub(crate) gain_db: f32,
 }
 
+/// One finished folder-sync walk: candidate audio paths (unfiltered —
+/// the UI thread drops the ones already in the library before queuing).
+pub(crate) struct SyncFound {
+    pub(crate) folders: usize,
+    pub(crate) paths: Vec<PathBuf>,
+}
+
 pub(crate) fn fmt_dur(d: Option<f64>) -> String {
     let total = d.unwrap_or(0.0).max(0.0) as u64;
     format!("{:02}:{:02}", total / 60, total % 60)

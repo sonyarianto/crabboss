@@ -14,6 +14,15 @@ use crate::audio::EQ_BAND_COUNT;
 use crate::audio::{TARGET_LUFS, TARGET_MAX_LUFS, TARGET_MIN_LUFS};
 use crate::stream::StreamConfig;
 
+/// Bounds for the folder auto-sync interval (minutes). Five minutes is
+/// the floor: a library walk is cheap but not 200 ms-tick cheap, and
+/// anything tighter is a busy loop with extra steps.
+pub const AUTO_SYNC_MIN_MINUTES: u32 = 5;
+/// A daily pass is the coarsest useful cadence for a station library.
+pub const AUTO_SYNC_MAX_MINUTES: u32 = 1440;
+/// Hourly passes catch drop-folder workflows without churning the disk.
+pub const AUTO_SYNC_DEFAULT_MINUTES: u32 = 60;
+
 /// Persisted preferences. Device applies on next launch (stream rebuild);
 /// crossfade + silence threshold also apply live.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +53,16 @@ pub struct AppSettings {
     pub stream: StreamConfig,
     /// Mic/line-in with ducking (§1.6): device, level, duck prefs.
     pub mic: MicConfig,
+    /// Folders re-scanned for new audio on a timer (§1.8 auto-sync).
+    /// Empty = manual import only. Old configs without this field load
+    /// as empty via `#[serde(default)]`.
+    pub watch_folders: Vec<PathBuf>,
+    /// Timer re-scan of `watch_folders`: new files queue through the
+    /// normal import pump with progress; never deletes anything.
+    pub auto_sync_enabled: bool,
+    /// Minutes between auto-sync passes ([`AUTO_SYNC_MIN_MINUTES`]..
+    /// [`AUTO_SYNC_MAX_MINUTES`]).
+    pub auto_sync_interval_mins: u32,
 }
 
 impl Default for AppSettings {
@@ -61,6 +80,9 @@ impl Default for AppSettings {
             loudness_target_lufs: TARGET_LUFS,
             stream: StreamConfig::default(),
             mic: MicConfig::default(),
+            watch_folders: Vec::new(),
+            auto_sync_enabled: false,
+            auto_sync_interval_mins: AUTO_SYNC_DEFAULT_MINUTES,
         }
     }
 }
@@ -83,6 +105,17 @@ impl AppSettings {
         self.loudness_target_lufs = self
             .loudness_target_lufs
             .clamp(TARGET_MIN_LUFS, TARGET_MAX_LUFS);
+        self.auto_sync_interval_mins = self
+            .auto_sync_interval_mins
+            .clamp(AUTO_SYNC_MIN_MINUTES, AUTO_SYNC_MAX_MINUTES);
+        // Drop empty entries and dedupe, keeping operator order. Pure
+        // (no filesystem checks): a temporarily unplugged drive must not
+        // silently lose its watch entry.
+        let mut seen = std::collections::HashSet::new();
+        self.watch_folders.retain(|p| {
+            let s = p.to_string_lossy();
+            !s.trim().is_empty() && seen.insert(s.into_owned())
+        });
         self.mic = std::mem::take(&mut self.mic).sanitized();
         self
     }
@@ -248,6 +281,9 @@ mod tests {
                 ..Default::default()
             },
             mic: MicConfig::default(),
+            watch_folders: vec![PathBuf::from("D:/mix")],
+            auto_sync_enabled: true,
+            auto_sync_interval_mins: 30,
         };
         s.save(&path).unwrap();
         let back = match AppSettings::load(&path) {
@@ -256,6 +292,9 @@ mod tests {
         };
         assert_eq!(back.output_device.as_deref(), Some("Speakers"));
         assert_eq!(back.station_name, "Test FM");
+        assert_eq!(back.watch_folders, vec![PathBuf::from("D:/mix")]);
+        assert!(back.auto_sync_enabled);
+        assert_eq!(back.auto_sync_interval_mins, 30);
         assert_eq!(
             (back.crossfade_secs, back.silence_threshold_secs),
             (5.5, 8.0)
@@ -381,6 +420,37 @@ mod tests {
         assert!(!s.stream.tls);
         assert!((s.loudness_target_lufs + 9.0).abs() < 1e-6);
         assert!(!s.mic.enabled);
+    }
+
+    #[test]
+    fn autosync_defaults_clamps_and_dedupes() {
+        let parse = |json: &str| {
+            serde_json::from_str::<AppSettings>(json)
+                .expect("test JSON parses")
+                .sanitized()
+        };
+        // Old configs without the auto-sync fields load as manual-only.
+        let d = parse(r#"{"station_name":"Old"}"#);
+        assert!(d.watch_folders.is_empty());
+        assert!(!d.auto_sync_enabled);
+        assert_eq!(d.auto_sync_interval_mins, AUTO_SYNC_DEFAULT_MINUTES);
+        // Interval clamps to its bounds.
+        assert_eq!(
+            parse(r#"{"auto_sync_interval_mins":1}"#).auto_sync_interval_mins,
+            AUTO_SYNC_MIN_MINUTES
+        );
+        assert_eq!(
+            parse(r#"{"auto_sync_interval_mins":99999}"#).auto_sync_interval_mins,
+            AUTO_SYNC_MAX_MINUTES
+        );
+        // Empty entries drop, dupes collapse, order kept.
+        let folders = parse(r#"{"watch_folders":["D:/mix","","D:/mix","E:/jingles"]}"#);
+        let names: Vec<_> = folders
+            .watch_folders
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["D:/mix", "E:/jingles"]);
     }
 
     #[test]

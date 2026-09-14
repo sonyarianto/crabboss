@@ -31,6 +31,11 @@ pub(crate) enum Message {
     ImportFiles,
     HealthCheck,
     LoudnessScan,
+    AutoSyncToggled(bool),
+    AutoSyncIntervalInc,
+    AutoSyncIntervalDec,
+    WatchFolderAdd,
+    WatchFolderRemove(usize),
     // Scheduler
     SchedulerMasterToggled(bool),
     SchedulerToggleEvent(usize),

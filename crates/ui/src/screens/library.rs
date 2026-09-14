@@ -11,7 +11,7 @@ use iced::{
 use crabcore::library::TrackKind;
 
 use crate::app::{App, Message};
-use crate::widgets::{fmt_dur, kind_label, track_label};
+use crate::widgets::{fmt_dur, kind_label, stepper, track_label};
 
 pub(crate) fn panel(state: &App, tools: bool) -> Element<'_, Message> {
     let shown = state.lib_tracks.len();
@@ -159,16 +159,42 @@ pub(crate) fn panel(state: &App, tools: bool) -> Element<'_, Message> {
         }
     }
 
-    column![
-        header,
-        search,
-        filters,
-        text(&state.lib_status).size(11),
-        scrollable(list).height(Length::Fill),
-    ]
-    .spacing(6)
-    .padding(8)
-    .into()
+    // Auto-sync (Library screen only): watch folders + timer. New files
+    // queue through the normal import pump with progress; nothing here
+    // ever deletes anything.
+    let mut body = column![header, search, filters];
+    if tools {
+        let sync_row = row![
+            checkbox(state.settings.auto_sync_enabled)
+                .label("Auto-sync")
+                .on_toggle(Message::AutoSyncToggled),
+            stepper(
+                format!("Every {} min", state.settings.auto_sync_interval_mins),
+                Message::AutoSyncIntervalDec,
+                Message::AutoSyncIntervalInc,
+            ),
+            button(text("Watch folder").size(12)).on_press(Message::WatchFolderAdd),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+        body = body.push(sync_row);
+        for (i, folder) in state.settings.watch_folders.iter().enumerate() {
+            body = body.push(
+                row![
+                    text(folder.to_string_lossy()).size(11),
+                    iced::widget::space::horizontal(),
+                    button(text("Remove").size(11)).on_press(Message::WatchFolderRemove(i)),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+    }
+
+    body = body.push(text(&state.lib_status).size(11));
+    body = body.push(scrollable(list).height(Length::Fill));
+
+    body.spacing(6).padding(8).into()
 }
 
 pub(crate) fn page(state: &App) -> Element<'_, Message> {

@@ -22,6 +22,9 @@
   "limiter_ceiling": 0.99,
   "loudness_norm": true,
   "loudness_target_lufs": -9.0,
+  "watch_folders": [],
+  "auto_sync_enabled": false,
+  "auto_sync_interval_mins": 60,
   "stream": {
     "enabled": false,
     "host": "127.0.0.1",

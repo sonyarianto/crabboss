@@ -135,6 +135,116 @@ pub(crate) fn loudness_scan(state: &mut App) {
     let _ = target;
 }
 
+pub(crate) fn autosync_toggled(state: &mut App, on: bool) {
+    state.settings.auto_sync_enabled = on;
+    state.save_settings();
+    if on {
+        // Fire promptly on the next tick when folders are watched.
+        state.last_auto_sync = None;
+        state.lib_status = if state.settings.watch_folders.is_empty() {
+            "Auto-sync on: add a watch folder first".into()
+        } else {
+            format!(
+                "Auto-sync on: every {} min",
+                state.settings.auto_sync_interval_mins
+            )
+        };
+    } else {
+        state.lib_status = "Auto-sync off".into();
+    }
+}
+
+pub(crate) fn autosync_interval_step(state: &mut App, up: bool) {
+    const STEP_MINS: u32 = 15;
+    let cur = state.settings.auto_sync_interval_mins;
+    let next = if up {
+        cur.saturating_add(STEP_MINS)
+    } else {
+        cur.saturating_sub(STEP_MINS)
+    };
+    state.settings.auto_sync_interval_mins = next.clamp(
+        crabcore::settings::AUTO_SYNC_MIN_MINUTES,
+        crabcore::settings::AUTO_SYNC_MAX_MINUTES,
+    );
+    state.save_settings();
+    state.lib_status = format!(
+        "Auto-sync every {} min",
+        state.settings.auto_sync_interval_mins
+    );
+}
+
+pub(crate) fn watch_folder_add(state: &mut App) {
+    let Some(folder) = rfd::FileDialog::new()
+        .set_title("Watch folder for new audio")
+        .pick_folder()
+    else {
+        return;
+    };
+    if state.settings.watch_folders.iter().any(|f| f == &folder) {
+        state.lib_status = "Folder already watched".into();
+        return;
+    }
+    state.settings.watch_folders.push(folder);
+    // Reuse the load-time cleanup (dedupe/order), no filesystem checks.
+    state.settings = std::mem::take(&mut state.settings).sanitized();
+    state.save_settings();
+    let n = state.settings.watch_folders.len();
+    state.lib_status = format!("Watching {} folder{}", n, if n == 1 { "" } else { "s" });
+}
+
+pub(crate) fn watch_folder_remove(state: &mut App, i: usize) {
+    if i < state.settings.watch_folders.len() {
+        state.settings.watch_folders.remove(i);
+        state.save_settings();
+    }
+    let n = state.settings.watch_folders.len();
+    state.lib_status = if n == 0 {
+        "No watch folders".into()
+    } else {
+        format!("Watching {} folder{}", n, if n == 1 { "" } else { "s" })
+    };
+}
+
+/// Timer fire (called from `on_tick` after the pumps): start one
+/// background walk when due and idle. The walk never touches the
+/// database; results come back over `sync_rx` for [`App::pump_autosync`].
+pub(crate) fn maybe_autosync(state: &mut App) {
+    let elapsed = state.last_auto_sync.map(|t| t.elapsed().as_secs());
+    let busy = state.import_active || state.scanning || state.syncing;
+    let s = &state.settings;
+    if !crate::rules::autosync_due(
+        s.auto_sync_enabled,
+        !s.watch_folders.is_empty(),
+        busy,
+        elapsed,
+        u64::from(s.auto_sync_interval_mins) * 60,
+    ) {
+        return;
+    }
+    let folders = s.watch_folders.clone();
+    let (tx, rx) = mpsc::channel();
+    state.sync_rx = Some(rx);
+    state.syncing = true;
+    state.last_auto_sync = Some(std::time::Instant::now());
+    tracing::info!("Auto-sync pass started ({} folders)", folders.len());
+    if std::thread::Builder::new()
+        .name("folder-sync".into())
+        .spawn(move || {
+            let (scanned, paths) = crabcore::library::collect_audio_files(&folders);
+            let _ = tx.send(crate::widgets::SyncFound {
+                folders: scanned,
+                paths,
+            });
+        })
+        .is_err()
+    {
+        tracing::error!("Auto-sync: failed to spawn worker thread");
+        state.syncing = false;
+        state.sync_rx = None;
+        state.lib_status = "Auto-sync failed to start".into();
+    }
+}
+
 impl App {
     pub(crate) fn refresh_library(&mut self) {
         // Live-state screen: on a read failure keep the last-known list
@@ -351,5 +461,70 @@ impl App {
             }
         }
         self.lib_status = format!("Importing {done}/{}...", self.import_total);
+    }
+
+    // -- Auto-sync reap: file a finished walk into the import queue --------
+    pub(crate) fn pump_autosync(&mut self) {
+        if !self.syncing {
+            return;
+        }
+        let msg = match self.sync_rx.as_mut() {
+            Some(rx) => match rx.try_recv() {
+                Ok(m) => m,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.syncing = false;
+                    self.sync_rx = None;
+                    return;
+                }
+            },
+            None => return,
+        };
+        self.syncing = false;
+        self.sync_rx = None;
+        // Known paths = library + anything already queued, so the counts
+        // stay honest (`add_track` itself is INSERT OR IGNORE and would
+        // otherwise report re-queued files as fresh imports).
+        let mut known: std::collections::HashSet<String> = self
+            .library
+            .get_all_tracks()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t.file_path)
+            .collect();
+        known.extend(
+            self.import_pending
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned()),
+        );
+        let mut fresh = Vec::new();
+        for p in &msg.paths {
+            if known.insert(p.to_string_lossy().into_owned()) {
+                fresh.push(p.clone());
+            }
+        }
+        if fresh.is_empty() {
+            self.lib_status = format!("Auto-sync: no new files ({} checked)", msg.paths.len());
+            tracing::info!("Auto-sync pass: {} checked, nothing new", msg.paths.len());
+            return;
+        }
+        let n = fresh.len();
+        self.import_pending.extend(fresh);
+        if !self.import_active {
+            self.import_active = true;
+            self.import_total = n;
+            self.import_added = 0;
+            self.import_skipped = 0;
+        } else {
+            self.import_total += n;
+        }
+        self.lib_status = format!(
+            "Auto-sync found {n} new file{}...",
+            if n == 1 { "" } else { "s" }
+        );
+        tracing::info!(
+            "Auto-sync pass: {n} new files queued ({} folders)",
+            msg.folders
+        );
     }
 }
