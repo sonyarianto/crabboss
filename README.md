@@ -55,7 +55,8 @@ crabboss/
 │   │       ├── stream/  # Icecast source client
 │   │       ├── report.rs # Play-log reports
 │   │       ├── settings.rs # Persisted prefs (incl. station name)
-│   │       └── license.rs # Offline license keys
+│   │       ├── license.rs # Offline license keys
+│   │       └── examples/ # Vendor key generator (`genkey`)
 │   └── ui/             # crabui — Iced desktop application
 │       └── src/main.rs   # Elm app: 8 screens + tick subscriptions
 └── README.md

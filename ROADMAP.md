@@ -49,7 +49,7 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
 
 - [x] Fix `Player::stop()` sink recreation bug
 - [x] `CpalEngine` MVP (play/pause/volume parity) — rubato resample TODO
-- [x] Router: Home / Playout / Library / Scheduler / Cart Wall / Reports / Ads / Settings screens + sidebar nav + on-air footer
+- [x] Router: Home / Playout (stacked broadcast strip) / Library / Scheduler / Cart Wall / Reports / Ads / Settings screens + sidebar nav + on-air footer
 - [x] License key activation (offline, `CB-XXXX-XXXX-XXXX`)
 - [x] Library: `scan_directory()` via `walkdir`, live list + search model, aligned Kind/Title/Artist/Dur/Gain columns, `rfd` import dialog, tap-to-play
 - [x] Playlist store wired (`PlaylistManager::open`, Home counts) + unit tests
@@ -98,7 +98,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Stream archive | Scheduled output recording | — | — |
 | License | Offline key, holder, tier | MVP done: checksum keys + vendor `genkey`, status labels (checksum → ed25519 TODO). NOT enforced yet: `features_enabled()` unwired, holder hardcoded — enforcement, per-station names, and expiry gating parked until the business model is decided | 🟡 |
 | File import UX | File dialog | Native `rfd` multi-select import with per-tick progress + report-export dialog | ✅ |
-| Quality gates | — | 122 tests green (library, playlist, scheduler, cart, mixer, license, stream, audio engine, settings); `cargo fmt` + `clippy -D warnings` in CI | ✅ |
+| Quality gates | — | 125 tests green (library, playlist, scheduler, cart, mixer, license, stream, audio engine incl. lock-poisoning, settings); FK cascades proven; `cargo fmt` + `clippy -D warnings` in CI | ✅ |
 
 Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardware, see §2).
 
@@ -123,6 +123,11 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       announces + `Buffering`); live handoffs keep the old deck sounding
       until the new deck lands as a crossfade, superseded/stopped loads are
       discarded, pause-mid-load sticks for an explicit resume
+- [x] Panic-proof audio callback: every lock the realtime thread takes
+      recovers from poisoning (`into_inner`) instead of killing the output
+      stream; decode never runs there by construction (loader thread only).
+      Poison survival is unit-tested; off-callback locks stay fail-fast
+      on purpose (a UI panic is process death anyway)
 - [x] Monitor-independent volume: the local knob dims speakers only; the
       program bus + stream tap stay at full level (monitor the delayed web
       stream at zero local volume without doubling or dimming the broadcast)
@@ -198,8 +203,9 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       steppers, live status (🎙 Live/⚠ error) + level meter
 
 ### 1.7 Reliability
-- [x] Silence detector: `SilenceMonitor` meters the cpal mix bus (−60 dBFS floor,
-      10 s default threshold); the 200 ms UI tick auto-recovers dead air
+- [x] Silence detector: `SilenceMonitor` meters the program bus pre-volume
+      (−60 dBFS floor, 10 s default threshold — a muted monitor never
+      alarms); the 200 ms UI tick auto-recovers dead air
       with a filler music track (rate-limited 1/min).
 - [x] Background library health scan: `missing_files()` + startup scan, on-demand
       `✓ Health` button in the Library header, `!` prefixes on missing rows
@@ -222,7 +228,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] `rfd` native file dialog for import (+ report export)
 
 ### 1.10 Quality gates
-- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — 122 tests green: kind classification + repair, loudness store/count, migrations, generator rules (incl. cross-pick `RuleHistory` + forecast), manager CRUD, audio engine (loader generations, tap sharing, prefetch guard, handshake matrix), settings (incl. example-file drift guard)
+- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — 125 tests green: kind classification + repair, loudness store/count, migrations, generator rules (incl. cross-pick `RuleHistory` + forecast), manager CRUD, audio engine (loader generations, tap sharing, prefetch guard, handshake matrix, lock-poison survival), remove-track FK cascade across managers, settings (incl. example-file drift guard)
 - [x] `cargo fmt` + `clippy` in CI (`-D warnings`, zero warnings) + `ci.yml` (fmt/clippy/test on push+PR)
 
 ## 2. Beyond Parity — Where CrabBoss Wins
