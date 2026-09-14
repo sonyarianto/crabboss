@@ -38,6 +38,9 @@ pub struct PlaylistManager {
 impl PlaylistManager {
     /// Create a new playlist manager from an existing connection.
     pub fn new(conn: Connection) -> Self {
+        // Keep FK enforcement explicit per connection (see Library::open).
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("Failed to enable foreign keys");
         let mgr = Self {
             conn: Rc::new(RefCell::new(conn)),
         };
@@ -281,5 +284,51 @@ mod tests {
         assert_eq!(m.get_with_items(&p.id).unwrap().unwrap().items.len(), 1);
         m.delete(&p.id).unwrap();
         assert!(m.list_all().unwrap().is_empty());
+    }
+
+    /// Deleting a library track must cascade across manager connections
+    /// sharing one file (playlist items, tags, play log) — never orphan.
+    #[test]
+    fn remove_track_cascades_across_managers() {
+        let dir = std::env::temp_dir().join(format!("crabboss-cascade-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("crabboss.db");
+        let lib = crate::library::Library::open(&db).unwrap();
+        let pm = PlaylistManager::open(&db).unwrap();
+        lib.conn()
+            .execute(
+                "INSERT INTO tracks (id, file_path, file_name, added_at)
+                 VALUES ('t1', '/m/a.mp3', 'a.mp3', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        lib.conn()
+            .execute(
+                "INSERT INTO tags (track_id, tag) VALUES ('t1', 'morning')",
+                [],
+            )
+            .unwrap();
+        lib.record_play("t1", Some(200.0)).unwrap();
+        let pl = pm.create("Mix", None).unwrap();
+        pm.add_track(&pl.id, "t1", false, false).unwrap();
+        let count = |table: &str| -> i64 {
+            lib.conn()
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE track_id = 't1'"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(count("playlist_items"), 1);
+        assert_eq!(count("tags"), 1);
+        assert_eq!(count("play_log"), 1);
+        lib.remove_track("t1").unwrap();
+        assert_eq!(count("playlist_items"), 0);
+        assert_eq!(count("tags"), 0);
+        assert_eq!(count("play_log"), 0);
+        // The playlist itself survives, just emptied.
+        assert!(pm.get_with_items(&pl.id).unwrap().unwrap().items.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

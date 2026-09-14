@@ -80,6 +80,10 @@ pub struct AdsManager {
 
 impl AdsManager {
     pub fn new(conn: Connection) -> Self {
+        // Same FK pragma as the other managers (harmless here — this
+        // table has no FKs today — but keeps every connection uniform).
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("Failed to enable foreign keys");
         let mgr = Self {
             conn: Rc::new(RefCell::new(conn)),
         };

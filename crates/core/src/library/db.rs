@@ -189,6 +189,11 @@ impl Library {
     /// Open or create a library database at the given path.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // The schema declares ON DELETE CASCADE (playlist items, tags, play
+        // log). The bundled SQLite enforces FKs by default, but state it
+        // explicitly so `remove_track` can never silently orphan rows no
+        // matter which SQLite build this links against.
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         let lib = Self { conn };
         lib.init_tables()?;
         Ok(lib)

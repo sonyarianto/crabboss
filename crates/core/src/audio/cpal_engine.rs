@@ -78,6 +78,32 @@ fn store_volume_bits(v: &AtomicU32, f: f32) {
     v.store(f.to_bits(), Ordering::Relaxed);
 }
 
+/// Lock policy, read once: the cpal callback below must NEVER panic —
+/// a panic there kills the output stream, the worst failure mode for
+/// unattended playout. So every lock the callback takes recovers from
+/// poisoning (`into_inner`: the guarded DSP state itself is still sound;
+/// only a dead holder is gone). Callers on other threads keep plain
+/// `.lock().unwrap()` on purpose: a UI-thread panic is already process
+/// death, and fail-fast keeps logic bugs loud in logs and tests instead
+/// of hiding them behind silent recovery.
+fn callback_lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    // No logging here: poison is sticky, so this would spam-allocate on
+    // the realtime thread every callback. The originating panic (another
+    // thread) is already logged by the runtime.
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Non-blocking twin of [`callback_lock`] for locks the callback only
+/// peeks at: contended (`WouldBlock`) still skips one buffer, but a
+/// poisoned mutex recovers instead of degrading that tap/meter forever.
+fn callback_try<T>(m: &Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
+    match m.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
 /// Decoded track: stereo-interleaved f32 at device rate.
 struct PlaybackCursor {
     samples: Vec<f32>,
@@ -808,13 +834,13 @@ impl CpalEngine {
                 // Lock-free transport read; writers sync the mirror while
                 // holding `state`, so the callback never blocks here.
                 let playing = state_atomic.load(Ordering::Relaxed) == STATE_PLAYING;
-                let mut mx = mixer.lock().unwrap();
-                let mut xf = xfade.lock().unwrap();
-                let mut sil = silence.lock().unwrap();
+                let mut mx = callback_lock(&mixer);
+                let mut xf = callback_lock(&xfade);
+                let mut sil = callback_lock(&silence);
                 // Program-bus tap (streaming): cloned once per callback,
                 // without blocking — a concurrent stream start/stop costs
                 // one buffer of tap, never a dropout.
-                let tap = stream_tap.try_lock().ok().and_then(|g| g.clone());
+                let tap = callback_try(&stream_tap).and_then(|g| g.clone());
                 let mut tap_buf = [0.0f32; 8192];
                 let mut tap_n = 0usize;
                 // Mic drain: locked once per callback, popped per frame.
@@ -822,11 +848,11 @@ impl CpalEngine {
                 // bound the buffered latency — discard the oldest down
                 // to 1/4 ring when more than 1/2 ring is buffered.
                 let mic_on = mic_live.load(Ordering::Relaxed);
-                if let Ok(cfg) = mic_config.try_lock() {
+                if let Some(cfg) = callback_try(&mic_config) {
                     last_mic_level = cfg.level;
                 }
                 let mic_level = last_mic_level;
-                let mut mic_guard = mic_consumer.try_lock().ok();
+                let mut mic_guard = callback_try(&mic_consumer);
                 if mic_on {
                     if let Some(con) = mic_guard.as_mut().and_then(|g| g.as_mut()) {
                         let buffered = con.slots();
@@ -906,7 +932,7 @@ impl CpalEngine {
                 }
                 // Auto-stop at EOF (once per track — a brief lock is fine).
                 if playing && xf.is_done() {
-                    *state.lock().unwrap() = PlayerState::Stopped;
+                    *callback_lock(&state) = PlayerState::Stopped;
                     state_atomic.store(STATE_STOPPED, Ordering::SeqCst);
                 }
             }
@@ -1566,6 +1592,28 @@ mod tests {
         assert!((load_volume_bits(&v) - 1.0).abs() < 1e-9);
         store_volume_bits(&v, 0.37);
         assert!((load_volume_bits(&v) - 0.37).abs() < 1e-6);
+    }
+
+    #[test]
+    fn callback_locks_survive_poisoning() {
+        // Simulate another thread dying while holding a shared lock, then
+        // prove the realtime helpers take the guarded state over instead
+        // of panicking (which would kill the output stream).
+        fn poison(m: &std::sync::Arc<std::sync::Mutex<u32>>) {
+            let m2 = std::sync::Arc::clone(m);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _guard = m2.lock().unwrap();
+                panic!("simulated holder death");
+            }));
+        }
+        let m = std::sync::Arc::new(std::sync::Mutex::new(7u32));
+        poison(&m);
+        assert!(m.is_poisoned());
+        assert_eq!(*callback_lock(&m), 7);
+        assert!(callback_try(&m).is_some());
+        // Uncontended path still try-locks normally.
+        let free = std::sync::Arc::new(std::sync::Mutex::new(1u32));
+        assert!(callback_try(&free).is_some());
     }
 
     #[test]
