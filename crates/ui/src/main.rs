@@ -2463,7 +2463,7 @@ fn view_player_panel(state: &App) -> Element<'_, Message> {
     .into()
 }
 
-fn view_library_panel(state: &App) -> Element<'_, Message> {
+fn view_library_panel(state: &App, tools: bool) -> Element<'_, Message> {
     let shown = state.lib_tracks.len();
     let count_label = if shown == state.lib_total {
         format!(
@@ -2474,14 +2474,19 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
     } else {
         format!("{shown} of {} tracks", state.lib_total)
     };
-    let header = row![
+    // Management tools live on the Library screen only; the Playout desk
+    // keeps a lean list (Library = ngurus, Playout = nge-live).
+    let mut header = row![
         text(format!("Library - {}", count_label)).size(14),
         iced::widget::space::horizontal(),
-        button(text("Health").size(12)).on_press(Message::HealthCheck),
-        button(text("Loudness").size(12)).on_press(Message::LoudnessScan),
-        button(text("Import").size(12)).on_press(Message::ImportFiles),
     ]
     .spacing(6);
+    if tools {
+        header = header
+            .push(button(text("Health").size(12)).on_press(Message::HealthCheck))
+            .push(button(text("Loudness").size(12)).on_press(Message::LoudnessScan))
+            .push(button(text("Import").size(12)).on_press(Message::ImportFiles));
+    }
 
     let search = text_input("Search tracks...", &state.lib_search)
         .on_input(Message::LibrarySearchChanged)
@@ -2603,7 +2608,7 @@ fn view_library_panel(state: &App) -> Element<'_, Message> {
 }
 
 fn view_library_page(state: &App) -> Element<'_, Message> {
-    view_library_panel(state)
+    view_library_panel(state, true)
 }
 
 fn view_playout(state: &App) -> Element<'_, Message> {
@@ -2611,7 +2616,7 @@ fn view_playout(state: &App) -> Element<'_, Message> {
         text("Playout").size(16),
         row![
             container(view_player_panel(state)).width(Length::Fixed(300.0)),
-            container(view_library_panel(state)).width(Length::Fill),
+            container(view_library_panel(state, false)).width(Length::Fill),
         ]
         .spacing(8),
     ]
