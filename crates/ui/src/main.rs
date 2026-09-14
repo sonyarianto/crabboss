@@ -441,6 +441,11 @@ struct App {
     /// it synchronously; the tick reconciler adopts anything else (promoted
     /// queued decks) with proper logging + labels.
     engine_track: Option<PathBuf>,
+    /// Who queued the currently pending deck ("Auto-DJ", "Scheduler").
+    /// Set on successful queue(), consumed by the reconcile adopter,
+    /// cleared by any direct play or stop. Lets promoted decks keep the
+    /// right `· via X` tag instead of guessing.
+    pending_source: Option<String>,
 
     // Library
     lib_tracks: Vec<Track>,
@@ -591,6 +596,7 @@ impl App {
                 self.cart_status = format!("Playing {}", cart.label);
                 self.engine_track = Some(path);
                 self.up_next.clear();
+                self.pending_source = None;
             }
             Err(e) => tracing::error!("Cart play failed: {}", e),
         }
@@ -676,6 +682,8 @@ impl App {
                 self.up_next.clear();
                 self.autodj_history.push_track(&pick, &self.autodj_cfg());
                 self.engine_track = Some(path);
+                // Direct play discards any pending queue (and its source).
+                self.pending_source = None;
             }
             Err(e) => tracing::error!("Auto-DJ play failed: {}", e),
         }
@@ -748,6 +756,7 @@ impl App {
                         Ok(()) => {
                             self.auto_continue = true;
                             self.now_title = format!("Queued after current: {}", event.target);
+                            self.pending_source = Some("Scheduler".into());
                         }
                         Err(e) => tracing::error!("Scheduler queue failed: {}", e),
                     }
@@ -776,6 +785,7 @@ impl App {
                             self.now_artist = "Scheduler".into();
                             self.engine_track = Some(path);
                             self.up_next.clear();
+                            self.pending_source = None;
                         }
                         Err(e) => tracing::error!("Scheduler play failed: {}", e),
                     }
@@ -1037,12 +1047,23 @@ impl App {
                     self.player.state() == PlayerState::Playing && self.player.load_inflight() == 0;
                 if settled {
                     if let Some(p) = &engine_path {
+                        // The pending source (recorded at queue time) follows
+                        // the deck onto the air, so the `· via X` tag stays
+                        // truthful; consumed here either way.
+                        let source = self
+                            .pending_source
+                            .take()
+                            .unwrap_or_else(|| "Auto-DJ".into());
                         if let Ok(Some(t)) = self.library.find_by_path(&p.to_string_lossy()) {
                             tracing::info!("Promoted queued deck: {}", t.file_path);
                             let _ = self.library.record_play(&t.id, t.duration_secs);
                             self.is_playing = true;
                             self.now_title = track_label(&t);
-                            self.now_artist = t.artist.clone().unwrap_or_default();
+                            self.now_artist = t
+                                .artist
+                                .clone()
+                                .filter(|a| !a.trim().is_empty())
+                                .unwrap_or(source);
                             self.up_next.clear();
                         }
                     }
@@ -1155,6 +1176,7 @@ impl App {
                                 self.now_artist = "Silence detector".into();
                                 self.engine_track = Some(path);
                                 self.up_next.clear();
+                                self.pending_source = None;
                             }
                             Err(e) => tracing::error!("Filler play failed: {}", e),
                         }
@@ -1207,6 +1229,7 @@ impl App {
                     // just leaves a harmless ghost in soft windows).
                     let cfg = self.autodj_cfg();
                     self.autodj_history.push_track(&pick, &cfg);
+                    self.pending_source = Some("Auto-DJ".into());
                 }
                 Err(e) => tracing::warn!("Auto-DJ queue failed: {}", e),
             }
@@ -1392,6 +1415,7 @@ fn boot() -> (App, Task<Message>) {
         was_playing: false,
         autodj_history: crabcore::playlist::RuleHistory::default(),
         engine_track: None,
+        pending_source: None,
         lib_tracks: Vec::new(),
         lib_total: 0,
         lib_search: String::new(),
@@ -1555,6 +1579,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             state.now_artist.clear();
             state.up_next.clear();
             state.engine_track = None;
+            state.pending_source = None;
         }
         Message::Next => {
             state.auto_continue = true;
@@ -1568,6 +1593,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         state.is_playing = true;
                         state.engine_track = Some(cur);
                         state.up_next.clear();
+                        state.pending_source = None;
                     }
                     Err(e) => tracing::error!("Prev failed: {}", e),
                 }
@@ -1617,6 +1643,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         // A manual play discards any prefetched deck, so its
                         // "Up next" label dies with it.
                         state.up_next.clear();
+                        state.pending_source = None;
                     }
                     Err(e) => {
                         tracing::error!("Failed to play: {}", e);
