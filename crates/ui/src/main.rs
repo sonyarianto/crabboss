@@ -2474,25 +2474,20 @@ fn view_player_panel(state: &App) -> Element<'_, Message> {
     } else {
         Message::Play
     };
+    // Horizontal broadcast strip: track line, then transport + progress +
+    // time, then Auto-DJ + up-next + monitor volume.
     column![
-        text(&state.now_title).size(14),
-        text(&state.now_artist).size(12),
-        text(format!("{} / {}", cur, tot)).size(12),
-        progress_bar(0.0..=1.0, frac),
+        text(join_title_artist(&state.now_title, &state.now_artist)).size(14),
         row![
             button(text("Prev").size(13)).on_press(Message::Prev),
             button(text(play_label).size(13)).on_press(play_msg),
             button(text("Stop").size(13)).on_press(Message::Stop),
             button(text("Next").size(13)).on_press(Message::Next),
+            progress_bar(0.0..=1.0, frac).length(Length::Fill),
+            text(format!("{} / {}", cur, tot)).size(12),
         ]
-        .spacing(8),
-        row![
-            text(format!("Vol {:.0}%", state.volume * 100.0)).size(12),
-            slider(0.0..=1.0, state.volume, Message::VolumeChanged)
-                .step(0.01_f32)
-                .width(Length::Fill),
-        ]
-        .spacing(8),
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
         row![
             checkbox(state.autodj)
                 .label("Auto-DJ")
@@ -2502,9 +2497,15 @@ fn view_player_panel(state: &App) -> Element<'_, Message> {
             } else {
                 format!("Up next: {}", state.up_next)
             })
-            .size(11),
+            .size(11)
+            .width(Length::Fill),
+            text(format!("Vol {:.0}%", state.volume * 100.0)).size(12),
+            slider(0.0..=1.0, state.volume, Message::VolumeChanged)
+                .step(0.01_f32)
+                .width(Length::Fixed(180.0)),
         ]
-        .spacing(8),
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
     ]
     .spacing(8)
     .padding(12)
@@ -2662,11 +2663,10 @@ fn view_library_page(state: &App) -> Element<'_, Message> {
 fn view_playout(state: &App) -> Element<'_, Message> {
     column![
         text("Playout").size(16),
-        row![
-            container(view_player_panel(state)).width(Length::Fixed(300.0)),
-            container(view_library_panel(state, false)).width(Length::Fill),
-        ]
-        .spacing(8),
+        view_player_panel(state),
+        container(view_library_panel(state, false))
+            .width(Length::Fill)
+            .height(Length::Fill),
     ]
     .spacing(8)
     .padding(8)
