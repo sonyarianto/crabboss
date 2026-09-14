@@ -62,10 +62,11 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
 - [x] Auto-DJ continuity: 200 ms tick with live progress, prefetch handoff
       (cpal, 8 s horizon), single-outstanding prefetch guard (in-flight
       decodes count as pending — no duplicate queue storms), `RuleHistory`
-      separation across picks + Coming-Up forecast list, promotion
-      reconcile (queued decks get logged + labeled with their source),
-      EOF restart, Next/Prev, cold start (Play / Auto-DJ toggle begin
-      the first pick), persisted ON/OFF + Up-next
+      separation across picks + Coming-Up forecast list, live jingle
+      insertion at the configured interval (shared slot logic with batch
+      rotations), promotion reconcile (queued decks get logged + labeled
+      with their source), EOF restart, Next/Prev, cold start (Play /
+      Auto-DJ toggle begin the first pick), persisted ON/OFF + Up-next
 - [x] Ad scheduler (dated blocks with intros/outros, chained breaks — see §1.3)
 - [x] Icecast/Shoutcast output (see §1.5)
 - [x] Mic/line-in input with ducking (see §1.6)
@@ -98,7 +99,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Stream archive | Scheduled output recording | — | — |
 | License | Offline key, holder, tier | MVP done: checksum keys + vendor `genkey`, status labels (checksum → ed25519 TODO). NOT enforced yet: `features_enabled()` unwired, holder hardcoded — enforcement, per-station names, and expiry gating parked until the business model is decided | 🟡 |
 | File import UX | File dialog | Native `rfd` multi-select import with per-tick progress + report-export dialog | ✅ |
-| Quality gates | — | 125 tests green (library, playlist, scheduler, cart, mixer, license, stream, audio engine incl. lock-poisoning, settings); FK cascades proven; `cargo fmt` + `clippy -D warnings` in CI | ✅ |
+| Quality gates | — | Full suite green across all areas (library, playlist, scheduler, cart, mixer, license, stream, audio engine incl. lock-poisoning, settings); FK cascades proven; `cargo fmt` + `clippy -D warnings` in CI | ✅ |
 
 Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardware, see §2).
 
@@ -141,7 +142,8 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] Scheduler `generate` builds a real rotation and persists it as a playlist
 - [x] One-at-a-time Auto-DJ primitives: `RuleHistory` threads no-repeat
       windows across picks (`generate_next`), `forecast_up_next` simulates
-      coming picks on cloned history for the Coming-Up display
+      coming picks on cloned history for the Coming-Up display, and the
+      jingle slot fires at interval via logic shared with batch rotations
 - [ ] Multi-playlist generation UI (several dayparts/rotations at once)
 
 ### 1.3 Ads, Scheduler & Cart depth
@@ -228,7 +230,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] `rfd` native file dialog for import (+ report export)
 
 ### 1.10 Quality gates
-- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — 125 tests green: kind classification + repair, loudness store/count, migrations, generator rules (incl. cross-pick `RuleHistory` + forecast), manager CRUD, audio engine (loader generations, tap sharing, prefetch guard, handshake matrix, lock-poison survival), remove-track FK cascade across managers, settings (incl. example-file drift guard)
+- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — full suite green, no exceptions: kind classification + repair, loudness store/count, migrations, generator rules (incl. cross-pick `RuleHistory` + forecast + live-jingle cadence parity), manager CRUD, audio engine (loader generations, tap sharing, prefetch guard, handshake matrix, lock-poison survival), remove-track FK cascade across managers, settings (incl. example-file drift guard). (Counts intentionally unlisted — they rot every PR; CI is the source of truth.)
 - [x] `cargo fmt` + `clippy` in CI (`-D warnings`, zero warnings) + `ci.yml` (fmt/clippy/test on push+PR)
 
 ## 2. Beyond Parity — Where CrabBoss Wins
