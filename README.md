@@ -1,8 +1,8 @@
 # 🦀 CrabBoss
 
-**Radio Automation Software** — built with Rust + Iced
+**Radio Automation Software**
 
-A professional radio station management application inspired by RadioBoss, featuring audio playback, library management, playlist automation, and streaming capabilities.
+A professional radio station management application featuring audio playback, library management, playlist automation, and streaming capabilities.
 
 ## Features
 
@@ -110,7 +110,3 @@ Thanks to symphonia and lofty, CrabBoss supports:
 ## License
 
 This project is licensed under the GNU General Public License v3.0 — see the LICENSE file for details.
-
----
-
-🦀 Built with Rust + Iced
