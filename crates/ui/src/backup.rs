@@ -5,14 +5,14 @@
 //! source of truth), so this module maps them to plain DTOs and applies
 //! restores through the existing manager APIs (`create`/`delete`/…).
 //!
-//! Policy is **best-effort with validation first** (P0.3a): every row is
-//! validated before anything is mutated, invalid rows are skipped with a
-//! reason in the status line, and valid rows are applied. One bad row
-//! never vetoes the whole restore. What this does NOT yet do is
-//! transactional all-or-nothing across the three lists (P0.3b): each
-//! list is still replaced wholesale, so an I/O failure mid-apply (after
-//! validation passed) can leave that list partial. That needs the shared
-//! transaction boundary from centralized SQLite bootstrap (P1.2).
+//! Policy is **best-effort with validation first, applied atomically**
+//! (P0.3a+b): every row is validated before anything is mutated, invalid
+//! rows are skipped with a reason in the status line, and the valid rows
+//! of all three lists swap in ONE SQLite transaction — commit together
+//! or roll back together. One bad row never vetoes the whole restore,
+//! and a mid-apply failure never leaves a half-old/half-new set.
+//! Documented seam: settings (a file write) and the lists (one DB
+//! transaction) are two commit boundaries; settings apply first.
 //!
 //! Restore applies settings live like `boot` does, except the audio
 //! output device: switching outputs means reopening the engine, which is
@@ -289,100 +289,89 @@ impl App {
             }
         }
 
-        // -- Scheduler (new ids; dedupe maps keyed by old ids go stale) -------
-        let total_s = backup.scheduler.len();
-        let ids: Vec<String> = self.sched_events.iter().map(|e| e.id.clone()).collect();
-        for id in &ids {
-            if let Err(e) = self.scheduler.delete(id) {
-                tracing::warn!("Restore scheduler clear failed: {e}");
-            }
-        }
-        let (mut ok_s, mut skip_s) = (0usize, 0usize);
-        for (i, e) in backup.scheduler.iter().enumerate() {
-            if is_flagged(&issues, "scheduler", i) {
-                skip_s += 1;
-                continue;
-            }
-            match self.scheduler.create(
-                &e.name,
-                &e.action_type,
-                &e.target,
-                &e.start_time,
-                &e.days,
-                e.expires_on.as_deref(),
-            ) {
-                Ok(ev) => {
-                    if !e.enabled {
-                        let _ = self.scheduler.set_enabled(&ev.id, false);
-                    }
-                    ok_s += 1;
+        // -- Lists: one atomic replace (P0.3b) --------------------------------
+        // Valid rows were selected above; swap all three lists in a single
+        // transaction (fresh ids, so the dedupe maps keyed by old ids go
+        // stale and are cleared below). Any failure rolls every list back
+        // to exactly what it was: the live set is either fully old or
+        // fully new, never half-and-half.
+        //
+        // Seam (documented): settings above and lists here are two commit
+        // boundaries — a file write cannot join the SQLite transaction.
+        // Settings apply first because a lists failure is then reported
+        // against known-good settings, never the reverse.
+        let unflagged = |section: &'static str, len: usize| -> Vec<usize> {
+            (0..len)
+                .filter(|i| !is_flagged(&issues, section, *i))
+                .collect()
+        };
+        let keep_s = unflagged("scheduler", backup.scheduler.len());
+        let keep_c = unflagged("carts", backup.carts.len());
+        let keep_a = unflagged("ads", backup.ads.len());
+        let (total_s, total_c, total_a) =
+            (backup.scheduler.len(), backup.carts.len(), backup.ads.len());
+        let (skip_s, skip_c, skip_a) = (
+            total_s - keep_s.len(),
+            total_c - keep_c.len(),
+            total_a - keep_a.len(),
+        );
+        let sched_rows: Vec<crabcore::db::SchedulerRow> = keep_s
+            .iter()
+            .map(|&i| {
+                let e = &backup.scheduler[i];
+                crabcore::db::SchedulerRow {
+                    name: e.name.clone(),
+                    action_type: e.action_type.clone(),
+                    target: e.target.clone(),
+                    start_time: e.start_time.clone(),
+                    days: e.days.clone(),
+                    expires_on: e.expires_on.clone(),
+                    enabled: e.enabled,
                 }
-                Err(err) => {
-                    tracing::warn!("Restore skipped scheduler '{}': {err}", e.name);
-                    skip_s += 1;
+            })
+            .collect();
+        let cart_rows: Vec<crabcore::db::CartRow> = keep_c
+            .iter()
+            .map(|&i| {
+                let c = &backup.carts[i];
+                crabcore::db::CartRow {
+                    label: c.label.clone(),
+                    file_path: c.file_path.clone(),
+                    position: c.position,
                 }
-            }
-        }
-
-        // -- Carts (pads addressed by position) --------------------------------
-        let total_c = backup.carts.len();
-        let ids: Vec<String> = self.cart_list.iter().map(|c| c.id.clone()).collect();
-        for id in &ids {
-            if let Err(e) = self.carts.delete(id) {
-                tracing::warn!("Restore carts clear failed: {e}");
-            }
-        }
-        let (mut ok_c, mut skip_c) = (0usize, 0usize);
-        for (i, c) in backup.carts.iter().enumerate() {
-            if is_flagged(&issues, "carts", i) {
-                skip_c += 1;
-                continue;
-            }
-            match self.carts.assign_at(c.position, &c.label, &c.file_path) {
-                Ok(()) => ok_c += 1,
-                Err(err) => {
-                    tracing::warn!("Restore skipped cart '{}': {err}", c.label);
-                    skip_c += 1;
+            })
+            .collect();
+        let ad_rows: Vec<crabcore::db::AdBlockRow> = keep_a
+            .iter()
+            .map(|&i| {
+                let a = &backup.ads[i];
+                crabcore::db::AdBlockRow {
+                    name: a.name.clone(),
+                    spot_path: a.spot_path.clone(),
+                    intro_path: a.intro_path.clone(),
+                    outro_path: a.outro_path.clone(),
+                    start_date: a.start_date.clone(),
+                    end_date: a.end_date.clone(),
+                    play_time: a.play_time.clone(),
+                    days: a.days.clone(),
+                    enabled: a.enabled,
                 }
+            })
+            .collect();
+        let (ok_s, ok_c, ok_a) = match crabcore::db::Database::replace_station_lists(
+            &self.db_path,
+            &sched_rows,
+            &cart_rows,
+            &ad_rows,
+        ) {
+            Ok(counts) => (counts.scheduler, counts.carts, counts.ads),
+            Err(e) => {
+                let msg =
+                    format!("Settings applied, but lists restore failed, nothing changed: {e}");
+                tracing::error!("{msg}");
+                return Err(msg);
             }
-        }
-
-        // -- Ads ---------------------------------------------------------------
-        let total_a = backup.ads.len();
-        let ids: Vec<String> = self.ad_blocks.iter().map(|b| b.id.clone()).collect();
-        for id in &ids {
-            if let Err(e) = self.ads.delete(id) {
-                tracing::warn!("Restore ads clear failed: {e}");
-            }
-        }
-        let (mut ok_a, mut skip_a) = (0usize, 0usize);
-        for (i, a) in backup.ads.iter().enumerate() {
-            if is_flagged(&issues, "ads", i) {
-                skip_a += 1;
-                continue;
-            }
-            match self.ads.create(
-                &a.name,
-                &a.spot_path,
-                a.intro_path.as_deref().unwrap_or(""),
-                a.outro_path.as_deref().unwrap_or(""),
-                &a.start_date,
-                &a.end_date,
-                &a.play_time,
-                &a.days,
-            ) {
-                Ok(block) => {
-                    if !a.enabled {
-                        let _ = self.ads.set_enabled(&block.id, false);
-                    }
-                    ok_a += 1;
-                }
-                Err(err) => {
-                    tracing::warn!("Restore skipped ad block '{}': {err}", a.name);
-                    skip_a += 1;
-                }
-            }
-        }
+        };
 
         self.fired.clear();
         self.fired_ads.clear();
@@ -560,6 +549,107 @@ mod tests {
         write_backup(&path, &future).unwrap();
         let err = read_backup(&path).expect_err("future version rejects");
         assert!(err.contains("unsupported backup version"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Drift guard: the validator must agree with the managers in both
+    /// directions — accepted rows apply cleanly, rejected rows fail (or,
+    /// for cart positions, write nothing). If a manager rule changes,
+    /// this test forces `validate_backup` to follow.
+    #[test]
+    fn validation_agrees_with_managers() {
+        use crabcore::ads::AdsManager;
+        use crabcore::cart::CartManager;
+        use crabcore::scheduler::SchedulerManager;
+        let dir = std::env::temp_dir().join("crabboss-backup-agree");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agree.db");
+        std::fs::remove_file(&path).ok();
+        crabcore::db::Database::initialize(&path).unwrap();
+        let sched = SchedulerManager::open(&path).unwrap();
+        let carts = CartManager::open(&path).unwrap();
+        let ads = AdsManager::open(&path).unwrap();
+
+        let good = good_backup();
+        assert!(validate_backup(&good).is_empty());
+        for e in &good.scheduler {
+            let ev = sched
+                .create(
+                    &e.name,
+                    &e.action_type,
+                    &e.target,
+                    &e.start_time,
+                    &e.days,
+                    e.expires_on.as_deref(),
+                )
+                .expect("validator-approved scheduler row must apply");
+            if !e.enabled {
+                sched.set_enabled(&ev.id, false).unwrap();
+            }
+        }
+        for c in &good.carts {
+            carts
+                .assign_at(c.position, &c.label, &c.file_path)
+                .expect("validator-approved cart must apply");
+        }
+        for a in &good.ads {
+            let b = ads
+                .create(
+                    &a.name,
+                    &a.spot_path,
+                    a.intro_path.as_deref().unwrap_or(""),
+                    a.outro_path.as_deref().unwrap_or(""),
+                    &a.start_date,
+                    &a.end_date,
+                    &a.play_time,
+                    &a.days,
+                )
+                .expect("validator-approved ad must apply");
+            if !a.enabled {
+                ads.set_enabled(&b.id, false).unwrap();
+            }
+        }
+        assert_eq!(sched.list_all().unwrap().len(), 1);
+        assert_eq!(carts.list_all().unwrap().len(), 1);
+        assert_eq!(ads.list_all().unwrap().len(), 1);
+
+        let mut bad = good_backup();
+        bad.scheduler[0].name = "  ".into();
+        bad.scheduler[0].start_time = "99:99".into();
+        bad.carts[0].position = 42;
+        bad.ads[0].spot_path = String::new();
+        bad.ads[0].start_date = "yesterday".into();
+        assert!(!validate_backup(&bad).is_empty());
+        let e = &bad.scheduler[0];
+        assert!(sched
+            .create(
+                &e.name,
+                &e.action_type,
+                &e.target,
+                &e.start_time,
+                &e.days,
+                e.expires_on.as_deref()
+            )
+            .is_err());
+        // `assign_at` never errors on positions by contract — agreement
+        // here means "writes nothing", which is why the validator must
+        // keep flagging out-of-range pads (the apply path skips them).
+        let n_before = carts.list_all().unwrap().len();
+        carts.assign_at(bad.carts[0].position, "x", "y").unwrap();
+        assert_eq!(carts.list_all().unwrap().len(), n_before);
+        let a = &bad.ads[0];
+        assert!(ads
+            .create(
+                &a.name,
+                &a.spot_path,
+                a.intro_path.as_deref().unwrap_or(""),
+                a.outro_path.as_deref().unwrap_or(""),
+                &a.start_date,
+                &a.end_date,
+                &a.play_time,
+                &a.days
+            )
+            .is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

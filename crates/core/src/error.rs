@@ -40,6 +40,9 @@ pub enum CrabError {
 
     #[error("Database schema v{found} is newer than supported v{supported}")]
     SchemaTooNew { found: u32, supported: u32 },
+
+    #[error("Station lists replace failed: {0}")]
+    BulkReplace(String),
 }
 
 pub type Result<T> = std::result::Result<T, CrabError>;

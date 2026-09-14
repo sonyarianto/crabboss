@@ -234,6 +234,9 @@ pub(crate) struct App {
     pub(crate) settings_path: PathBuf,
     /// Stable data root (settings + database live under it).
     pub(crate) data_dir: PathBuf,
+    /// Database file, for whole-list operations (e.g. backup restore)
+    /// that need a single transaction across managers.
+    pub(crate) db_path: PathBuf,
     pub(crate) license: crabcore::license::LicenseStore,
 
     pub(crate) screen: Screen,
@@ -1081,6 +1084,7 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         settings,
         settings_path,
         data_dir,
+        db_path,
         license,
         screen: Screen::Home,
         settings_section: SettingsSection::default(),

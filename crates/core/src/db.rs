@@ -62,7 +62,148 @@ const MIGRATIONS: &[Migration] = &[
     },
 ];
 
+/// One scheduler row for wholesale replacement. No id: fresh ids are
+/// assigned, so pre-existing fire-dedupe keys go stale (callers clear
+/// them, like the restore path does).
+#[derive(Debug, Clone)]
+pub struct SchedulerRow {
+    pub name: String,
+    pub action_type: String,
+    pub target: String,
+    pub start_time: String,
+    pub days: String,
+    pub expires_on: Option<String>,
+    pub enabled: bool,
+}
+
+/// One cart pad for wholesale replacement.
+#[derive(Debug, Clone)]
+pub struct CartRow {
+    pub label: String,
+    pub file_path: String,
+    pub position: i32,
+}
+
+/// One ad block for wholesale replacement. Dates are `YYYY-MM-DD`.
+#[derive(Debug, Clone)]
+pub struct AdBlockRow {
+    pub name: String,
+    pub spot_path: String,
+    pub intro_path: Option<String>,
+    pub outro_path: Option<String>,
+    pub start_date: String,
+    pub end_date: String,
+    pub play_time: String,
+    pub days: String,
+    pub enabled: bool,
+}
+
+/// How many rows each list has after [`Database::replace_station_lists`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplaceCounts {
+    pub scheduler: usize,
+    pub carts: usize,
+    pub ads: usize,
+}
+
 impl Database {
+    /// Atomically replace the three automation lists in ONE transaction:
+    /// delete-all + insert-all commit together or roll back together. A
+    /// failure anywhere leaves every list exactly as it was.
+    ///
+    /// Rows must be pre-validated (the UI `validate_backup` mirrors the
+    /// manager rules); out-of-range cart positions fail the whole
+    /// replace closed rather than writing an illegal pad. Duplicate cart
+    /// positions resolve last-wins, mirroring `assign_at`.
+    ///
+    /// Insert shapes mirror the manager `create()`s (fresh uuids,
+    /// `created_at = now`, empty intro/outro stored as `''` like
+    /// `AdsManager::create` does).
+    pub fn replace_station_lists(
+        path: &Path,
+        scheduler: &[SchedulerRow],
+        carts: &[CartRow],
+        ads: &[AdBlockRow],
+    ) -> Result<ReplaceCounts> {
+        let mut conn = Self::open_connection(path)?;
+        let tx = conn.transaction()?;
+        let fail = |what: &str, e: rusqlite::Error| CrabError::BulkReplace(format!("{what}: {e}"));
+        tx.execute_batch("DELETE FROM scheduled_events; DELETE FROM carts; DELETE FROM ad_blocks;")
+            .map_err(|e| fail("clear lists", e))?;
+        for s in scheduler {
+            let id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO scheduled_events
+                 (id, name, action_type, target, start_time, days, enabled, created_at, expires_on)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    id,
+                    s.name,
+                    s.action_type,
+                    s.target,
+                    s.start_time,
+                    s.days,
+                    s.enabled as i32,
+                    chrono::Utc::now().to_rfc3339(),
+                    s.expires_on,
+                ],
+            )
+            .map_err(|e| fail(&format!("insert scheduler '{}'", s.name), e))?;
+        }
+        for c in carts {
+            if !(0..crate::cart::WALL_SIZE as i32).contains(&c.position) {
+                return Err(CrabError::BulkReplace(format!(
+                    "bad cart position {}",
+                    c.position
+                )));
+            }
+            // Last-wins per pad, like `assign_at`.
+            tx.execute("DELETE FROM carts WHERE position = ?1", [c.position])
+                .map_err(|e| fail(&format!("clear cart pad {}", c.position), e))?;
+            let id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO carts (id, label, file_path, position, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    id,
+                    c.label,
+                    c.file_path,
+                    c.position,
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )
+            .map_err(|e| fail(&format!("insert cart '{}'", c.label), e))?;
+        }
+        for a in ads {
+            let id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO ad_blocks
+                 (id, name, spot_path, intro_path, outro_path,
+                  start_date, end_date, play_time, days, enabled)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    id,
+                    a.name,
+                    a.spot_path,
+                    a.intro_path.as_deref().unwrap_or(""),
+                    a.outro_path.as_deref().unwrap_or(""),
+                    a.start_date,
+                    a.end_date,
+                    a.play_time,
+                    a.days,
+                    a.enabled as i32,
+                ],
+            )
+            .map_err(|e| fail(&format!("insert ad block '{}'", a.name), e))?;
+        }
+        tx.commit()?;
+        Ok(ReplaceCounts {
+            scheduler: scheduler.len(),
+            carts: carts.len(),
+            ads: ads.len(),
+        })
+    }
+
     /// Open one uniformly configured connection. Does NOT migrate;
     /// call [`Database::initialize`] once at startup first.
     pub fn open_connection(path: &Path) -> Result<Connection> {
@@ -430,6 +571,173 @@ mod tests {
             .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
             .unwrap();
         assert_eq!(ms, BUSY_TIMEOUT.as_millis() as i64);
+        std::fs::remove_file(&path).ok();
+    }
+
+    fn sched_row(name: &str) -> SchedulerRow {
+        SchedulerRow {
+            name: name.into(),
+            action_type: "play".into(),
+            target: "x.mp3".into(),
+            start_time: "08:00".into(),
+            days: "Daily".into(),
+            expires_on: None,
+            enabled: true,
+        }
+    }
+
+    fn cart_row(label: &str, position: i32) -> CartRow {
+        CartRow {
+            label: label.into(),
+            file_path: "C:/a.mp3".into(),
+            position,
+        }
+    }
+
+    fn ad_row(name: &str) -> AdBlockRow {
+        AdBlockRow {
+            name: name.into(),
+            spot_path: "C:/s.mp3".into(),
+            intro_path: None,
+            outro_path: Some("C:/o.mp3".into()),
+            start_date: "2026-01-01".into(),
+            end_date: "2026-12-31".into(),
+            play_time: "09:00".into(),
+            days: "Daily".into(),
+            enabled: false,
+        }
+    }
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn replace_swaps_all_lists_together() {
+        let path = tmp_db("crabboss-db-replace.db");
+        Database::initialize(&path).unwrap();
+        let conn = Database::open_connection(&path).unwrap();
+        conn.execute(
+            "INSERT INTO scheduled_events
+             (id, name, action_type, target, start_time, days, enabled, created_at)
+             VALUES ('old','Old','play','o.mp3','07:00','Daily',1,'2026-01-01')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let counts = Database::replace_station_lists(
+            &path,
+            &[sched_row("New")],
+            &[cart_row("Pad", 3)],
+            &[ad_row("Break")],
+        )
+        .unwrap();
+        assert_eq!(
+            counts,
+            ReplaceCounts {
+                scheduler: 1,
+                carts: 1,
+                ads: 1
+            }
+        );
+        let conn = Database::open_connection(&path).unwrap();
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM scheduled_events")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(names, vec!["New".to_string()]);
+        let (label, pos): (String, i32) = conn
+            .query_row("SELECT label, position FROM carts", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((label.as_str(), pos), ("Pad", 3));
+        // Disabled flag and empty intro survive the round trip.
+        let (enabled, intro): (i32, String) = conn
+            .query_row("SELECT enabled, intro_path FROM ad_blocks", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((enabled, intro.as_str()), (0, ""));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn replace_failure_rolls_back_every_list() {
+        let path = tmp_db("crabboss-db-rollback.db");
+        Database::initialize(&path).unwrap();
+        let conn = Database::open_connection(&path).unwrap();
+        conn.execute(
+            "INSERT INTO scheduled_events
+             (id, name, action_type, target, start_time, days, enabled, created_at)
+             VALUES ('keep','Keep','play','k.mp3','07:00','Daily',1,'2026-01-01')",
+            [],
+        )
+        .unwrap();
+        // Sabotage one table: the multi-statement replace must abort and
+        // leave the other lists exactly as they were.
+        conn.execute_batch("DROP TABLE carts;").unwrap();
+        drop(conn);
+        let err = Database::replace_station_lists(
+            &path,
+            &[sched_row("New")],
+            &[cart_row("Pad", 0)],
+            &[ad_row("Break")],
+        )
+        .expect_err("missing table must fail the replace");
+        assert!(matches!(err, CrabError::BulkReplace(_)), "{err:?}");
+        let conn = Database::open_connection(&path).unwrap();
+        assert_eq!(count(&conn, "scheduled_events"), 1);
+        let name: String = conn
+            .query_row("SELECT name FROM scheduled_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "Keep");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn replace_cart_positions_are_last_wins() {
+        let path = tmp_db("crabboss-db-lastwins.db");
+        Database::initialize(&path).unwrap();
+        Database::replace_station_lists(
+            &path,
+            &[],
+            &[cart_row("First", 0), cart_row("Second", 0)],
+            &[],
+        )
+        .unwrap();
+        let conn = Database::open_connection(&path).unwrap();
+        assert_eq!(count(&conn, "carts"), 1);
+        let label: String = conn
+            .query_row("SELECT label FROM carts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(label, "Second");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn replace_rejects_bad_position_without_touching_anything() {
+        let path = tmp_db("crabboss-db-badpos.db");
+        Database::initialize(&path).unwrap();
+        let conn = Database::open_connection(&path).unwrap();
+        conn.execute(
+            "INSERT INTO scheduled_events
+             (id, name, action_type, target, start_time, days, enabled, created_at)
+             VALUES ('keep','Keep','play','k.mp3','07:00','Daily',1,'2026-01-01')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let err = Database::replace_station_lists(&path, &[], &[cart_row("Bad", 99)], &[])
+            .expect_err("out-of-range pad must fail closed");
+        assert!(err.to_string().contains("bad cart position 99"));
+        let conn = Database::open_connection(&path).unwrap();
+        assert_eq!(count(&conn, "scheduled_events"), 1);
+        assert_eq!(count(&conn, "carts"), 0);
         std::fs::remove_file(&path).ok();
     }
 
