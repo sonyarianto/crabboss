@@ -484,8 +484,11 @@ pub struct CpalEngine {
     /// reads this; every writer syncs it while holding `state`.
     state_atomic: Arc<AtomicU8>,
     current_track: Arc<Mutex<Option<TrackInfo>>>,
-    /// Monitor volume as f32 bits: lock-free read on the audio callback,
-    /// written by `set_volume` (which still takes `mixer` for the DSP gain).
+    /// Monitor volume as f32 bits: lock-free read on the audio callback.
+    /// Deliberately monitor-ONLY: the stream tap sits pre-volume, so the
+    /// broadcast feed keeps full program level while the operator dims (or
+    /// zeroes) local speakers — e.g. to monitor the delayed web stream
+    /// without doubling.
     volume: Arc<AtomicU32>,
     mixer: Arc<Mutex<Mixer>>,
     /// Loudness normalization: enabled flag + per-path gain lookup (dB).
@@ -1149,9 +1152,9 @@ impl Engine for CpalEngine {
     }
 
     fn set_volume(&self, vol: f32) {
-        let clamped = vol.clamp(0.0, 1.5);
-        store_volume_bits(&self.volume, clamped);
-        self.mixer.lock().unwrap().set_gain(clamped);
+        // Monitor-only by design (see `volume`): never touches the mixer,
+        // so the program bus + stream tap stay at full level.
+        store_volume_bits(&self.volume, vol.clamp(0.0, 1.5));
     }
 
     fn volume(&self) -> f32 {
