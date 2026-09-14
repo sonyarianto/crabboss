@@ -882,8 +882,12 @@ impl CpalEngine {
                         tap_buf[tap_n + 1] = r;
                         tap_n += 2;
                     }
-                    let (l, r) = (l * vol, r * vol);
+                    // Dead-air alarm watches the PROGRAM bus (pre-volume):
+                    // a muted monitor is intentional silence, not dead air
+                    // (same rule as paused). Measuring post-volume would
+                    // false-alarm whenever the operator dims the speakers.
                     sil.push_frame(playing, l, r);
+                    let (l, r) = (l * vol, r * vol);
                     if channels == 1 {
                         frame[0] = (l + r) * 0.5;
                     } else {
