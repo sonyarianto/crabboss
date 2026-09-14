@@ -392,13 +392,41 @@ pub(crate) fn restore_now(state: &mut App) {
     let Some(path) = path else {
         return;
     };
-    match crate::backup::read_backup(&path).and_then(|b| state.apply_backup(b)) {
-        Ok(status) => {
-            tracing::info!("Restore from {}: {status}", path.display());
-            state.backup_status = status;
-        }
+    // Parse the pick first so a garbage file fails without littering a
+    // safety snapshot; the snapshot then runs before any mutation and
+    // aborts the restore when it fails (fail closed: no safety net, no
+    // swap — the transaction alone can't undo a wrong-file pick).
+    let backup = match crate::backup::read_backup(&path) {
+        Ok(b) => b,
         Err(e) => {
             tracing::error!("Restore failed: {e}");
+            state.backup_status = format!("Restore failed: {e}");
+            return;
+        }
+    };
+    let safety =
+        match crate::backup::write_pre_restore_safety(&state.data_dir, &state.build_backup()) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("Restore aborted: {e}");
+                state.backup_status = format!("Restore aborted: {e}");
+                return;
+            }
+        };
+    match state.apply_backup(backup) {
+        Ok(status) => {
+            tracing::info!(
+                "Restore from {}: {status} (pre-restore backup: {})",
+                path.display(),
+                safety.display()
+            );
+            state.backup_status = format!("{status} (pre-restore backup: {})", safety.display());
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Restore failed: {e} (previous state kept, safety copy at {})",
+                safety.display()
+            );
             state.backup_status = format!("Restore failed: {e}");
         }
     }

@@ -17,8 +17,15 @@
 //! Restore applies settings live like `boot` does, except the audio
 //! output device: switching outputs means reopening the engine, which is
 //! a restart-class operation. The status line says so when it differs.
+//!
+//! Wrong-file safety net (P1): `restore_now` snapshots the *current*
+//! state via `write_pre_restore_safety` before swapping anything, so a
+//! bad pick is undone with a second Restore from
+//! `<data-dir>/backups/pre-restore-<timestamp>.json`. The transaction
+//! below guarantees the new state is consistent; the snapshot preserves
+//! the old one.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +95,46 @@ pub(crate) fn read_backup(path: &Path) -> Result<Backup, String> {
         ));
     }
     Ok(backup)
+}
+
+/// Clock stamp for safety-backup filenames (same shape as the manual
+/// `backup_now` default name, so operators recognize it).
+pub(crate) fn pre_restore_timestamp() -> String {
+    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+}
+
+/// Fixed safety-backup location for a data root + timestamp. Pure (no
+/// I/O): tests assert the layout without touching disk.
+pub(crate) fn safety_backup_path(root: &Path, timestamp: &str) -> PathBuf {
+    root.join("backups")
+        .join(format!("pre-restore-{timestamp}.json"))
+}
+
+/// Snapshot the *current* station state to
+/// `<root>/backups/pre-restore-<timestamp>.json` before a restore swaps
+/// it out. Uses the same atomic `write_backup` as manual backups. A
+/// same-second repeat gets a `-N` suffix so rapid retries never
+/// overwrite each other's undo path. Fails closed: the caller must
+/// abort the restore when this errors (no safety net, no swap).
+pub(crate) fn write_pre_restore_safety(root: &Path, backup: &Backup) -> Result<PathBuf, String> {
+    let dir = root.join("backups");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("cannot create safety-backup dir {}: {e}", dir.display()))?;
+    let ts = pre_restore_timestamp();
+    let mut path = safety_backup_path(root, &ts);
+    let mut n = 1;
+    while path.exists() {
+        if n > 999 {
+            return Err(format!("safety-backup slot busy: {}", path.display()));
+        }
+        path = root
+            .join("backups")
+            .join(format!("pre-restore-{ts}-{n}.json"));
+        n += 1;
+    }
+    write_backup(&path, backup)
+        .map_err(|e| format!("cannot write safety backup {}: {e}", path.display()))?;
+    Ok(path)
 }
 
 /// One backup row that will not survive the manager on apply.
@@ -669,6 +716,131 @@ mod tests {
             .filter(|n| n.to_string_lossy() != "backup.json")
             .collect();
         assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn safety_backup_path_is_fixed_layout() {
+        let root = Path::new("C:/station");
+        let path = safety_backup_path(root, "20260914-120000");
+        assert_eq!(
+            path,
+            root.join("backups")
+                .join("pre-restore-20260914-120000.json")
+        );
+    }
+
+    #[test]
+    fn safety_backup_roundtrip() {
+        let root = std::env::temp_dir().join("crabboss-safety-roundtrip");
+        std::fs::create_dir_all(&root).unwrap();
+        let original = good_backup();
+        let path = write_pre_restore_safety(&root, &original).expect("safety write must succeed");
+        assert_eq!(path.parent().unwrap().file_name().unwrap(), "backups");
+        let back = read_backup(&path).expect("safety file must parse as a backup");
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            serde_json::to_string(&original).unwrap()
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn safety_backup_never_overwrites_same_second_retry() {
+        let root = std::env::temp_dir().join("crabboss-safety-collision");
+        std::fs::create_dir_all(&root).unwrap();
+        let first = write_pre_restore_safety(&root, &good_backup()).unwrap();
+        let second = write_pre_restore_safety(&root, &good_backup()).unwrap();
+        assert_ne!(first, second, "rapid retries must not share one undo path");
+        assert!(first.exists() && second.exists());
+        // Both snapshots stay valid backups.
+        read_backup(&first).expect("first safety file must parse");
+        read_backup(&second).expect("second safety file must parse");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn safety_backup_failure_is_err() {
+        // A root that is a file, not a dir: the `backups` child cannot be
+        // created, so the caller can abort the restore (fail closed).
+        let dir = std::env::temp_dir().join("crabboss-safety-root-is-file");
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.join("not-a-dir");
+        std::fs::write(&root, b"in the way").unwrap();
+        let err = write_pre_restore_safety(&root, &good_backup())
+            .expect_err("safety write without a dir must fail");
+        assert!(err.contains("safety-backup"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn sched_named(name: &str) -> SchedBackup {
+        SchedBackup {
+            name: name.into(),
+            action_type: "play".into(),
+            target: "x.mp3".into(),
+            start_time: "08:00".into(),
+            days: "Daily".into(),
+            expires_on: None,
+            enabled: true,
+        }
+    }
+
+    fn sched_rows(back: &Backup) -> Vec<crabcore::db::SchedulerRow> {
+        back.scheduler
+            .iter()
+            .map(|e| crabcore::db::SchedulerRow {
+                name: e.name.clone(),
+                action_type: e.action_type.clone(),
+                target: e.target.clone(),
+                start_time: e.start_time.clone(),
+                days: e.days.clone(),
+                expires_on: e.expires_on.clone(),
+                enabled: e.enabled,
+            })
+            .collect()
+    }
+
+    /// End-to-end proof for P1(b): snapshot current state, swap in an
+    /// incoming restore, then recover by re-applying the snapshot — the
+    /// same two calls `restore_now` makes, minus the GUI picker.
+    #[test]
+    fn safety_snapshot_recovers_pre_restore_state() {
+        use crabcore::scheduler::SchedulerManager;
+        let dir = std::env::temp_dir().join("crabboss-safety-recover");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("station.db");
+        std::fs::remove_file(&db).ok();
+        crabcore::db::Database::initialize(&db).unwrap();
+
+        let mut current = good_backup();
+        current.scheduler = vec![sched_named("Morning")];
+        crabcore::db::Database::replace_station_lists(&db, &sched_rows(&current), &[], &[])
+            .unwrap();
+        let safety = write_pre_restore_safety(&dir, &current).expect("safety write must succeed");
+
+        let mut incoming = good_backup();
+        incoming.scheduler = vec![sched_named("Evening")];
+        crabcore::db::Database::replace_station_lists(&db, &sched_rows(&incoming), &[], &[])
+            .unwrap();
+        let live: Vec<String> = SchedulerManager::open(&db)
+            .unwrap()
+            .list_all()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(live, vec!["Evening".to_string()]);
+
+        let back = read_backup(&safety).expect("safety file must parse");
+        crabcore::db::Database::replace_station_lists(&db, &sched_rows(&back), &[], &[]).unwrap();
+        let recovered: Vec<String> = SchedulerManager::open(&db)
+            .unwrap()
+            .list_all()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(recovered, vec!["Morning".to_string()]);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
