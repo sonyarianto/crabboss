@@ -37,27 +37,24 @@ pub struct PlaylistManager {
 
 impl PlaylistManager {
     /// Create a new playlist manager from an existing connection.
-    pub fn new(conn: Connection) -> Self {
+    pub fn new(conn: Connection) -> Result<Self> {
         // Keep FK enforcement explicit per connection (see Library::open).
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .expect("Failed to enable foreign keys");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         let mgr = Self {
             conn: Rc::new(RefCell::new(conn)),
         };
-        mgr.init_tables();
-        mgr
+        mgr.init_tables()?;
+        Ok(mgr)
     }
 
     /// Open (or create) the playlist store at the given SQLite file.
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        Ok(Self::new(Connection::open(path)?))
+        Self::new(crate::db::Database::open_connection(path)?)
     }
 
-    fn init_tables(&self) {
-        self.conn
-            .borrow()
-            .execute_batch(
-                "
+    fn init_tables(&self) -> Result<()> {
+        self.conn.borrow().execute_batch(
+            "
                 CREATE TABLE IF NOT EXISTS playlists (
                     id          TEXT PRIMARY KEY,
                     name        TEXT NOT NULL,
@@ -77,8 +74,8 @@ impl PlaylistManager {
                     FOREIGN KEY (track_id)    REFERENCES tracks(id) ON DELETE CASCADE
                 );
                 ",
-            )
-            .expect("Failed to initialize playlist tables");
+        )?;
+        Ok(())
     }
 
     /// Create a new empty playlist.
@@ -252,7 +249,7 @@ mod tests {
             "CREATE TABLE tracks (id TEXT PRIMARY KEY, file_path TEXT NOT NULL UNIQUE);",
         )
         .unwrap();
-        PlaylistManager::new(conn)
+        PlaylistManager::new(conn).unwrap()
     }
 
     #[test]

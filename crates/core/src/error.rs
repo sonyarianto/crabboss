@@ -29,6 +29,17 @@ pub enum CrabError {
 
     #[error("Library error: {0}")]
     Library(String),
+
+    #[error("Migration v{version} ({name}) failed: {source}")]
+    Migration {
+        version: u32,
+        name: &'static str,
+        #[source]
+        source: rusqlite::Error,
+    },
+
+    #[error("Database schema v{found} is newer than supported v{supported}")]
+    SchemaTooNew { found: u32, supported: u32 },
 }
 
 pub type Result<T> = std::result::Result<T, CrabError>;

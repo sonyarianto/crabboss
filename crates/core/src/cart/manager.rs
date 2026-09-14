@@ -28,28 +28,25 @@ pub struct CartManager {
 }
 
 impl CartManager {
-    pub fn new(conn: Connection) -> Self {
+    pub fn new(conn: Connection) -> Result<Self> {
         // Same FK pragma as the other managers (harmless here — this
         // table has no FKs today — but keeps every connection uniform).
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .expect("Failed to enable foreign keys");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         let mgr = Self {
             conn: Rc::new(RefCell::new(conn)),
         };
-        mgr.init_tables();
-        mgr
+        mgr.init_tables()?;
+        Ok(mgr)
     }
 
     /// Open (or create) the cart store at the given SQLite file.
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        Ok(Self::new(Connection::open(path)?))
+        Self::new(crate::db::Database::open_connection(path)?)
     }
 
-    fn init_tables(&self) {
-        self.conn
-            .borrow()
-            .execute_batch(
-                "
+    fn init_tables(&self) -> Result<()> {
+        self.conn.borrow().execute_batch(
+            "
                 CREATE TABLE IF NOT EXISTS carts (
                     id          TEXT PRIMARY KEY,
                     label       TEXT NOT NULL,
@@ -58,8 +55,8 @@ impl CartManager {
                     created_at  TEXT NOT NULL
                 );
                 ",
-            )
-            .expect("Failed to initialize cart tables");
+        )?;
+        Ok(())
     }
 
     pub fn create(&self, label: &str, file_path: &str) -> Result<Cart> {
@@ -160,7 +157,7 @@ mod tests {
 
     #[test]
     fn create_list_delete() {
-        let m = CartManager::new(Connection::open_in_memory().unwrap());
+        let m = CartManager::new(Connection::open_in_memory().unwrap()).unwrap();
         m.create("Jingle 1", "/tmp/a.mp3").unwrap();
         m.create("Jingle 2", "/tmp/b.mp3").unwrap();
         let all = m.list_all().unwrap();
@@ -172,7 +169,7 @@ mod tests {
 
     #[test]
     fn assign_at_replaces_and_respects_bounds() {
-        let m = CartManager::new(Connection::open_in_memory().unwrap());
+        let m = CartManager::new(Connection::open_in_memory().unwrap()).unwrap();
         m.create("Old", "/tmp/old.mp3").unwrap(); // takes position 0
         m.assign_at(0, "New", "/tmp/new.mp3").unwrap();
         let all = m.list_all().unwrap();

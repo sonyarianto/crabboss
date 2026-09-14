@@ -194,12 +194,9 @@ pub struct Library {
 impl Library {
     /// Open or create a library database at the given path.
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
-        // The schema declares ON DELETE CASCADE (playlist items, tags, play
-        // log). The bundled SQLite enforces FKs by default, but state it
-        // explicitly so `remove_track` can never silently orphan rows no
-        // matter which SQLite build this links against.
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        // Uniform connection setup (FK enforcement for the ON DELETE
+        // CASCADE schemas, bounded busy timeout) lives in Database.
+        let conn = crate::db::Database::open_connection(path)?;
         let lib = Self { conn };
         lib.init_tables()?;
         Ok(lib)

@@ -152,29 +152,26 @@ pub struct SchedulerManager {
 }
 
 impl SchedulerManager {
-    pub fn new(conn: Connection) -> Self {
+    pub fn new(conn: Connection) -> Result<Self> {
         // Same FK pragma as the other managers (harmless here — this
         // table has no FKs today — but keeps every connection uniform).
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .expect("Failed to enable foreign keys");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         let mgr = Self {
             conn: Rc::new(RefCell::new(conn)),
         };
-        mgr.init_tables();
-        mgr
+        mgr.init_tables()?;
+        Ok(mgr)
     }
 
     /// Open (or create) the scheduler store at the given SQLite file.
     /// Shares the same `crabboss.db` file as the library — separate connection.
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        Ok(Self::new(Connection::open(path)?))
+        Self::new(crate::db::Database::open_connection(path)?)
     }
 
-    fn init_tables(&self) {
-        self.conn
-            .borrow()
-            .execute_batch(
-                "
+    fn init_tables(&self) -> Result<()> {
+        self.conn.borrow().execute_batch(
+            "
                 CREATE TABLE IF NOT EXISTS scheduled_events (
                     id          TEXT PRIMARY KEY,
                     name        TEXT NOT NULL,
@@ -186,27 +183,23 @@ impl SchedulerManager {
                     created_at  TEXT NOT NULL
                 );
                 ",
-            )
-            .expect("Failed to initialize scheduler tables");
+        )?;
         // Migrate older stores: add the expiration column if missing.
+        // (Central bootstrap v2 covers this too; this stays so the
+        // manager is self-sufficient when opened directly, e.g. tests.)
         let cols: Vec<String> = self
             .conn
             .borrow()
-            .prepare("PRAGMA table_info(scheduled_events)")
-            .expect("pragma scheduled_events")
-            .query_map([], |row| row.get::<_, String>(1))
-            .expect("pragma query")
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .expect("pragma rows");
+            .prepare("PRAGMA table_info(scheduled_events)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         if !cols.iter().any(|c| c == "expires_on") {
-            self.conn
-                .borrow()
-                .execute(
-                    "ALTER TABLE scheduled_events ADD COLUMN expires_on TEXT",
-                    [],
-                )
-                .expect("add expires_on column");
+            self.conn.borrow().execute(
+                "ALTER TABLE scheduled_events ADD COLUMN expires_on TEXT",
+                [],
+            )?;
         }
+        Ok(())
     }
 
     /// Create a new event. `start_time` must be `HH:MM`; `expires_on` an
@@ -386,7 +379,7 @@ mod tests {
     use super::*;
 
     fn mem_manager() -> SchedulerManager {
-        SchedulerManager::new(Connection::open_in_memory().unwrap())
+        SchedulerManager::new(Connection::open_in_memory().unwrap()).unwrap()
     }
 
     #[test]

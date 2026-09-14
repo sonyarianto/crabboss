@@ -79,27 +79,24 @@ pub struct AdsManager {
 }
 
 impl AdsManager {
-    pub fn new(conn: Connection) -> Self {
+    pub fn new(conn: Connection) -> Result<Self> {
         // Same FK pragma as the other managers (harmless here — this
         // table has no FKs today — but keeps every connection uniform).
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .expect("Failed to enable foreign keys");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         let mgr = Self {
             conn: Rc::new(RefCell::new(conn)),
         };
-        mgr.init_tables();
-        mgr
+        mgr.init_tables()?;
+        Ok(mgr)
     }
 
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        Ok(Self::new(Connection::open(path)?))
+        Self::new(crate::db::Database::open_connection(path)?)
     }
 
-    fn init_tables(&self) {
-        self.conn
-            .borrow()
-            .execute_batch(
-                "
+    fn init_tables(&self) -> Result<()> {
+        self.conn.borrow().execute_batch(
+            "
                 CREATE TABLE IF NOT EXISTS ad_blocks (
                     id          TEXT PRIMARY KEY,
                     name        TEXT NOT NULL,
@@ -113,8 +110,8 @@ impl AdsManager {
                     enabled     INTEGER NOT NULL DEFAULT 1
                 );
                 ",
-            )
-            .expect("Failed to initialize ads tables");
+        )?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -285,7 +282,7 @@ mod tests {
     use chrono::Datelike;
 
     fn mem_manager() -> AdsManager {
-        AdsManager::new(Connection::open_in_memory().unwrap())
+        AdsManager::new(Connection::open_in_memory().unwrap()).unwrap()
     }
 
     fn block(m: &AdsManager) -> AdBlock {

@@ -969,6 +969,14 @@ pub(crate) fn boot() -> (App, Task<Message>) {
     }
 
     let db_path = paths.database.clone();
+    // Central schema bootstrap first: numbered, transactional migrations.
+    // A failure here is fatal (no store can open safely), but it must
+    // read as an operator error, not a panic backtrace.
+    if let Err(e) = crabcore::db::Database::initialize(&db_path) {
+        tracing::error!("Database initialization failed: {e}");
+        eprintln!("CrabBoss cannot start: database initialization failed: {e}");
+        std::process::exit(1);
+    }
     let library = Library::open(&db_path).expect("Failed to open library database");
     tracing::info!("Library loaded from: {}", db_path.display());
 
