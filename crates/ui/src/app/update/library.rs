@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, TryRecvError};
 
 use crabcore::audio::{MAX_GAIN_DB, TARGET_MAX_LUFS, TARGET_MIN_LUFS};
 
-use super::super::App;
+use super::super::{App, Message};
 use crate::widgets::track_label;
 
 pub(crate) fn search_changed(state: &mut App, q: String) {
@@ -50,60 +50,142 @@ pub(crate) fn track_selected(state: &mut App, i: usize) {
     state.lib_selected = Some(i);
 }
 
-pub(crate) fn track_play(state: &mut App, i: usize) {
-    let track = state.lib_tracks.get(i).cloned();
-    if let Some(track) = track {
-        let path = PathBuf::from(&track.file_path);
-        tracing::info!("Playing track: {:?}", path);
-        match state.player.play(&path) {
-            Ok(()) => {
-                let _ = state.library.record_play(&track.id, track.duration_secs);
-                state.auto_continue = true;
-                state.lib_selected = Some(i);
-                state.is_playing = true;
-                state.now_title = track_label(&track);
-                state.now_artist = track.artist.clone().unwrap_or_default();
-                state.engine_track = Some(path);
-                // A manual play discards any prefetched deck, so its
-                // "Up next" label dies with it.
-                state.up_next.clear();
-                state.pending_source = None;
-            }
-            Err(e) => {
-                tracing::error!("Failed to play: {}", e);
-                state.lib_status = format!("Play failed: {}", e);
-            }
+/// Cue (PFL) preview on the private bus (B2 Phase 3): program untouched,
+/// no `record_play` (preview must not pollute airplay reports), no
+/// `auto_continue` / `engine_track` / `up_next` side effects. Failures
+/// surface inline in `lib_status` with an actionable hint.
+pub(crate) fn cue_play(state: &mut App, i: usize) {
+    let Some(track) = state.lib_tracks.get(i).cloned() else {
+        return;
+    };
+    let path = PathBuf::from(&track.file_path);
+    if !path.is_file() {
+        state.lib_status = format!("Cue failed: file missing: {}", track.file_path);
+        return;
+    }
+    match state.player.cue_play(&path) {
+        Ok(()) => {
+            tracing::info!("Cue preview: {:?}", path);
+            state.lib_selected = Some(i);
+            state.cue_status = state.player.cue_state().label();
+            state.lib_status = format!("Cue: {} (headphones, program untouched)", track_label(&track));
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            tracing::warn!("Cue failed: {msg}");
+            state.cue_status = state.player.cue_state().label();
+            state.lib_status = if msg.contains("no cue device") || msg.contains("unavailable") {
+                "Cue: no device — pick headphones in Settings > Audio Device".into()
+            } else {
+                format!("Cue failed: {msg}")
+            };
         }
     }
 }
 
-pub(crate) fn import_files(state: &mut App) {
+pub(crate) fn cue_stop(state: &mut App) {
+    state.player.cue_stop();
+    state.cue_status = state.player.cue_state().label();
+    if state.lib_status.starts_with("Cue:") || state.lib_status.starts_with("Cue ") {
+        state.lib_status.clear();
+    }
+}
+
+pub(crate) fn import_files(state: &mut App) -> iced::Task<Message> {
     if state.import_active {
         state.lib_status = "Import already running...".into();
-        return;
+        return iced::Task::none();
     }
-    let files = rfd::FileDialog::new()
+    // Async dialog: `update` must return immediately so the iced event
+    // loop keeps pumping while the native dialog enumerates folders.
+    // The old sync `pick_files()` blocked the UI thread here, which on
+    // Windows stalls COM + makes the dialog sit on "Working on it...".
+    let mut dialog = rfd::AsyncFileDialog::new()
         .set_title("Import audio files")
         .add_filter(
             "Audio",
             &[
                 "mp3", "flac", "wav", "ogg", "oga", "aac", "m4a", "opus", "aiff", "wv",
             ],
-        )
-        .pick_files();
-    let Some(files) = files else {
-        return;
-    };
+        );
+    if let Some(dir) = import_start_dir(state) {
+        dialog = dialog.set_directory(dir);
+    }
+    state.lib_status = "Choose audio files in the dialog...".into();
+    iced::Task::perform(dialog.pick_files(), |handles| {
+        let files: Vec<PathBuf> = handles
+            .map(|hs| hs.into_iter().map(|h| h.path().to_path_buf()).collect())
+            .unwrap_or_default();
+        Message::ImportFilesPicked(files)
+    })
+}
+
+pub(crate) fn import_files_picked(state: &mut App, files: Vec<PathBuf>) {
     if files.is_empty() {
+        // Cancelled: only clear our own "choose..." hint, never wipe a
+        // real status (e.g. an import that started via auto-sync meanwhile).
+        if state.lib_status == "Choose audio files in the dialog..." {
+            state.lib_status.clear();
+        }
         return;
     }
+    if let Some(parent) = files[0].parent() {
+        if parent.is_dir() {
+            state.last_import_dir = Some(parent.to_path_buf());
+        }
+    }
     tracing::info!("Importing {} files...", files.len());
+    if state.import_active {
+        // Auto-sync (or another pick) started while the dialog was open:
+        // append instead of resetting counters.
+        state.import_total += files.len();
+        state.import_pending.extend(files);
+        let done = state.import_total - state.import_pending.len();
+        state.lib_status = format!("Importing {done}/{}...", state.import_total);
+        return;
+    }
     state.import_active = true;
     state.import_total = files.len();
     state.import_added = 0;
     state.import_skipped = 0;
     state.import_pending = VecDeque::from(files);
     state.lib_status = format!("Importing 0/{}...", state.import_total);
+}
+
+/// Folder the import dialog should open in. Never returns Quick Access /
+/// This PC: an explicit existing dir keeps Windows enumeration fast
+/// (the "Working on it..." hang is almost always a virtual-folder /
+/// disconnected-network-drive enumeration).
+fn import_start_dir(state: &App) -> Option<PathBuf> {
+    if let Some(d) = &state.last_import_dir {
+        if d.is_dir() {
+            return Some(d.clone());
+        }
+    }
+    for f in &state.settings.watch_folders {
+        if f.is_dir() {
+            return Some(f.clone());
+        }
+    }
+    if let Some(t) = state.lib_tracks.first() {
+        let p = PathBuf::from(&t.file_path);
+        if let Some(parent) = p.parent() {
+            if parent.is_dir() {
+                return Some(parent.to_path_buf());
+            }
+        }
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        let music = PathBuf::from(&profile).join("Music");
+        if music.is_dir() {
+            return Some(music);
+        }
+        let p = PathBuf::from(&profile);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    std::env::current_dir().ok().filter(|p| p.is_dir())
 }
 
 pub(crate) fn health_check(state: &mut App) {

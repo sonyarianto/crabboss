@@ -65,26 +65,19 @@ pub(crate) fn eq_toggle(state: &mut App) {
     state.save_settings();
 }
 
-pub(crate) fn eq_inc(state: &mut App, band: usize) {
+pub(crate) fn eq_set(state: &mut App, band: usize, gain_db: f32) {
+    // Drag path (no save): the fader fires per pixel, and every save is
+    // an atomic file write — persisting happens once on release.
     if band < EQ_BAND_COUNT {
-        state.settings.eq_gains_db[band] =
-            (state.settings.eq_gains_db[band] + 1.0).clamp(-12.0, 12.0);
+        state.settings.eq_gains_db[band] = gain_db.clamp(-12.0, 12.0);
         state
             .player
             .set_eq_band(band, state.settings.eq_gains_db[band]);
-        state.save_settings();
     }
 }
 
-pub(crate) fn eq_dec(state: &mut App, band: usize) {
-    if band < EQ_BAND_COUNT {
-        state.settings.eq_gains_db[band] =
-            (state.settings.eq_gains_db[band] - 1.0).clamp(-12.0, 12.0);
-        state
-            .player
-            .set_eq_band(band, state.settings.eq_gains_db[band]);
-        state.save_settings();
-    }
+pub(crate) fn eq_save(state: &mut App) {
+    state.save_settings();
 }
 
 pub(crate) fn eq_reset(state: &mut App) {
@@ -153,8 +146,10 @@ pub(crate) fn stream_toggle(state: &mut App) {
         if let Err(e) = state.player.stream_start() {
             tracing::warn!("Stream start failed: {e}");
         }
+        state.mark_stream_live();
     } else {
         state.player.stream_stop();
+        state.clear_stream_live();
     }
 }
 
@@ -259,6 +254,24 @@ pub(crate) fn stream_format_changed(state: &mut App, format: StreamFormat) {
         .set_stream_config(state.settings.stream.clone());
 }
 
+pub(crate) fn stream_restart(state: &mut App) {
+    // One-click apply for pending changes while live: fresh connection
+    // with the current selection. Listeners rebuffer — the button only
+    // appears when the selection differs from what's on air.
+    if !state.settings.stream.enabled {
+        return;
+    }
+    state.player.stream_stop();
+    state
+        .player
+        .set_stream_config(state.settings.stream.clone());
+    if let Err(e) = state.player.stream_start() {
+        tracing::warn!("Stream restart failed: {e}");
+    }
+    state.mark_stream_live();
+    tracing::info!("Stream restarted with new settings");
+}
+
 pub(crate) fn mic_toggle(state: &mut App) {
     state.settings.mic.enabled = !state.settings.mic.enabled;
     state.save_settings();
@@ -281,6 +294,30 @@ pub(crate) fn mic_select_device(state: &mut App, name: String) {
     state.save_settings();
     state.player.set_mic_config(state.settings.mic.clone());
     state.mic_note = "Input switched live - no restart needed".into();
+}
+
+pub(crate) fn cue_select_device(state: &mut App, name: String) {
+    state.settings.cue.device = Some(name.clone());
+    state.save_settings();
+    state.player.set_cue_config(state.settings.cue.clone());
+    state.cue_status = state.player.cue_state().label();
+    tracing::info!("Cue device set to '{name}': {}", state.cue_status);
+}
+
+pub(crate) fn cue_volume_inc(state: &mut App) {
+    let vol = (state.player.cue_volume() + 0.05).clamp(0.0, 1.5);
+    state.settings.cue.volume = vol;
+    state.save_settings();
+    state.player.set_cue_volume(vol);
+    state.cue_status = state.player.cue_state().label();
+}
+
+pub(crate) fn cue_volume_dec(state: &mut App) {
+    let vol = (state.player.cue_volume() - 0.05).clamp(0.0, 1.5);
+    state.settings.cue.volume = vol;
+    state.save_settings();
+    state.player.set_cue_volume(vol);
+    state.cue_status = state.player.cue_state().label();
 }
 
 pub(crate) fn mic_level_inc(state: &mut App) {

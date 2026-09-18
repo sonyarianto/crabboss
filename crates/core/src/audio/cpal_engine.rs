@@ -13,6 +13,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::RingBuffer;
 
 use crate::audio::engine::{Engine, PlayerState, TrackInfo};
+use crate::audio::cue::{CueConfig, CueState};
 use crate::audio::mic::{MicConfig, MicResampler, MicState, MIC_RING_SAMPLES};
 use crate::audio::mixer::{Frame, Mixer, EQ_BAND_COUNT};
 use crate::audio::silence::SilenceMonitor;
@@ -43,6 +44,12 @@ const STATE_STOPPED: u8 = 0;
 const STATE_PLAYING: u8 = 1;
 const STATE_PAUSED: u8 = 2;
 const STATE_BUFFERING: u8 = 3;
+
+/// Cue (PFL) transport mirror for the cue callback hot path.
+/// Deliberately separate from the program `STATE_*`: the cue callback
+/// only reads this, writers sync it while holding `cue_state`.
+const CUE_STOPPED: u8 = 0;
+const CUE_PLAYING: u8 = 1;
 
 /// Preemption-resistant output buffer in frames (~43 ms @ 48 kHz stereo).
 const OUTPUT_BUFFER_FRAMES: u32 = 2048;
@@ -563,6 +570,30 @@ pub struct CpalEngine {
     /// False only when the loader thread failed to spawn — `play`/`queue`
     /// then fall back to synchronous decode (blocks, but audio works).
     loader_ok: bool,
+    // -- Cue (PFL) audition bus (B2 Phase 2) --------------------------------
+    // Fully independent from the program path above: own output stream,
+    // own cursor, own volume. Never touches `mixer`, `silence`,
+    // `stream_tap`, or the program `xfade`/`state`. The cue callback
+    // reads only `cue_cursor` + `cue_state_atomic` + `cue_volume`.
+    _cue_stream: Option<cpal::Stream>,
+    cue_device_rate: u32,
+    cue_device_name: String,
+    cue_cursor: Arc<Mutex<Option<PlaybackCursor>>>,
+    cue_state: Arc<Mutex<CueState>>,
+    cue_state_atomic: Arc<AtomicU8>,
+    cue_current: Arc<Mutex<Option<TrackInfo>>>,
+    cue_volume: Arc<AtomicU32>,
+    cue_config: Arc<Mutex<CueConfig>>,
+    /// Fade gain 0..1 applied on top of `cue_volume` (click-free cuts).
+    /// `cue_play` installs at 0 and ramps to 1 (~30 ms); `cue_stop`
+    /// sets the target to 0 and the callback parks the transport when
+    /// the ramp lands. Plain lock-free atomics; the callback owns the
+    /// ramp, writers only set the target.
+    cue_gain: Arc<AtomicU32>,
+    cue_gain_target: Arc<AtomicU32>,
+    /// Monotonic generation: every `cue_play`/`cue_stop`/`set_cue_config`
+    /// invalidates older cue decode threads.
+    cue_gen: Arc<AtomicU64>,
 }
 
 impl CpalEngine {
@@ -649,6 +680,20 @@ impl CpalEngine {
             load_rx,
         );
 
+        // Cue bus starts unavailable (no device selected). Phase 1 boot
+        // behavior is unchanged: nothing opens a second stream until the
+        // operator picks a cue device via `set_cue_config`. All Arcs are
+        // cheap; the realtime cue callback is created with the stream.
+        let cue_cursor: Arc<Mutex<Option<PlaybackCursor>>> = Arc::new(Mutex::new(None));
+        let cue_state: Arc<Mutex<CueState>> = Arc::new(Mutex::new(CueState::Unavailable));
+        let cue_state_atomic = Arc::new(AtomicU8::new(CUE_STOPPED));
+        let cue_current: Arc<Mutex<Option<TrackInfo>>> = Arc::new(Mutex::new(None));
+        let cue_volume = Arc::new(AtomicU32::new(CueConfig::default().volume.to_bits()));
+        let cue_config: Arc<Mutex<CueConfig>> = Arc::new(Mutex::new(CueConfig::default()));
+        let cue_gen = Arc::new(AtomicU64::new(0));
+        let cue_gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let cue_gain_target = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+
         Self {
             _stream: stream,
             device_rate,
@@ -683,6 +728,18 @@ impl CpalEngine {
             load_inflight,
             loading,
             loader_ok,
+            _cue_stream: None,
+            cue_device_rate: 48000,
+            cue_device_name: "None (cue off)".to_string(),
+            cue_cursor,
+            cue_state,
+            cue_state_atomic,
+            cue_current,
+            cue_volume,
+            cue_config,
+            cue_gen,
+            cue_gain,
+            cue_gain_target,
         }
     }
 
@@ -1082,6 +1139,128 @@ impl CpalEngine {
         stream.play().map_err(|e| e.to_string())?;
         Ok((stream, name))
     }
+
+    /// Open the cue (PFL) output stream on its own device.
+    /// Unlike the program path this NEVER falls back to the default
+    /// output: falling back would double-open the program device and
+    /// defeat the whole point (private audition). A missing device is
+    /// an honest error → cue stays Unavailable/Error, program untouched.
+    /// The cue callback reads only its own cursor + atomic + volume:
+    /// no mixer, no silence monitor, no stream tap, no mic.
+    fn open_cue_stream(
+        cue_cursor: Arc<Mutex<Option<PlaybackCursor>>>,
+        cue_state_atomic: Arc<AtomicU8>,
+        cue_volume: Arc<AtomicU32>,
+        cue_gain: Arc<AtomicU32>,
+        cue_gain_target: Arc<AtomicU32>,
+        want: Option<String>,
+    ) -> std::result::Result<(cpal::Stream, u32, String), String> {
+        let host = cpal::default_host();
+        let device = want
+            .as_deref()
+            .and_then(|n| {
+                host.output_devices().ok().and_then(|mut devs| {
+                    devs.find(|d| d.description().is_ok_and(|desc| desc.name() == n))
+                })
+            })
+            .ok_or_else(|| {
+                format!(
+                    "cue device '{}' not found",
+                    want.as_deref().unwrap_or_default()
+                )
+            })?;
+        let name = device
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| "Cue".to_string());
+        let config = device.default_output_config().map_err(|e| e.to_string())?;
+        let sample_rate = config.sample_rate();
+        let channels = config.channels() as usize;
+        let base_config: cpal::StreamConfig = config.into();
+        let mut fixed_config = base_config;
+        fixed_config.buffer_size = cpal::BufferSize::Fixed(OUTPUT_BUFFER_FRAMES);
+
+        let err_fn = |err| tracing::error!("cue stream error: {}", err);
+        let make_callback = || {
+            let cue_cursor = cue_cursor.clone();
+            let cue_state_atomic = cue_state_atomic.clone();
+            let cue_volume = cue_volume.clone();
+            let cue_gain = cue_gain.clone();
+            let cue_gain_target = cue_gain_target.clone();
+            // ~30 ms click-free ramp at the cue device rate.
+            let fade_len = ((sample_rate as f32 * 0.03) as usize).max(1);
+            let step = 1.0 / fade_len as f32;
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                let playing = cue_state_atomic.load(Ordering::Relaxed) == CUE_PLAYING;
+                let vol = load_volume_bits(&cue_volume);
+                let target = load_volume_bits(&cue_gain_target);
+                let mut gain = load_volume_bits(&cue_gain);
+                // Only lock held on this path: the cursor itself. State is
+                // mirrored lock-free; EOF / fade completion parks the
+                // atomic (the UI-side `cue_state()` reconciles the Mutex
+                // lazily) so the realtime thread never nests locks.
+                let mut guard = callback_lock(&cue_cursor);
+                for frame in data.chunks_mut(channels) {
+                    // Ease the fade gain toward its target once per frame.
+                    if gain < target {
+                        gain = (gain + step).min(target);
+                    } else if gain > target {
+                        gain = (gain - step).max(target);
+                    }
+                    let remain = guard.as_ref().map(|c| c.remaining_frames()).unwrap_or(0);
+                    // Natural EOF also fades over its last ~30 ms.
+                    let eof_scale = if playing && remain < fade_len {
+                        remain as f32 / fade_len as f32
+                    } else {
+                        1.0
+                    };
+                    let (l, r) = if playing {
+                        guard
+                            .as_mut()
+                            .and_then(|c| c.next_stereo())
+                            .unwrap_or((0.0, 0.0))
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let g = vol * gain * eof_scale;
+                    let (l, r) = (l * g, r * g);
+                    if channels == 1 {
+                        frame[0] = (l + r) * 0.5;
+                    } else {
+                        frame[0] = l;
+                        if channels > 1 {
+                            frame[1] = r;
+                        }
+                        for s in frame.iter_mut().skip(2) {
+                            *s = 0.0;
+                        }
+                    }
+                }
+                store_volume_bits(&cue_gain, gain);
+                // Fade landed at silence after a stop: release the cursor
+                // and park the transport mirror. A fresh `cue_play`
+                // replaces the cursor either way, so no audio is lost.
+                let done = guard.as_ref().is_none_or(|c| c.is_done());
+                if playing && ((target == 0.0 && gain == 0.0) || done) {
+                    *guard = None;
+                    cue_state_atomic.store(CUE_STOPPED, Ordering::SeqCst);
+                }
+            }
+        };
+        let stream = device
+            .build_output_stream(fixed_config, make_callback(), err_fn, None)
+            .or_else(|e| {
+                tracing::warn!(
+                    "Cue fixed {}-frame buffer rejected ({}); using device default",
+                    OUTPUT_BUFFER_FRAMES,
+                    e
+                );
+                device.build_output_stream(base_config, make_callback(), err_fn, None)
+            })
+            .map_err(|e| e.to_string())?;
+        stream.play().map_err(|e| e.to_string())?;
+        Ok((stream, sample_rate, name))
+    }
 }
 
 impl Default for CpalEngine {
@@ -1422,6 +1601,180 @@ impl Engine for CpalEngine {
     fn mic_ducking(&self) -> bool {
         self.mic_live.load(Ordering::Relaxed) && self.mixer.lock().unwrap().ducking()
     }
+
+    // -- Cue (PFL) audition bus (B2 Phase 2) --------------------------------
+    // Independent decode + output. Program `xfade`/`mixer`/`silence`/
+    // `stream_tap` are never touched here; locks are taken sequentially
+    // (never nested) like the program path.
+    fn set_cue_config(&mut self, config: CueConfig) {
+        let config = config.sanitized();
+        let device_changed = self.cue_config.lock().unwrap().device != config.device;
+        store_volume_bits(&self.cue_volume, config.volume);
+        *self.cue_config.lock().unwrap() = config.clone();
+        if !device_changed {
+            return;
+        }
+        // Device switch invalidates anything decoding/playing on cue.
+        self.cue_gen.fetch_add(1, Ordering::SeqCst);
+        *self.cue_cursor.lock().unwrap() = None;
+        *self.cue_current.lock().unwrap() = None;
+        self.cue_state_atomic.store(CUE_STOPPED, Ordering::SeqCst);
+        store_volume_bits(&self.cue_gain, 1.0);
+        store_volume_bits(&self.cue_gain_target, 1.0);
+        let Some(want) = config.device.clone() else {
+            self._cue_stream = None;
+            self.cue_device_rate = 48000;
+            self.cue_device_name = "None (cue off)".to_string();
+            *self.cue_state.lock().unwrap() = CueState::Unavailable;
+            return;
+        };
+        if want == self.device_name {
+            tracing::warn!(
+                "Cue device '{}' is the program device: cue will be audible on the same speakers (pick headphones for private PFL)",
+                want
+            );
+        }
+        match Self::open_cue_stream(
+            self.cue_cursor.clone(),
+            self.cue_state_atomic.clone(),
+            self.cue_volume.clone(),
+            self.cue_gain.clone(),
+            self.cue_gain_target.clone(),
+            Some(want.clone()),
+        ) {
+            Ok((stream, rate, name)) => {
+                self._cue_stream = Some(stream);
+                self.cue_device_rate = rate;
+                self.cue_device_name = name.clone();
+                *self.cue_state.lock().unwrap() = CueState::Stopped;
+                tracing::info!("Cue live: output '{name}' @ {rate} Hz");
+            }
+            Err(msg) => {
+                self._cue_stream = None;
+                *self.cue_state.lock().unwrap() = CueState::Error(msg.clone());
+                tracing::warn!("Cue start failed: {msg}");
+            }
+        }
+    }
+
+    fn cue_config(&self) -> CueConfig {
+        self.cue_config.lock().unwrap().clone()
+    }
+
+    fn cue_play(&self, path: &Path) -> Result<()> {
+        if self._cue_stream.is_none() || self.cue_config.lock().unwrap().device.is_none() {
+            return Err(CrabError::Audio("cue unavailable (no cue device)".into()));
+        }
+        if !path.exists() {
+            return Err(CrabError::FileNotFound { path: path.to_path_buf() });
+        }
+        // Flat preview gain for Phase 2 (no loudness/EQ on cue yet):
+        // what the operator hears is the raw file at cue volume.
+        let gen = self.cue_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let path = path.to_path_buf();
+        let rate = self.cue_device_rate;
+        let cursor = self.cue_cursor.clone();
+        let current = self.cue_current.clone();
+        let state = self.cue_state.clone();
+        let state_atomic = self.cue_state_atomic.clone();
+        let gain = self.cue_gain.clone();
+        let gain_target = self.cue_gain_target.clone();
+        let gen_check = self.cue_gen.clone();
+        std::thread::Builder::new()
+            .name("crabboss-cue-loader".into())
+            .spawn(move || {
+                match decode_load(&path, 0.0, rate) {
+                    Ok((cur, duration)) => {
+                        if gen_check.load(Ordering::SeqCst) != gen {
+                            return;
+                        }
+                        *cursor.lock().unwrap() = Some(cur);
+                        *current.lock().unwrap() = Some(TrackInfo {
+                            path,
+                            title: None,
+                            artist: None,
+                            duration_secs: duration,
+                        });
+                        // Start silent, ramp up in the callback (~30 ms):
+                        // a hard cut mid-preview never clicks.
+                        store_volume_bits(&gain, 0.0);
+                        store_volume_bits(&gain_target, 1.0);
+                        *state.lock().unwrap() = CueState::Playing;
+                        state_atomic.store(CUE_PLAYING, Ordering::SeqCst);
+                    }
+                    Err(e) => {
+                        if gen_check.load(Ordering::SeqCst) != gen {
+                            return;
+                        }
+                        state_atomic.store(CUE_STOPPED, Ordering::SeqCst);
+                        *state.lock().unwrap() = CueState::Error(e.to_string());
+                        tracing::warn!("Cue load failed: {e}");
+                    }
+                }
+            })
+            .map_err(|e| CrabError::Audio(format!("cue loader gone: {e}")))?;
+        Ok(())
+    }
+
+    fn cue_stop(&self) {
+        // Fade out, don't cut: invalidate pending decodes, drop the
+        // target to 0 and keep the mirror at PLAYING so the callback
+        // keeps pulling while it ramps down (~30 ms), then releases the
+        // cursor and parks the mirror itself. Nothing to fade (no
+        // cursor) parks immediately.
+        self.cue_gen.fetch_add(1, Ordering::SeqCst);
+        if self.cue_cursor.lock().unwrap().is_none() {
+            *self.cue_current.lock().unwrap() = None;
+            self.cue_state_atomic.store(CUE_STOPPED, Ordering::SeqCst);
+            let mut st = self.cue_state.lock().unwrap();
+            if matches!(*st, CueState::Playing | CueState::Stopped) {
+                *st = CueState::Stopped;
+            }
+            return;
+        }
+        store_volume_bits(&self.cue_gain_target, 0.0);
+    }
+
+    fn cue_state(&self) -> CueState {
+        // Reconcile the realtime mirrors: the callback parks the atomic
+        // on EOF / landed fade-out; the Mutex + current track follow
+        // lazily here (UI thread) so the callback itself never nests locks.
+        if self.cue_state_atomic.load(Ordering::SeqCst) == CUE_STOPPED {
+            let mut st = self.cue_state.lock().unwrap();
+            if *st == CueState::Playing {
+                *st = CueState::Stopped;
+                *self.cue_current.lock().unwrap() = None;
+            }
+            return st.clone();
+        }
+        self.cue_state.lock().unwrap().clone()
+    }
+
+    fn cue_volume(&self) -> f32 {
+        load_volume_bits(&self.cue_volume)
+    }
+
+    fn set_cue_volume(&self, vol: f32) {
+        let vol = vol.clamp(0.0, 1.5);
+        store_volume_bits(&self.cue_volume, vol);
+        self.cue_config.lock().unwrap().volume = vol;
+    }
+
+    fn cue_position_secs(&self) -> f64 {
+        let guard = self.cue_cursor.lock().unwrap();
+        guard
+            .as_ref()
+            .map(|c| c.pos_frames as f64 / self.cue_device_rate.max(1) as f64)
+            .unwrap_or(0.0)
+    }
+
+    fn cue_current_track(&self) -> Option<TrackInfo> {
+        self.cue_current.lock().unwrap().clone()
+    }
+
+    fn cue_device_name(&self) -> String {
+        self.cue_device_name.clone()
+    }
 }
 
 /// Decode any symphonia-supported file to stereo-interleaved f32.
@@ -1657,6 +2010,65 @@ mod tests {
         eng.set_volume(0.5);
         assert!((eng.volume() - 0.5).abs() < 1e-6);
         assert_eq!(eng.volume.load(Ordering::SeqCst), 0.5f32.to_bits());
+    }
+
+    #[test]
+    fn cue_without_device_is_unavailable_and_program_untouched() {
+        // Phase 1 boot state: no cue device → cue unavailable, program
+        // transport identical to before (Stopped, no track, device kept).
+        let mut eng = CpalEngine::new();
+        eng.set_cue_config(CueConfig::default());
+        assert_eq!(eng.cue_state(), CueState::Unavailable);
+        assert!(eng.cue_current_track().is_none());
+        assert_eq!(eng.cue_position_secs(), 0.0);
+        let missing = std::path::Path::new("no-such-cue-file.mp3");
+        assert!(eng.cue_play(missing).is_err());
+        // Safe no-ops: never touch the program bus.
+        eng.cue_stop();
+        assert_eq!(eng.cue_state(), CueState::Unavailable);
+        assert_eq!(eng.state(), PlayerState::Stopped);
+        assert!(eng.current_track().is_none());
+    }
+
+    #[test]
+    fn cue_missing_device_reports_error_without_killing_program() {
+        let mut eng = CpalEngine::new();
+        eng.stop();
+        eng.set_cue_config(CueConfig {
+            device: Some("no-such-device-xyz".into()),
+            volume: 0.7,
+        });
+        // Honest error (never falls back to the program device), program
+        // transport + program device name unchanged.
+        assert!(matches!(eng.cue_state(), CueState::Error(_)));
+        assert!(eng.cue_play(std::path::Path::new("x.mp3")).is_err());
+        eng.cue_stop();
+        assert!(matches!(eng.cue_state(), CueState::Error(_)));
+        assert_eq!(eng.state(), PlayerState::Stopped);
+    }
+
+    #[test]
+    fn cue_volume_clamps_and_persists_to_config() {
+        let mut eng = CpalEngine::new();
+        eng.set_cue_config(CueConfig::default());
+        eng.set_cue_volume(9.0);
+        assert_eq!(eng.cue_volume(), 1.5);
+        assert_eq!(eng.cue_config().volume, 1.5);
+        eng.set_cue_volume(-1.0);
+        assert_eq!(eng.cue_volume(), 0.0);
+    }
+
+    #[test]
+    fn cue_fade_starts_at_unity_and_stop_without_cursor_parks() {
+        use super::load_volume_bits;
+        let mut eng = CpalEngine::new();
+        eng.set_cue_config(CueConfig::default());
+        assert_eq!(load_volume_bits(&eng.cue_gain), 1.0);
+        assert_eq!(load_volume_bits(&eng.cue_gain_target), 1.0);
+        // No cursor: stop parks immediately without touching the ramp.
+        eng.cue_stop();
+        assert_eq!(eng.cue_state_atomic.load(Ordering::SeqCst), super::CUE_STOPPED);
+        assert_eq!(load_volume_bits(&eng.cue_gain_target), 1.0);
     }
 
     #[test]

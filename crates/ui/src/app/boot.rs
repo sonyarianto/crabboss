@@ -101,6 +101,10 @@ pub(crate) fn boot() -> (App, Task<Message>) {
             tracing::warn!("Mic auto-start failed: {e}");
         }
     }
+    // Cue (PFL) bus (B2 Phase 2): config-only at boot. `None` device =
+    // unavailable, program boot identical to Phase 1. A stale/missing cue
+    // device never fails boot — the engine reports Error/Unavailable.
+    player.set_cue_config(settings.cue.clone());
 
     let db_path = paths.database.clone();
     // Central schema bootstrap first: numbered, transactional migrations.
@@ -254,6 +258,7 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         import_added: 0,
         import_skipped: 0,
         import_total: 0,
+        last_import_dir: None,
         syncing: false,
         sync_rx: None,
         last_auto_sync: None,
@@ -297,8 +302,10 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         device_note: String::new(),
         input_devices,
         mic_note: String::new(),
+        cue_status: String::new(),
         backup_status: String::new(),
         stream_listeners: None,
+        stream_live_config: None,
         listeners_polling: false,
         listeners_rx: None,
         last_listeners_poll: None,
@@ -323,6 +330,10 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         tick_count: 0,
     };
     app.license_status = app.license.status().label().to_string();
+    app.cue_status = app.player.cue_state().label();
+    if app.settings.stream.enabled {
+        app.mark_stream_live();
+    }
     app.refresh_library();
     app.refresh_scheduler();
     app.refresh_carts();

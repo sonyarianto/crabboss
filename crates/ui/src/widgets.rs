@@ -238,6 +238,7 @@ pub(crate) fn stepper(label: String, dec: Message, inc: Message) -> Element<'sta
         button(text("+").size(12)).on_press(inc),
     ]
     .spacing(8)
+    .align_y(iced::Alignment::Center)
     .into()
 }
 

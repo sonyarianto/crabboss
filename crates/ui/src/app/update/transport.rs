@@ -56,6 +56,46 @@ pub(crate) fn pause(state: &mut App) {
     state.is_playing = false;
 }
 
+/// Explicit on-air cut from the Playout strip: the selected library
+/// track goes to program now (crossfading when something is live, via
+/// the normal `play` path). Unlike the removed per-row direct play this
+/// follows the Auto-DJ toggle for continuity instead of forcing it, and
+/// unlike `play` it also fires while something is already Playing.
+pub(crate) fn play_selected(state: &mut App) {
+    let Some(track) = state
+        .lib_selected
+        .and_then(|i| state.lib_tracks.get(i))
+        .cloned()
+    else {
+        state.lib_status = "On Air: select a track first".into();
+        return;
+    };
+    let path = PathBuf::from(&track.file_path);
+    if !path.is_file() {
+        state.lib_status = format!("On Air failed: file missing: {}", track.file_path);
+        return;
+    }
+    tracing::info!("On Air: {:?}", path);
+    match state.player.play(&path) {
+        Ok(()) => {
+            let _ = state.library.record_play(&track.id, track.duration_secs);
+            state.auto_continue = state.autodj;
+            state.is_playing = true;
+            state.now_title = track_label(&track);
+            state.now_artist = track.artist.clone().unwrap_or_default();
+            state.engine_track = Some(path);
+            // A manual cut discards any prefetched deck, so its
+            // "Up next" label dies with it.
+            state.up_next.clear();
+            state.pending_source = None;
+        }
+        Err(e) => {
+            tracing::error!("On Air failed: {}", e);
+            state.lib_status = format!("On Air failed: {}", e);
+        }
+    }
+}
+
 pub(crate) fn stop(state: &mut App) {
     state.player.stop();
     state.auto_continue = false;

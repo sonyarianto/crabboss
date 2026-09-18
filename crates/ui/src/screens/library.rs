@@ -100,26 +100,61 @@ pub(crate) fn panel(state: &App, tools: bool) -> Element<'_, Message> {
     if state.lib_tracks.is_empty() {
         list = list.push(text("Import audio files to get started").size(12));
     } else {
+        // Two independent buses sharing one list:
+        // - program (on-air): engine current path + `is_playing` (green),
+        // - cue (PFL): private headphone bus, never touches program (yellow).
+        // The per-row button controls CUE ONLY; program transport lives in
+        // the Playout strip, so previewing can never cut the broadcast.
+        let live_path = state
+            .player
+            .current_track()
+            .map(|t| t.path.to_string_lossy().to_string());
+        let cue_path = state
+            .player
+            .cue_current_track()
+            .map(|t| t.path.to_string_lossy().to_string());
+        let cue_live = state.player.cue_state().is_playing();
         for (i, t) in state.lib_tracks.iter().take(500).enumerate() {
             let missing = !PathBuf::from(&t.file_path).is_file();
             let base = track_label(t);
             let title = if missing { format!("! {}", base) } else { base };
             let selected = Some(i) == state.lib_selected;
+            let onair =
+                live_path.as_deref() == Some(t.file_path.as_str()) && state.is_playing;
+            let cueing =
+                cue_live && cue_path.as_deref() == Some(t.file_path.as_str());
             let artist = t.artist.clone().unwrap_or_default();
             let dur = fmt_dur(t.duration_secs);
             let gain = t
                 .loudness_gain_db
                 .map(|g| format!("{g:+.1} dB"))
                 .unwrap_or_default();
-            let cells: iced::widget::Row<'_, Message> = row![
+            // Cue toggle: previewing row offers Stop, everything else
+            // offers Cue. Program Stop stays in the Playout strip.
+            let play_btn: Element<'_, Message> = if cueing {
                 button(
-                    text("Play")
+                    text("Stop")
                         .size(11)
                         .width(Length::Fill)
-                        .align_x(iced::alignment::Horizontal::Center)
+                        .align_x(iced::alignment::Horizontal::Center),
                 )
                 .width(PLAY_W)
-                .on_press(Message::LibraryTrackPlay(i)),
+                .style(iced::widget::button::danger)
+                .on_press(Message::LibraryCueStop())
+                .into()
+            } else {
+                button(
+                    text("Cue")
+                        .size(11)
+                        .width(Length::Fill)
+                        .align_x(iced::alignment::Horizontal::Center),
+                )
+                .width(PLAY_W)
+                .on_press(Message::LibraryCuePlay(i))
+                .into()
+            };
+            let cells: iced::widget::Row<'_, Message> = row![
+                play_btn,
                 text(kind_label(t.kind)).size(12).width(KIND_W),
                 button(text(title).size(12))
                     .style(iced::widget::button::text)
@@ -139,8 +174,27 @@ pub(crate) fn panel(state: &App, tools: bool) -> Element<'_, Message> {
             .spacing(6)
             .align_y(iced::Alignment::Center);
             // Selected row: subtle theme-accent wash instead of a ">"
-            // text prefix.
-            let entry: Element<'_, Message> = if selected {
+            // text prefix. Cue wins (yellow) so the preview stays visible;
+            // on-air (green) stays visible even when selection moves on.
+            let entry: Element<'_, Message> = if cueing {
+                container(cells)
+                    .width(Length::Fill)
+                    .style(|theme: &Theme| {
+                        let mut bg = theme.palette().warning;
+                        bg.a = 0.28;
+                        iced::widget::container::Style::default().background(bg)
+                    })
+                    .into()
+            } else if onair {
+                container(cells)
+                    .width(Length::Fill)
+                    .style(|theme: &Theme| {
+                        let mut bg = theme.palette().success;
+                        bg.a = 0.25;
+                        iced::widget::container::Style::default().background(bg)
+                    })
+                    .into()
+            } else if selected {
                 container(cells)
                     .width(Length::Fill)
                     .style(|theme: &Theme| {

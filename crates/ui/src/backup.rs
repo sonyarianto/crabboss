@@ -316,6 +316,9 @@ impl App {
             if let Err(e) = self.player.stream_start() {
                 tracing::warn!("Restore stream start failed: {e}");
             }
+            self.mark_stream_live();
+        } else {
+            self.clear_stream_live();
         }
         self.player.set_mic_config(self.settings.mic.clone());
         if self.settings.mic.enabled {

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::audio::MicConfig;
+use crate::audio::CueConfig;
 use crate::audio::EQ_BAND_COUNT;
 use crate::audio::{TARGET_LUFS, TARGET_MAX_LUFS, TARGET_MIN_LUFS};
 use crate::stream::StreamConfig;
@@ -53,6 +54,11 @@ pub struct AppSettings {
     pub stream: StreamConfig,
     /// Mic/line-in with ducking (§1.6): device, level, duck prefs.
     pub mic: MicConfig,
+    /// Cue (PFL) audition output (B2 Phase 1: config only, no audio yet):
+    /// private headphone bus that never feeds the stream. `None` device =
+    /// cue unavailable. Old configs without this field load as unavailable
+    /// via `#[serde(default)]`.
+    pub cue: CueConfig,
     /// Folders re-scanned for new audio on a timer (§1.8 auto-sync).
     /// Empty = manual import only. Old configs without this field load
     /// as empty via `#[serde(default)]`.
@@ -80,6 +86,7 @@ impl Default for AppSettings {
             loudness_target_lufs: TARGET_LUFS,
             stream: StreamConfig::default(),
             mic: MicConfig::default(),
+            cue: CueConfig::default(),
             watch_folders: Vec::new(),
             auto_sync_enabled: false,
             auto_sync_interval_mins: AUTO_SYNC_DEFAULT_MINUTES,
@@ -117,6 +124,7 @@ impl AppSettings {
             !s.trim().is_empty() && seen.insert(s.into_owned())
         });
         self.mic = std::mem::take(&mut self.mic).sanitized();
+        self.cue = std::mem::take(&mut self.cue).sanitized();
         self
     }
 
@@ -281,6 +289,7 @@ mod tests {
                 ..Default::default()
             },
             mic: MicConfig::default(),
+            cue: CueConfig { device: Some("Headphones".into()), volume: 0.7 },
             watch_folders: vec![PathBuf::from("D:/mix")],
             auto_sync_enabled: true,
             auto_sync_interval_mins: 30,
@@ -311,7 +320,37 @@ mod tests {
         assert_eq!(back.stream.port, 8443);
         assert_eq!(back.stream.mount, "/live");
         assert_eq!(back.stream.bitrate_kbps, 192);
+        assert_eq!(back.cue.device.as_deref(), Some("Headphones"));
+        assert!((back.cue.volume - 0.7).abs() < 1e-6);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn cue_roundtrip_and_clamp() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("crabboss-settings-cue.json");
+        let s = AppSettings {
+            cue: CueConfig { device: Some("Realtek".into()), volume: 0.7 },
+            ..Default::default()
+        };
+        s.save(&path).unwrap();
+        let back = AppSettings::load(&path).settings();
+        assert_eq!(back.cue.device.as_deref(), Some("Realtek"));
+        assert!((back.cue.volume - 0.7).abs() < 1e-6);
+        std::fs::remove_file(&path).ok();
+        // Old configs without "cue" load as unavailable; out-of-range
+        // volume clamps on load.
+        let old = dir.join("crabboss-settings-cue-old.json");
+        std::fs::write(&old, br#"{"station_name":"Old"}"#).unwrap();
+        let back = AppSettings::load(&old).settings();
+        assert!(back.cue.device.is_none());
+        assert!((back.cue.volume - 0.8).abs() < 1e-6);
+        let bad = dir.join("crabboss-settings-cue-bad.json");
+        std::fs::write(&bad, br#"{"cue":{"volume":9.0}}"#).unwrap();
+        let back = AppSettings::load(&bad).settings();
+        assert_eq!(back.cue.volume, 1.5);
+        std::fs::remove_file(&old).ok();
+        std::fs::remove_file(&bad).ok();
     }
 
     #[test]

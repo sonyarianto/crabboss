@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::audio::mixer::EQ_BAND_COUNT;
+use crate::audio::{CueConfig, CueState};
 use crate::error::Result;
 
 /// Information about the currently loaded track.
@@ -164,6 +165,50 @@ pub trait Engine {
     /// Seconds into the current track (`0.0` when nothing is playing).
     fn position_secs(&self) -> f64 {
         0.0
+    }
+    // -- Cue (PFL) audition bus (B2) --------------------------------------
+    // Phase 1: defaults only (unavailable). Phase 2 overrides these in
+    // `CpalEngine` with a second output stream. The cue bus is fully
+    // independent: it never feeds the stream tap, the mic ducker, the
+    // silence monitor, or `record_play`. Keeping defaults here means the
+    // program path compiles and behaves identically until Phase 2 lands.
+    /// Install the cue output config; applied on next cue start.
+    fn set_cue_config(&mut self, _config: CueConfig) {}
+    /// Current cue config.
+    fn cue_config(&self) -> CueConfig {
+        CueConfig::default()
+    }
+    /// Start `path` on the cue bus (program untouched).
+    fn cue_play(&self, _path: &Path) -> Result<()> {
+        Err(crate::error::CrabError::Audio(
+            "cue unavailable (no cue device)".into(),
+        ))
+    }
+    /// Stop the cue bus (program untouched).
+    fn cue_stop(&self) {}
+    /// Live cue state.
+    fn cue_state(&self) -> CueState {
+        CueState::Unavailable
+    }
+    /// Cue monitor gain 0.0..1.5.
+    fn cue_volume(&self) -> f32 {
+        CueConfig::default().volume
+    }
+    /// Set cue monitor gain (live when cue is running).
+    fn set_cue_volume(&self, _vol: f32) {}
+    /// Seconds into the cue track (`0.0` when cue is idle).
+    fn cue_position_secs(&self) -> f64 {
+        0.0
+    }
+    /// Cue current track, if any (never surfaced to stream metadata).
+    fn cue_current_track(&self) -> Option<TrackInfo> {
+        None
+    }
+    /// The cue device actually opened (may differ from the request on
+    /// fallback; `"None (cue off)"` when no cue stream is running).
+    /// Mirrors [`Engine::device_name`] for the program bus.
+    fn cue_device_name(&self) -> String {
+        "None (cue off)".to_string()
     }
     /// Queued-but-unheard decks (auto-DJ prefetch bookkeeping).
     fn pending_count(&self) -> usize {

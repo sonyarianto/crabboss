@@ -10,6 +10,7 @@ use std::sync::mpsc::Receiver;
 use crabcore::audio::Engine;
 use crabcore::library::{Library, Track, TrackKind};
 use crabcore::playlist::{PlaylistManager, RuleHistory};
+use crabcore::stream::StreamConfig;
 
 use crate::widgets::{LoudnessDone, SyncFound};
 
@@ -170,6 +171,11 @@ pub(crate) struct App {
     pub(crate) import_added: usize,
     pub(crate) import_skipped: usize,
     pub(crate) import_total: usize,
+    /// Last directory the import dialog successfully picked from. Used
+    /// as the next dialog's starting folder so Windows doesn't fall
+    /// back to Quick Access / This PC (slow "Working on it..."
+    /// enumeration on network / OneDrive machines).
+    pub(crate) last_import_dir: Option<PathBuf>,
 
     // Folder auto-sync (timer walk; results queue via import above)
     pub(crate) syncing: bool,
@@ -225,6 +231,11 @@ pub(crate) struct App {
     pub(crate) device_note: String,
     pub(crate) input_devices: Vec<String>,
     pub(crate) mic_note: String,
+    /// Cue (PFL) status line for Settings > Audio Device + Library hints
+    /// (e.g. "Cue live: Realtek" / "Cue: no device"). Program status
+    /// stays in `lib_status` / footer; cue never writes there except for
+    /// per-pick errors shown inline in the Library list.
+    pub(crate) cue_status: String,
     pub(crate) backup_status: String,
     /// Last polled listener count (`None` = never polled or last poll
     /// failed — the UI shows "—", never an error state).
@@ -232,6 +243,12 @@ pub(crate) struct App {
     pub(crate) listeners_polling: bool,
     pub(crate) listeners_rx: Option<Receiver<Option<u64>>>,
     pub(crate) last_listeners_poll: Option<std::time::Instant>,
+    /// Full config snapshot taken when the stream (re)starts. The encoder
+    /// + connection are built once per start from that snapshot, while
+    /// every field on the screen edits the *next* connection — so without
+    /// this the UI would show the selection as if it were on air. `None`
+    /// = stream never started (or stopped).
+    pub(crate) stream_live_config: Option<StreamConfig>,
     /// Boot-time settings file warning (invalid/unreadable file). `None`
     /// on first run and on clean loads: no news is good news.
     pub(crate) settings_notice: Option<String>,
@@ -262,6 +279,15 @@ pub(crate) struct App {
 }
 
 impl App {
+    /// Snapshot the connection actually put on air (encoder + server
+    /// parameters are fixed per `stream_start`).
+    pub(crate) fn mark_stream_live(&mut self) {
+        self.stream_live_config = Some(self.settings.stream.clone());
+    }
+
+    pub(crate) fn clear_stream_live(&mut self) {
+        self.stream_live_config = None;
+    }
     // -- persistence -------------------------------------------------------
     pub(crate) fn save_settings(&mut self) {
         // The boot file was untrusted (invalid/unreadable): move it aside

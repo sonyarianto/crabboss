@@ -1,8 +1,7 @@
 //! Central dispatcher: one match on `Message`, one domain function
-//! per arm, `Task::none()` at the end (every arm is synchronous).
-//! Trivial field assigns stay inline; anything with logic lives in its
-//! domain module. `refresh_counts` also lives here: it spans
-//! library/playlists/scheduler, so no single domain owns it.
+//! per arm. Most arms are synchronous (`Task::none()` at the end);
+//! arms that open a native dialog return their `Task` early so the
+//! iced event loop never blocks.
 
 use iced::Task;
 
@@ -45,6 +44,7 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::Stop => transport::stop(state),
         Message::Next => transport::next(state),
         Message::Prev => transport::prev(state),
+        Message::PlaySelected => transport::play_selected(state),
         Message::VolumeChanged(v) => transport::set_volume(state, v),
         Message::AutodjToggled(en) => transport::toggle_autodj(state, en),
         // -- Library ---------------------------------------------------------
@@ -53,8 +53,10 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::LibraryMissingToggled(only) => library::missing_toggled(state, only),
         Message::LibraryDupesToggled(only) => library::dupes_toggled(state, only),
         Message::LibraryTrackSelected(i) => library::track_selected(state, i),
-        Message::LibraryTrackPlay(i) => library::track_play(state, i),
-        Message::ImportFiles => library::import_files(state),
+        Message::LibraryCuePlay(i) => library::cue_play(state, i),
+        Message::LibraryCueStop() => library::cue_stop(state),
+        Message::ImportFiles => return library::import_files(state),
+        Message::ImportFilesPicked(files) => library::import_files_picked(state, files),
         Message::HealthCheck => library::health_check(state),
         Message::LoudnessScan => library::loudness_scan(state),
         Message::AutoSyncToggled(on) => library::autosync_toggled(state, on),
@@ -126,13 +128,16 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         // -- Settings ------------------------------------------------------------
         Message::SettingsRefreshDevices => settings::refresh_devices(state),
         Message::SettingsSelectDevice(name) => settings::select_device(state, name),
+        Message::CueSelectDevice(name) => settings::cue_select_device(state, name),
+        Message::CueVolumeInc => settings::cue_volume_inc(state),
+        Message::CueVolumeDec => settings::cue_volume_dec(state),
         Message::XfadeInc => settings::xfade_inc(state),
         Message::XfadeDec => settings::xfade_dec(state),
         Message::SilenceInc => settings::silence_inc(state),
         Message::SilenceDec => settings::silence_dec(state),
         Message::EqToggle => settings::eq_toggle(state),
-        Message::EqInc(band) => settings::eq_inc(state, band),
-        Message::EqDec(band) => settings::eq_dec(state, band),
+        Message::EqSet(band, v) => settings::eq_set(state, band, v),
+        Message::EqSave => settings::eq_save(state),
         Message::EqReset => settings::eq_reset(state),
         Message::LimiterInc => settings::limiter_inc(state),
         Message::LimiterDec => settings::limiter_dec(state),
@@ -150,6 +155,7 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::StreamBitrateInc => settings::stream_bitrate_inc(state),
         Message::StreamBitrateDec => settings::stream_bitrate_dec(state),
         Message::StreamFormatChanged(format) => settings::stream_format_changed(state, format),
+        Message::StreamRestart => settings::stream_restart(state),
         Message::MicToggle => settings::mic_toggle(state),
         Message::MicRefreshDevices => settings::mic_refresh_devices(state),
         Message::MicSelectDevice(name) => settings::mic_select_device(state, name),

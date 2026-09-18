@@ -3,6 +3,8 @@
 //! The central dispatcher in `update` matches on these and delegates
 //! to one domain function each.
 
+use std::path::PathBuf;
+
 use crabcore::library::TrackKind;
 use crabcore::stream::StreamFormat;
 
@@ -19,6 +21,10 @@ pub(crate) enum Message {
     Stop,
     Next,
     Prev,
+    /// Deliberate cut: fire the selected library track on program now
+    /// (crossfade when live). The per-row buttons are cue-only, so this
+    /// — sitting in the program strip — is the one explicit on-air gate.
+    PlaySelected,
     VolumeChanged(f32),
     AutodjToggled(bool),
     // Library
@@ -27,8 +33,10 @@ pub(crate) enum Message {
     LibraryMissingToggled(bool),
     LibraryDupesToggled(bool),
     LibraryTrackSelected(usize),
-    LibraryTrackPlay(usize),
+    LibraryCuePlay(usize),
+    LibraryCueStop(),
     ImportFiles,
+    ImportFilesPicked(Vec<PathBuf>),
     HealthCheck,
     LoudnessScan,
     AutoSyncToggled(bool),
@@ -88,13 +96,16 @@ pub(crate) enum Message {
     // Settings
     SettingsRefreshDevices,
     SettingsSelectDevice(String),
+    CueSelectDevice(String),
+    CueVolumeInc,
+    CueVolumeDec,
     XfadeInc,
     XfadeDec,
     SilenceInc,
     SilenceDec,
     EqToggle,
-    EqInc(usize),
-    EqDec(usize),
+    EqSet(usize, f32),
+    EqSave,
     EqReset,
     LimiterInc,
     LimiterDec,
@@ -112,6 +123,7 @@ pub(crate) enum Message {
     StreamBitrateInc,
     StreamBitrateDec,
     StreamFormatChanged(StreamFormat),
+    StreamRestart,
     MicToggle,
     MicRefreshDevices,
     MicSelectDevice(String),

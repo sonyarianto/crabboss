@@ -3,7 +3,7 @@
 
 use iced::{
     widget::{button, checkbox, column, container, progress_bar, row, slider, text},
-    Element, Length,
+    Element, Length, Theme,
 };
 
 use crate::app::{App, Message};
@@ -71,8 +71,10 @@ fn view_player_panel(state: &App) -> Element<'_, Message> {
     } else {
         Message::Play
     };
-    // Fixed cover box (layout never jumps when art appears); empty for
-    // untagged audio.
+    // Fixed cover box (layout never jumps when art appears). Untagged
+    // audio gets a visibly intentional bordered placeholder — an
+    // invisible reserved box reads as a broken indent (the whole strip
+    // sits ~84px right of its neighbors).
     let cover: Element<'_, Message> = match &state.now_art {
         Some(handle) => container(
             iced::widget::Image::new(handle.clone())
@@ -82,10 +84,31 @@ fn view_player_panel(state: &App) -> Element<'_, Message> {
         .width(Length::Fixed(64.0))
         .height(Length::Fixed(64.0))
         .into(),
-        None => container(iced::widget::space::horizontal())
-            .width(Length::Fixed(64.0))
-            .height(Length::Fixed(64.0))
-            .into(),
+        // NOTE: no `center_y(Fill)` here — it overrides the fixed
+        // height and stretches the box down the whole strip. The two
+        // fill spacers do the vertical centering instead.
+        None => container(
+            column![
+                iced::widget::space::vertical(),
+                text("No cover")
+                    .size(10)
+                    .width(Length::Fill)
+                    .align_x(iced::alignment::Horizontal::Center),
+                iced::widget::space::vertical(),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill),
+        )
+        .width(Length::Fixed(64.0))
+        .height(Length::Fixed(64.0))
+        .style(|theme: &Theme| {
+            iced::widget::container::Style::default().border(iced::Border {
+                color: theme.palette().text.scale_alpha(0.3),
+                width: 1.0,
+                radius: 4.0.into(),
+            })
+        })
+        .into(),
     };
     // Horizontal broadcast strip: cover, then track line, transport +
     // progress + time, then Auto-DJ + up-next + monitor volume.
@@ -98,6 +121,11 @@ fn view_player_panel(state: &App) -> Element<'_, Message> {
                 button(text(play_label).size(13)).on_press(play_msg),
                 button(text("Stop").size(13)).on_press(Message::Stop),
                 button(text("Next").size(13)).on_press(Message::Next),
+                // The one explicit on-air gate: fires the selected list
+                // track to program now (list buttons are cue-only).
+                button(text("On Air").size(13))
+                    .style(iced::widget::button::primary)
+                    .on_press(Message::PlaySelected),
                 progress_bar(0.0..=1.0, frac).length(Length::Fill),
                 text(format!("{} / {}", cur, tot)).size(12),
             ]
