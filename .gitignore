@@ -10,3 +10,7 @@
 /radioboss/
 # Local runtime prefs (machine devices + secrets); see settings.example.json
 /settings.json
+# VitePress site toolchain output (website/ is deployed from source)
+/website/node_modules
+/website/.vitepress/dist
+/website/.vitepress/cache
