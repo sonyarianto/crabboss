@@ -148,14 +148,7 @@ pub(crate) fn boot() -> (App, Task<Message>) {
             "Daily",
             None,
         );
-        let _ = scheduler.create(
-            "Morning show",
-            "load",
-            "Morning.m3u",
-            "08:00",
-            "Daily",
-            None,
-        );
+        let _ = scheduler.create("Morning show", "load", "Morning", "08:00", "Daily", None);
         let _ = scheduler.create(
             "Top-of-hour jingle",
             "play",

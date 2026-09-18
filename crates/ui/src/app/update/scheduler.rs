@@ -145,6 +145,40 @@ impl App {
     }
 
     // -- Scheduler firing (shared by manual Run + auto-tick) ------------------
+    /// Play one audio file target straight to program (the legacy
+    /// `play` action and the `load` fallback for non-playlist targets).
+    pub(crate) fn play_single_file(&mut self, target: &str) {
+        use std::path::PathBuf;
+
+        let path = PathBuf::from(target);
+        if path.is_file() {
+            let logged = self
+                .library
+                .find_by_path(target)
+                .ok()
+                .flatten()
+                .map(|t| (t.id, t.duration_secs));
+            match self.player.play(&path) {
+                Ok(()) => {
+                    if let Some((id, dur)) = logged {
+                        let _ = self.library.record_play(&id, dur);
+                    }
+                    self.auto_continue = true;
+                    self.is_playing = true;
+                    self.now_title = target.to_string();
+                    self.now_artist = "Scheduler".into();
+                    self.engine_track = Some(path);
+                    self.up_next.clear();
+                    self.pending_source = None;
+                }
+                Err(e) => tracing::error!("Scheduler play failed: {}", e),
+            }
+        } else {
+            tracing::warn!("Scheduler target not found on disk: {target}");
+            self.now_title = format!("Scheduled: {target} (file missing)");
+        }
+    }
+
     pub(crate) fn fire_scheduled_event(&mut self, idx: usize) {
         use std::path::PathBuf;
 
@@ -224,34 +258,31 @@ impl App {
                     self.now_title = format!("Scheduled: {} (file missing)", event.target);
                 }
             }
-            "load" | "play" => {
-                let path = PathBuf::from(&event.target);
-                if path.is_file() {
-                    let logged = self
-                        .library
-                        .find_by_path(&event.target)
-                        .ok()
-                        .flatten()
-                        .map(|t| (t.id, t.duration_secs));
-                    match self.player.play(&path) {
-                        Ok(()) => {
-                            if let Some((id, dur)) = logged {
-                                let _ = self.library.record_play(&id, dur);
-                            }
-                            self.auto_continue = true;
-                            self.is_playing = true;
-                            self.now_title = event.target.clone();
+            "load" => {
+                // A2: a saved playlist name first (the Home list shows
+                // exactly these) — fired in stored order via the shared
+                // engine. Legacy single-file targets fall through to the
+                // `play` path below, so existing events don't break.
+                if let Some(id) =
+                    super::generator::find_playlist_id(&self.playlist_manager, &event.target)
+                {
+                    match super::generator::fire_playlist_to_air(self, &id) {
+                        Ok(f) => {
+                            self.now_title = format!("Scheduled '{}': {}", event.name, f.detail());
                             self.now_artist = "Scheduler".into();
-                            self.engine_track = Some(path);
-                            self.up_next.clear();
-                            self.pending_source = None;
+                            self.pending_source = Some("Scheduler".into());
                         }
-                        Err(e) => tracing::error!("Scheduler play failed: {}", e),
+                        Err(msg) => {
+                            self.now_title = format!("Scheduled '{}': {msg}", event.name);
+                        }
                     }
                 } else {
-                    tracing::warn!("Scheduler target not found on disk: {}", event.target);
-                    self.now_title = format!("Scheduled: {} (file missing)", event.target);
+                    self.play_single_file(&event.target);
                 }
+            }
+            "play" => {
+                let target = event.target.clone();
+                self.play_single_file(&target);
             }
             other => {
                 tracing::info!("Scheduler command '{}' (no-op in MVP)", other);

@@ -249,30 +249,72 @@ impl App {
 /// promotion; only the first needs an explicit `record_play` here.
 /// Continuity follows the Auto-DJ toggle, like the On Air gate.
 pub(crate) fn playlist_to_air(state: &mut App, playlist_id: String) {
-    let pl = match state.playlist_manager.get_with_items(&playlist_id) {
+    match fire_playlist_to_air(state, &playlist_id) {
+        Ok(f) => {
+            state.gen_status = format!("On air: '{}' ({})", f.name, f.detail());
+        }
+        Err(msg) => {
+            state.gen_status = msg;
+        }
+    }
+}
+
+/// Fired-playlist summary for status lines (Home and Scheduler phrase
+/// it differently, so the message stays with the caller).
+pub(crate) struct PlaylistFire {
+    pub(crate) name: String,
+    pub(crate) to_air: usize,
+    pub(crate) missing: usize,
+    pub(crate) held_back: bool,
+}
+
+impl PlaylistFire {
+    pub(crate) fn detail(&self) -> String {
+        let mut parts = vec![format!("{} to air", self.to_air)];
+        if self.missing > 0 {
+            parts.push(format!("{} missing skipped", self.missing));
+        }
+        if self.held_back {
+            parts.push("queued deck plays first".into());
+        }
+        parts.join(", ")
+    }
+}
+
+/// Look a saved playlist id up by its display name (what the scheduler
+/// `load` target and the operator type). Pure over the manager.
+pub(crate) fn find_playlist_id(playlists: &PlaylistManager, name: &str) -> Option<String> {
+    playlists
+        .list_all()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|p| p.name == name)
+        .map(|p| p.id)
+}
+
+/// Shared fire engine behind the Home button and scheduler `load`.
+/// On success the transport already reflects the new air state; the
+/// caller only phrases the returned summary into its own status line.
+pub(crate) fn fire_playlist_to_air(
+    state: &mut App,
+    playlist_id: &str,
+) -> Result<PlaylistFire, String> {
+    let pl = match state.playlist_manager.get_with_items(playlist_id) {
         Ok(Some(p)) => p,
-        Ok(None) => {
-            state.gen_status = "Playlist gone — pick another".into();
-            return;
-        }
-        Err(e) => {
-            state.gen_status = format!("Playlist read failed: {e}");
-            return;
-        }
+        Ok(None) => return Err("Playlist gone — pick another".into()),
+        Err(e) => return Err(format!("Playlist read failed: {e}")),
     };
     if pl.items.is_empty() {
-        state.gen_status = format!("'{}' is empty", pl.name);
-        return;
+        return Err(format!("'{}' is empty", pl.name));
     }
     // Resolve in stored order; missing files skip with a count.
     let (ready, missing) = resolve_playlist_order(&state.library, &pl.items);
     if ready.is_empty() {
-        state.gen_status = format!(
+        return Err(format!(
             "'{}': all {} tracks missing, nothing queued",
             pl.name,
             pl.items.len()
-        );
-        return;
+        ));
     }
     // A stale prefetch/queued deck (Auto-DJ, scheduler) still plays
     // before the playlist — say so instead of surprising the operator.
@@ -298,24 +340,23 @@ pub(crate) fn playlist_to_air(state: &mut App, playlist_id: String) {
                 .map(|(_, _, _, l)| l.clone())
                 .unwrap_or_default();
             state.pending_source = Some("Playlist".into());
-            let mut detail = vec![format!("{} to air", queued + 1)];
-            if missing > 0 {
-                detail.push(format!("{missing} missing skipped"));
-            }
-            if held_back {
-                detail.push("queued deck plays first".into());
-            }
-            state.gen_status = format!("On air: '{}' ({})", pl.name, detail.join(", "));
+            let fire = PlaylistFire {
+                name: pl.name.clone(),
+                to_air: queued + 1,
+                missing,
+                held_back,
+            };
             tracing::info!(
                 "Playlist to air: '{}' ({} to air, {} missing skipped)",
                 pl.name,
                 queued + 1,
                 missing
             );
+            Ok(fire)
         }
         Err(e) => {
             tracing::error!("Playlist to air failed: {e}");
-            state.gen_status = format!("Playlist to air failed: {e}");
+            Err(format!("Playlist to air failed: {e}"))
         }
     }
 }
@@ -380,6 +421,41 @@ mod tests {
     #[test]
     fn playlist_name_combines_daypart_and_stamp() {
         assert_eq!(playlist_name("Morning", "08:00"), "Morning 08:00");
+    }
+
+    #[test]
+    fn find_playlist_id_matches_display_name() {
+        let dir = test_dir("findname");
+        let db = dir.join("station.db");
+        let lib = Library::open(&db).unwrap();
+        seed_music(&lib, &dir, 2);
+        let pls = PlaylistManager::open(&db).unwrap();
+        let pl = pls.create("Morning Mix", None).unwrap();
+        assert_eq!(find_playlist_id(&pls, "Morning Mix"), Some(pl.id.clone()));
+        assert_eq!(find_playlist_id(&pls, "Evening Mix"), None);
+        assert_eq!(find_playlist_id(&pls, "morning mix"), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fire_detail_phrases_counts() {
+        let f = PlaylistFire {
+            name: "X".into(),
+            to_air: 12,
+            missing: 0,
+            held_back: false,
+        };
+        assert_eq!(f.detail(), "12 to air");
+        let f = PlaylistFire {
+            name: "X".into(),
+            to_air: 11,
+            missing: 1,
+            held_back: true,
+        };
+        assert_eq!(
+            f.detail(),
+            "11 to air, 1 missing skipped, queued deck plays first"
+        );
     }
 
     #[test]
