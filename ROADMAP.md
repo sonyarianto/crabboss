@@ -54,8 +54,10 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
 - [x] Router: Home / Playout (stacked broadcast strip) / Library / Scheduler / Cart Wall / Reports / Ads / Settings screens + sidebar nav + on-air footer
 - [x] License key activation (offline, `CB-XXXX-XXXX-XXXX`)
 - [x] Library: `scan_directory()` via `walkdir`, live list + search model, aligned Kind/Title/Artist/Dur/Gain columns, async `rfd` import dialog (starting-directory aware), tap-to-cue + On Air program gate
-- [x] Playlist store wired (`PlaylistManager::open`, Home counts) + unit tests
-- [x] Scheduler MVP: event list, Add/Edit dialog (time/action/days), auto-tick firing `generate`/`load`/`play`
+- [x] Playlist store wired (`PlaylistManager::open`, Home saved list with counts + stored-order detail) + unit tests (manager CRUD incl. rename, dense remove, move/reorder; resolve-order + missing-skip contract)
+- [x] Playlist to Air (A1): Home `Queue to Air` fires a saved rotation in stored order (first track plays now, rest queue behind; missing skipped with a count)
+- [x] Manual playlist builder (B): Home create named playlists, expand/edit stored order (Up/Down/Remove), add selected Library track, delete playlist; missing files flagged, fire skips them
+- [x] Scheduler MVP: event list, Add/Edit dialog (time/action/days), auto-tick firing `generate`/`load`/`play`/`queue`; `load` fires a named playlist in stored order via the shared fire engine (A2)
 - [x] Track kinds (music/jingle/ad): auto-classify on import, `set_kind`, pre-kind DB migration
 - [x] Cart Wall MVP: 8 pads, instant play, jingle-first seeding/loading with kind badges
 - [x] Crossfader + gapless (see §1.1 — stereo dual-cursor engine, equal-power/linear curves, background decode loader)
@@ -86,9 +88,9 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 |---|---|---|---|
 | Playback engine | Gapless, sample-accurate crossfade, curve choice | Stereo dual-cursor engine, equal-power/linear crossfade, background decode loader, gapless queued handoff | ✅ |
 | EQ / dynamics | Full EQ, limiter, loudness normalization | 12-band peaking EQ (±12 dB) + brickwall limiter + BS.1770/R128 loudness normalization (library scan, per-track gain at decode) | ✅ |
-| Playlist generator | Rotation, no-repeat, separation, playcount priority, dayparting, multi-playlist UI | Engine complete (repeat/separation/priority/daypart/jingles) + scheduler `generate` + Auto-DJ rotation; multi-preset UI open | 🟡 |
+| Playlist generator | Rotation, no-repeat, separation, playcount priority, dayparting, multi-playlist UI | Engine complete (repeat/separation/priority/daypart/jingles) + scheduler `generate` + Auto-DJ rotation + Home multi-preset UI (4 dayparts at once) + saved list with stored-order Queue to Air + manual builder (create/reorder/remove/delete) | ✅ |
 | Ad scheduler | Dated blocks, intros/outros, color-coded list | Dated blocks with intro→spot→outro chained breaks + engine pending queue | ✅ |
-| Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP + "valid until" expiry with row badges and warnings banner | ✅ |
+| Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP + "valid until" expiry with row badges and warnings banner + `load` fires a named playlist in stored order + `queue` insert-after | ✅ |
 | Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
 | Preview / PFL | Pre-listen on a second output without broadcasting | Independent cue bus (second output, click-free fades) + explicit On Air gate; cue never touches program/stream/reports | ✅ |
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
@@ -149,7 +151,10 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       windows across picks (`generate_next`), `forecast_up_next` simulates
       coming picks on cloned history for the Coming-Up display, and the
       jingle slot fires at interval via logic shared with batch rotations
-- [ ] Multi-playlist generation UI (several dayparts/rotations at once) — ✅ done (Home fires 4 dayparts at once)
+- [x] Multi-playlist generation UI (several dayparts/rotations at once) — Home fires 4 dayparts at once
+- [x] Manual builder (B): Home create named playlists, expand/edit stored order (Up/Down/Remove), add selected Library track, delete playlist; missing files flagged with a count, fire skips them
+- [x] Playlist to Air (A1) + scheduler `load` (A2) share `fire_playlist_to_air`: stored-order fire (first track plays now, rest queue behind), missing-skip count, queued-deck `held_back` notice, play-logged with Auto-DJ-aware continuity
+- [x] Playlist store ops: `rename`, transactional dense `remove_at` (no position gaps), index-based `move_item`, FK-cascade delete — unit-tested
 
 ### 1.3 Ads, Scheduler & Cart depth
 - [x] Ad blocks with start/end date ranges (validity window + weekday + HH:MM, full Add/Edit UI)
@@ -161,6 +166,10 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       Add/Edit dialog; empty = runs forever
 - [x] "Insert after current track" (`queue` action + `Engine::queue`:
       blends at the boundary with end-of-track auto-fade)
+- [x] Scheduler `load` fires a named saved playlist in stored order (A2):
+      exact display-name match (case-sensitive, as shown on Home) via the
+      shared `fire_playlist_to_air` engine; unknown names fall back to the
+      legacy single-file `play` path so existing events don't break
 - [x] Cart hotkeys (keys 1–8), per-pad progress bar +
       playing highlight, and assign flow (Assign → arm a library track →
       tap a pad) with pad-place
@@ -249,7 +258,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] Async `rfd` native file dialog for import (+ report export)
 
 ### 1.10 Quality gates
-- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — full suite green, no exceptions: kind classification + repair, loudness store/count, migrations, generator rules (incl. cross-pick `RuleHistory` + forecast + live-jingle cadence parity), manager CRUD, audio engine (loader generations, tap sharing, prefetch guard, handshake matrix, lock-poison survival), remove-track FK cascade across managers, settings (incl. example-file drift guard). (Counts intentionally unlisted — they rot every PR; CI is the source of truth.)
+- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — full suite green, no exceptions: kind classification + repair, loudness store/count, migrations, generator rules (incl. cross-pick `RuleHistory` + forecast + live-jingle cadence parity), manager CRUD (incl. rename, dense remove, move/reorder), stored-order resolve + missing-skip, audio engine (loader generations, tap sharing, prefetch guard, handshake matrix, lock-poison survival), remove-track FK cascade across managers, settings (incl. example-file drift guard). (Counts intentionally unlisted — they rot every PR; CI is the source of truth.)
 - [x] `cargo fmt` + `clippy` in CI (`-D warnings`, zero warnings) + `ci.yml` (fmt/clippy/test on push+PR)
 
 ## 2. Beyond Parity — Where CrabBoss Wins

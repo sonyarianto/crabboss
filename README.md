@@ -11,8 +11,8 @@ A professional radio station management application featuring audio playback, li
 - ✅ **Audio Playback** — Play, pause, stop, volume via cpal; stereo gapless engine with equal-power crossfade and background decoding (UI never freezes)
 - ✅ **Cue (PFL) + On Air Gate** — Private headphone audition bus on a second output (click-free fades, never touches program/stream/reports); deliberate crossfaded on-air cut of the selected track from the Playout strip
 - ✅ **Music Library** — SQLite database with metadata extraction, search, health scan, loudness analysis, auto-classification (music/jingle/ad)
-- ✅ **Playlist Management** — Create, edit, and manage playlists; auto-generator with rotation rules (no-repeat, separation, playcount priority, dayparting, jingle slots)
-- ✅ **Scheduler** — Time + weekday events with expiration, Auto-DJ continuity with prefetch handoff and Coming-Up forecast
+- ✅ **Playlist Management** — Manual builder (create named playlists, add from Library, reorder Up/Down, remove, delete) + auto-generator with rotation rules (no-repeat, separation, playcount priority, dayparting, jingle slots); saved rotations fire to air in stored order (Home button or scheduler `load`), missing files skipped with a count
+- ✅ **Scheduler** — Time + weekday events with `play`/`load`/`generate`/`queue` actions (`load` fires a named playlist in stored order), valid-until expiry with badges, Auto-DJ continuity with prefetch handoff and Coming-Up forecast
 - ✅ **Advertisement Scheduler** — Dated blocks with intro→spot→outro chained breaks
 - ✅ **Cart Wall** — 8 pads with hotkeys, progress, assign-from-library
 - ✅ **12-Band EQ + Limiter + Loudness** — Program EQ, brickwall limiter, BS.1770/R128 normalization
