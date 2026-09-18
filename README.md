@@ -1,5 +1,7 @@
 # 🦀 CrabBoss
 
+[![CI](https://github.com/sonyarianto/crabboss/actions/workflows/ci.yml/badge.svg)](https://github.com/sonyarianto/crabboss/actions/workflows/ci.yml)
+
 **Radio Automation Software**
 
 A professional radio station management application featuring audio playback, library management, playlist automation, and streaming capabilities.
@@ -7,23 +9,24 @@ A professional radio station management application featuring audio playback, li
 ## Features
 
 - ✅ **Audio Playback** — Play, pause, stop, volume via cpal; stereo gapless engine with equal-power crossfade and background decoding (UI never freezes)
+- ✅ **Cue (PFL) + On Air Gate** — Private headphone audition bus on a second output (click-free fades, never touches program/stream/reports); deliberate crossfaded on-air cut of the selected track from the Playout strip
 - ✅ **Music Library** — SQLite database with metadata extraction, search, health scan, loudness analysis, auto-classification (music/jingle/ad)
 - ✅ **Playlist Management** — Create, edit, and manage playlists; auto-generator with rotation rules (no-repeat, separation, playcount priority, dayparting, jingle slots)
 - ✅ **Scheduler** — Time + weekday events with expiration, Auto-DJ continuity with prefetch handoff and Coming-Up forecast
 - ✅ **Advertisement Scheduler** — Dated blocks with intro→spot→outro chained breaks
 - ✅ **Cart Wall** — 8 pads with hotkeys, progress, assign-from-library
 - ✅ **12-Band EQ + Limiter + Loudness** — Program EQ, brickwall limiter, BS.1770/R128 normalization
-- ✅ **Streaming Output** — Icecast source client (MP3, plain + TLS) with auto-reconnect and Settings UI
+- ✅ **Streaming Output** — Icecast source client (MP3/Opus, plain + TLS) with auto-reconnect, live-encoder indicator, one-click apply-and-restart, and Settings UI
 - ✅ **Microphone/Line-In** — Live input with voice-activated ducking and bed mix
-- ✅ **Reports** — Play logs with ranged reports + CSV export
+- ✅ **Reports** — Play logs with ranged reports + CSV/XLSX export
 - ✅ **Dark Theme UI** — Modern dark radio-station theme via Iced (sidebar navigation, on-air status footer, aligned library table)
 
 ### Coming Soon
 
-- 🔄 Shoutcast output + listener stats
+- 🔄 Shoutcast output
 - 🔄 Voice tracking & teasers
-- 🔄 Library depth (mass tag editor, BPM scan, dupe detection, auto-sync)
-- 🔄 XLS/PDF report export
+- 🔄 Library depth (mass tag editor, BPM scan)
+- 🔄 PDF report export
 - 🔄 Headless/server mode + web remote UI
 
 ## Tech Stack

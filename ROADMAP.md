@@ -15,7 +15,6 @@ the legacy rodio `Player` and the `rodio` dependency are removed.
 **Why rodio is insufficient:**
 - `Sink::append()` — no sample-accurate gapless / crossfade control.
 - No DSP insert point — can't do 12-band EQ, ducking, limiter, loudness.
-- Single output only — can't do program + cue/monitor buses, mic/line-in mix, Icecast/Shoutcast tee.
 - Device / latency / exclusive-mode control hidden.
 - Current `stop()` takes the `Sink` and never recreates it (replay goes silent) — symptom of fighting the abstraction.
 
@@ -34,7 +33,10 @@ background loader: symphonia decode -> loudness gain -> rubato resample ->
 Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
   cpal OutputStream (program, x monitor volume)
   + cpal InputStream (mic/line-in via rtrb, ducked, pre-limiter/tap)
-  + Icecast tee (post-DSP tap via rtrb -> MP3 sender thread)
+  + Icecast tee (post-DSP tap via rtrb -> MP3/Opus sender thread)
+  + cue/PFL bus (own cpal OutputStream on a second device, flat preview
+    with ~30 ms click-free fades; never feeds the stream tap, mixer,
+    silence monitor, or play log)
 ```
 
 **Migration (kept `crabui` working throughout):**
@@ -51,7 +53,7 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
 - [x] `CpalEngine` MVP (play/pause/volume parity) — rubato resample TODO
 - [x] Router: Home / Playout (stacked broadcast strip) / Library / Scheduler / Cart Wall / Reports / Ads / Settings screens + sidebar nav + on-air footer
 - [x] License key activation (offline, `CB-XXXX-XXXX-XXXX`)
-- [x] Library: `scan_directory()` via `walkdir`, live list + search model, aligned Kind/Title/Artist/Dur/Gain columns, `rfd` import dialog, tap-to-play
+- [x] Library: `scan_directory()` via `walkdir`, live list + search model, aligned Kind/Title/Artist/Dur/Gain columns, async `rfd` import dialog (starting-directory aware), tap-to-cue + On Air program gate
 - [x] Playlist store wired (`PlaylistManager::open`, Home counts) + unit tests
 - [x] Scheduler MVP: event list, Add/Edit dialog (time/action/days), auto-tick firing `generate`/`load`/`play`
 - [x] Track kinds (music/jingle/ad): auto-classify on import, `set_kind`, pre-kind DB migration
@@ -63,14 +65,15 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
       (cpal, 8 s horizon), single-outstanding prefetch guard (in-flight
       decodes count as pending — no duplicate queue storms), `RuleHistory`
       separation across picks + Coming-Up forecast list, live jingle
-      insertion at the configured interval (shared slot logic with batch
-      rotations), promotion reconcile (queued decks get logged + labeled
-      with their source), EOF restart, Next/Prev, cold start (Play /
-      Auto-DJ toggle begin the first pick), persisted ON/OFF + Up-next
+       insertion at the configured interval (shared slot logic with batch
+       rotations), promotion reconcile (queued decks get logged + labeled
+       with their source), EOF restart, Next/Prev, explicit On Air cut of
+       the selected track (crossfaded, Auto-DJ-aware continuity), cold
+       start (Play / Auto-DJ toggle begin the first pick), persisted ON/OFF + Up-next
 - [x] Ad scheduler (dated blocks with intros/outros, chained breaks — see §1.3)
-- [x] Icecast/Shoutcast output (see §1.5)
+- [x] Icecast output (MP3/Opus — see §1.5); Shoutcast open
 - [x] Mic/line-in input with ducking (see §1.6)
-- [x] Report generator (play logs → CSV + screen; XLS/PDF open — see §1.9)
+- [x] Report generator (play logs → CSV + XLSX + screen; PDF open — see §1.9)
 - [x] File dialog (`rfd`) + import progress in UI (see §1.9) — native multi-select dialog, chunked per-tick import with live status
 - [x] Settings screen (device picker, live DSP prefs, license, streaming config — see §1.9)
 - [x] Quality: `cargo fmt/clippy`, unit tests (`library`, `playlist`), CI (see §1.10)
@@ -87,12 +90,13 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Ad scheduler | Dated blocks, intros/outros, color-coded list | Dated blocks with intro→spot→outro chained breaks + engine pending queue | ✅ |
 | Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP + "valid until" expiry with row badges and warnings banner | ✅ |
 | Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
+| Preview / PFL | Pre-listen on a second output without broadcasting | Independent cue bus (second output, click-free fades) + explicit On Air gate; cue never touches program/stream/reports | ✅ |
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
-| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME, PUT + SOURCE fallback, TLS, paced, reconnect, metadata) + Settings UI with live status + listener count + Playout cover art; Shoutcast/relay open | 🟡 |
+| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME + Opus, PUT + SOURCE fallback, TLS, paced, reconnect, metadata) + Settings UI with live status, live-encoder indicator, one-click restart + listener count + Playout cover art; Shoutcast/relay open | 🟡 |
 | Mic / line-in | Mixed input, sidechain ducking, bed music | cpal input + `rtrb` ring summed pre-limiter/tap, voice-activated ducker, live device switching, Settings mic panel | ✅ |
 | Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
 | Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
-| Reporting | Play logs → XLS/PDF, royalty reports | Play logging on all paths + ranged reports + CSV + XLSX export (jingles/ads excluded); PDF open | ✅ |
+| Reporting | Play logs → XLS/PDF, royalty reports | Play logging on all program paths (cue excluded) + ranged reports + CSV + XLSX export (jingles/ads excluded); PDF open | ✅ |
 | Library depth | Mass tag editor, BPM scan, dupe detection, scheduled sync, health scan | Scan + missing-file health scan + loudness scan + kind auto-classify/repair + duplicate flag view + folder auto-sync; mass-tag/BPM open | 🟡 |
 | Track health | Proactive missing/corrupt detection | ✅ `missing_files()` + startup/on-demand scan, `!` row flags | ✅ |
 | UI niceties | Hotkeys, screen-reader a11y, drag-drop, waveform | Cart hotkeys 1–8 + sidebar nav + status footer; a11y/drag-drop/waveform open | 🟡 |
@@ -110,8 +114,9 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] `CpalEngine`: dual-cursor playback — `play()` while playing crossfades instead of cutting
 - [x] Configurable crossfade curve (`CrossfadeCurve::EqualPower` default / `Linear`)
 - [x] `rubato` sinc resampling to device rate at decode time
-- [x] 12-band EQ insert (RBJ peaking biquad chain, ±12 dB, per-band
-      Settings steppers, persisted + live-applied, cpal-only) + limiter
+- [x] 12-band EQ insert (RBJ peaking biquad chain, ±12 dB, graphic-EQ
+      fader strip in Settings — drag at 0.5 dB, persisted on release,
+      live-applied, cpal-only) + limiter
       (per-frame brickwall attack with metered release, ceiling stepper in dBFS)
 - [x] Loudness normalization (ReplayGain-style): BS.1770 K-weighting +
        R128 gating meter (`LoudnessMeter`, validated against the ITU mono-sine
@@ -132,7 +137,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [x] Monitor-independent volume: the local knob dims speakers only; the
       program bus + stream tap stay at full level (monitor the delayed web
       stream at zero local volume without doubling or dimming the broadcast)
-- [ ] Wire `library.search()` results into the Iced list (currently a no-op) — ✅ done (live list + search filter + tap-to-play)
+- [ ] Wire `library.search()` results into the Iced list (currently a no-op) — ✅ done (live list + search filter + tap-to-cue + On Air gate)
 
 ### 1.2 Playlist Generator (real scope, not a checkbox)
 - [x] No-repeat rules: artist, title, album — configurable lookback window
@@ -144,7 +149,7 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       windows across picks (`generate_next`), `forecast_up_next` simulates
       coming picks on cloned history for the Coming-Up display, and the
       jingle slot fires at interval via logic shared with batch rotations
-- [ ] Multi-playlist generation UI (several dayparts/rotations at once)
+- [ ] Multi-playlist generation UI (several dayparts/rotations at once) — ✅ done (Home fires 4 dayparts at once)
 
 ### 1.3 Ads, Scheduler & Cart depth
 - [x] Ad blocks with start/end date ranges (validity window + weekday + HH:MM, full Add/Edit UI)
@@ -177,8 +182,10 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       in-band `StreamTitle` metadata, bounded reconnects (5, backoff)
 - [x] Settings UI: STREAM ON/OFF toggle (auto-start on launch when enabled),
       host/port/mount/password/username fields (persisted), TLS toggle for
-      HTTPS servers, bitrate ladder stepper (8–320 kbps), live status
-      (⏳ Connecting/🔴 Live/⚠ error) + bytes/uptime stats; stream tap
+      HTTPS servers, format buttons (MP3/Opus) + bitrate steppers (MP3
+      8–320, Opus 24–160 with snap on switch), live status
+      (⏳ Connecting/🔴 Live with live-encoder readout/⚠ error) + Apply &
+      restart for pending changes + bytes/uptime/listener stats; stream tap
       handle shared with the audio callback (fixed silent dead-air-while-Live)
 - [x] Deployment lesson (verified live): L7 reverse proxies (Traefik/nginx)
       may pass source headers + statuses yet swallow the never-ending PUT
@@ -228,15 +235,18 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       import pump with progress; never deletes anything)
 
 ### 1.9 Reporting & Ops
-- [x] Play logging on every play path (library tap, cart fire, scheduler run, silence filler)
+- [x] Play logging on every program path (transport/On-Air cut, cart fire, scheduler run, silence filler; cue previews excluded by design)
 - [x] Play-log reports: range presets (Today/7d/30d/All), jingle+ad exclusion, newest-100 list, CSV + XLSX export
 - [ ] PDF export (royalty bodies take CSV/XLSX; native PDF later)
 - [x] Settings screen: output device picker (persisted, applies on restart, with
-      unplugged-device fallback, live device highlighted), station name
+      unplugged-device fallback, live device highlighted), cue (headphone)
+      device picker with live-device indicator (switches live, same-device
+      warning), station name
       (persisted, dashboard header), section sub-pages with descriptions,
       engine display, crossfade + silence-alarm
-      steppers (persisted, applied live), license section
-- [x] `rfd` native file dialog for import (+ report export)
+      steppers (persisted, applied live), graphic-EQ faders + limiter,
+      streaming (MP3/Opus + restart), license section
+- [x] Async `rfd` native file dialog for import (+ report export)
 
 ### 1.10 Quality gates
 - [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — full suite green, no exceptions: kind classification + repair, loudness store/count, migrations, generator rules (incl. cross-pick `RuleHistory` + forecast + live-jingle cadence parity), manager CRUD, audio engine (loader generations, tap sharing, prefetch guard, handshake matrix, lock-poison survival), remove-track FK cascade across managers, settings (incl. example-file drift guard). (Counts intentionally unlisted — they rot every PR; CI is the source of truth.)
