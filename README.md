@@ -29,41 +29,11 @@ A professional radio station management application featuring audio playback, li
 - 🔄 PDF report export
 - 🔄 Headless/server mode + web remote UI
 
-## Tech Stack
+## Documentation
 
-| Layer | Technology |
-|-------|-----------|
-| UI Framework | [Iced](https://iced.rs/) (Elm architecture) |
-| Audio Playback | [cpal](https://github.com/RustAudio/cpal) |
-| Audio Decoding | [symphonia](https://crates.io/crates/symphonia) |
-| Metadata | [lofty](https://crates.io/crates/lofty) |
-| Database | [rusqlite](https://crates.io/crates/rusqlite) (SQLite) |
-| Concurrency | std threads + channels (UI thread never blocks on decode/analysis) |
-| Logging | [tracing](https://crates.io/crates/tracing) |
-
-## Project Structure
-
-```
-crabboss/
-├── Cargo.toml          # Workspace root
-├── crates/
-│   ├── core/           # crabcore — audio engine, library, playlists
-│   │   └── src/
-│   │       ├── audio/  # Player, DSP, streaming, mic
-│   │       ├── library/ # SQLite library & metadata
-│   │       ├── playlist/ # Playlist management + generator
-│   │       ├── scheduler/ # Timed events + expiration
-│   │       ├── cart/    # Cart wall pads
-│   │       ├── ads/     # Dated ad blocks
-│   │       ├── stream/  # Icecast source client
-│   │       ├── report.rs # Play-log reports
-│   │       ├── settings.rs # Persisted prefs (incl. station name)
-│   │       ├── license.rs # Offline license keys
-│   │       └── examples/ # Vendor key generator (`genkey`)
-│   └── ui/             # crabui — Iced desktop application
-│       └── src/main.rs   # Elm app: 8 screens + tick subscriptions
-└── README.md
-```
+Technical overview for contributors (stack, layout, signal chain):
+[docs/architecture.md](docs/architecture.md).
+Milestones live in [ROADMAP.md](ROADMAP.md).
 
 ## Getting Started
 

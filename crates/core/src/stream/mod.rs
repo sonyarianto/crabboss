@@ -1,7 +1,7 @@
 //! Icecast/Shoutcast streaming output (ROADMAP §1.5).
 //!
-//! The cpal mix bus (post-volume, exactly what the program feed plays)
-//! is tapped into a [`StreamManager`], which encodes it to MP3 (LAME)
+//! The cpal mix bus (post-DSP, pre-monitor-volume: exactly what the
+//! program feed plays at full level) is tapped into a [`StreamManager`], which encodes it to MP3 (LAME)
 //! or Opus (in Ogg, constant bitrate) and pushes it to an Icecast server as a source
 //! client — `PUT` protocol with legacy `SOURCE` fallback, paced at
 //! real time as the Icecast spec requires.
