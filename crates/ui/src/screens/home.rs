@@ -77,6 +77,24 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
         .spacing(8)
         .align_y(iced::Alignment::Center),
     );
+    // Saved playlists (A1: fire a stored order to air as-is).
+    let mut pls = column![text("Saved Playlists").size(14)].spacing(4);
+    if state.saved_playlists.is_empty() {
+        pls = pls.push(text("Generate a rotation above to get started").size(11));
+    } else {
+        for p in &state.saved_playlists {
+            let id = p.id.clone();
+            pls = pls.push(
+                row![
+                    text(&p.name).size(12).width(Length::Fill),
+                    text(format!("{} tracks", p.tracks)).size(11),
+                    button(text("Queue to Air").size(12)).on_press(Message::PlaylistToAir(id)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+    }
     scrollable(
         column![
             text(&state.station_name).size(20),
@@ -85,6 +103,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
             text("Quick Actions").size(14),
             actions,
             gen,
+            pls,
             text(format!(
                 "Engine: {} | Device: {}",
                 state.audio_engine,

@@ -12,6 +12,7 @@ use crabcore::library::{Library, Track, TrackKind};
 use crabcore::playlist::{PlaylistManager, RuleHistory};
 use crabcore::stream::StreamConfig;
 
+use super::update::generator::SavedPlaylist;
 use crate::widgets::{LoudnessDone, SyncFound};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -273,6 +274,9 @@ pub(crate) struct App {
     pub(crate) gen_hours: [u8; 4],
     pub(crate) gen_counts: [usize; 4],
     pub(crate) gen_status: String,
+    /// Saved playlists for the Home list (A1 fire-to-air). Rebuilt by
+    /// `refresh_saved_playlists` on boot/restore/every generator fire.
+    pub(crate) saved_playlists: Vec<SavedPlaylist>,
 
     pub(crate) last_recovery: Option<String>,
     pub(crate) tick_count: u64,

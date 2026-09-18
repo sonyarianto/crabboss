@@ -24,6 +24,7 @@ impl App {
         self.track_count = self.library.get_all_tracks().unwrap_or_default().len();
         self.playlist_count = self.playlist_manager.list_all().unwrap_or_default().len();
         self.upcoming_count = self.sched_events.iter().filter(|e| e.enabled).count();
+        self.refresh_saved_playlists();
     }
 }
 
@@ -71,6 +72,7 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::GenCountDec(i) => generator::count_step(state, i, false),
         Message::GenFire(i) => generator::fire_one(state, i),
         Message::GenFireAll => generator::fire_all(state),
+        Message::PlaylistToAir(id) => generator::playlist_to_air(state, id),
         // -- Scheduler -------------------------------------------------------
         Message::SchedulerMasterToggled(en) => scheduler::master_toggled(state, en),
         Message::SchedulerToggleEvent(i) => scheduler::toggle_event(state, i),

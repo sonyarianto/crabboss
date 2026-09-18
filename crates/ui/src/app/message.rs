@@ -51,6 +51,7 @@ pub(crate) enum Message {
     GenCountDec(usize),
     GenFire(usize),
     GenFireAll,
+    PlaylistToAir(String),
     // Scheduler
     SchedulerMasterToggled(bool),
     SchedulerToggleEvent(usize),

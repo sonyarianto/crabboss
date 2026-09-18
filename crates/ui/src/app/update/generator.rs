@@ -4,10 +4,13 @@
 //! daypart set for now — custom named/persisted presets are the
 //! follow-up, not this PR.
 
+use std::path::PathBuf;
+
 use crabcore::library::{Library, TrackKind};
-use crabcore::playlist::{GenConfig, PlaylistManager};
+use crabcore::playlist::{GenConfig, PlaylistItem, PlaylistManager};
 
 use super::super::App;
+use crate::widgets::track_label;
 
 /// One fireable daypart row: display name + default hour.
 pub(crate) struct DaypartPreset {
@@ -41,6 +44,14 @@ pub(crate) const DEFAULT_GEN_COUNT: usize = 15;
 pub(crate) struct FireJob {
     pub(crate) daypart: String,
     pub(crate) cfg: GenConfig,
+}
+
+/// One row of the Home "Saved Playlists" list (A1: playlists are no
+/// longer write-only — this is what the list renders and fires).
+pub(crate) struct SavedPlaylist {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) tracks: usize,
 }
 
 /// One persisted rotation.
@@ -147,6 +158,7 @@ fn apply_results(state: &mut App, results: Vec<Result<FireResult, String>>) {
         }
     }
     state.playlist_count = state.playlist_manager.list_all().unwrap_or_default().len();
+    state.refresh_saved_playlists();
     state.gen_status = match (saved.len(), failed.len()) {
         (0, _) => format!("Nothing saved: {}", failed.join("; ")),
         (1, 0) => format!("Saved '{}'", saved[0]),
@@ -179,6 +191,133 @@ pub(crate) fn fire_all(state: &mut App) {
         .collect();
     let results = fire_rotations(&state.library, &state.playlist_manager, &jobs, &stamp);
     apply_results(state, results);
+}
+
+/// One resolved playlist entry: (file path, track id, duration, label).
+pub(crate) type ResolvedItem = (PathBuf, String, Option<f64>, String);
+
+/// Resolve playlist items to playable files in stored order.
+/// Pure over the managers so tests pin the ordering contract without
+/// App/GUI. Returns `(ready, missing)` where each ready entry is
+/// (path, track id, duration, display label).
+pub(crate) fn resolve_playlist_order(
+    library: &Library,
+    items: &[PlaylistItem],
+) -> (Vec<ResolvedItem>, usize) {
+    let mut ready = Vec::new();
+    let mut missing = 0usize;
+    for item in items {
+        match library.get_track(&item.track_id).ok().flatten() {
+            Some(t) if PathBuf::from(&t.file_path).is_file() => {
+                let label = track_label(&t);
+                ready.push((PathBuf::from(&t.file_path), t.id, t.duration_secs, label));
+            }
+            _ => missing += 1,
+        }
+    }
+    (ready, missing)
+}
+
+impl App {
+    /// Rebuild the Home "Saved Playlists" list (id + name + item count,
+    /// `list_all` order). Called from `refresh_counts` (boot/restore)
+    /// and after every generator fire.
+    pub(crate) fn refresh_saved_playlists(&mut self) {
+        let mut out = Vec::new();
+        if let Ok(lists) = self.playlist_manager.list_all() {
+            for pl in lists {
+                let n = self
+                    .playlist_manager
+                    .get_with_items(&pl.id)
+                    .map(|p| p.map(|p| p.items.len()).unwrap_or(0))
+                    .unwrap_or(0);
+                out.push(SavedPlaylist {
+                    id: pl.id,
+                    name: pl.name,
+                    tracks: n,
+                });
+            }
+        }
+        self.saved_playlists = out;
+    }
+}
+
+/// A1 "Playlist to Air": fire a saved playlist in its stored order.
+/// First track starts now (`play` crossfades when live, starts from
+/// silence when idle — never a `stop` gap), the rest queue behind it in
+/// order. Queued decks are play-logged by the tick reconciler on
+/// promotion; only the first needs an explicit `record_play` here.
+/// Continuity follows the Auto-DJ toggle, like the On Air gate.
+pub(crate) fn playlist_to_air(state: &mut App, playlist_id: String) {
+    let pl = match state.playlist_manager.get_with_items(&playlist_id) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            state.gen_status = "Playlist gone — pick another".into();
+            return;
+        }
+        Err(e) => {
+            state.gen_status = format!("Playlist read failed: {e}");
+            return;
+        }
+    };
+    if pl.items.is_empty() {
+        state.gen_status = format!("'{}' is empty", pl.name);
+        return;
+    }
+    // Resolve in stored order; missing files skip with a count.
+    let (ready, missing) = resolve_playlist_order(&state.library, &pl.items);
+    if ready.is_empty() {
+        state.gen_status = format!(
+            "'{}': all {} tracks missing, nothing queued",
+            pl.name,
+            pl.items.len()
+        );
+        return;
+    }
+    // A stale prefetch/queued deck (Auto-DJ, scheduler) still plays
+    // before the playlist — say so instead of surprising the operator.
+    let held_back = state.player.pending_count() + state.player.load_inflight() > 0;
+    let (first_path, first_id, first_dur, first_label) = ready[0].clone();
+    match state.player.play(&first_path) {
+        Ok(()) => {
+            let _ = state.library.record_play(&first_id, first_dur);
+            let mut queued = 0usize;
+            for (p, _, _, _) in ready.iter().skip(1) {
+                match state.player.queue(p) {
+                    Ok(()) => queued += 1,
+                    Err(e) => tracing::warn!("Playlist queue failed for {}: {e}", p.display()),
+                }
+            }
+            state.auto_continue = state.autodj;
+            state.is_playing = true;
+            state.now_title = first_label;
+            state.now_artist = "Playlist".into();
+            state.engine_track = Some(first_path);
+            state.up_next = ready
+                .get(1)
+                .map(|(_, _, _, l)| l.clone())
+                .unwrap_or_default();
+            state.pending_source = Some("Playlist".into());
+            let mut detail = vec![format!("{} to air", queued + 1)];
+            if missing > 0 {
+                detail.push(format!("{missing} missing skipped"));
+            }
+            if held_back {
+                detail.push("queued deck plays first".into());
+            }
+            state.gen_status = format!("On air: '{}' ({})", pl.name, detail.join(", "));
+            tracing::info!(
+                "Playlist to air: '{}' ({} to air, {} missing skipped)",
+                pl.name,
+                queued + 1,
+                missing
+            );
+        }
+        Err(e) => {
+            tracing::error!("Playlist to air failed: {e}");
+            state.gen_status = format!("Playlist to air failed: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +421,47 @@ mod tests {
                 jingles: 0,
             })]
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_keeps_stored_order_and_counts_missing() {
+        use crabcore::playlist::PlaylistItem;
+
+        let dir = test_dir("resolve");
+        let db = dir.join("station.db");
+        let lib = Library::open(&db).unwrap();
+        seed_music(&lib, &dir, 3);
+        let id_of = |f: &str| {
+            lib.find_by_path(&dir.join(f).to_string_lossy())
+                .unwrap()
+                .expect("seeded")
+                .id
+        };
+        let item = |track_id: String, position: i32| PlaylistItem {
+            track_id,
+            position,
+            is_jingle: false,
+            is_ad: false,
+        };
+        // Stored order song2, <gone>, song0 — plus a dangling id.
+        let items = vec![
+            item(id_of("song2.wav"), 0),
+            item("dangling-id".into(), 1),
+            item(id_of("song0.wav"), 2),
+        ];
+        let (ready, missing) = resolve_playlist_order(&lib, &items);
+        let names: Vec<_> = ready
+            .iter()
+            .map(|(p, _, _, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["song2.wav", "song0.wav"]);
+        assert_eq!(missing, 1);
+        // A deleted file counts as missing too, order of the rest holds.
+        std::fs::remove_file(dir.join("song2.wav")).ok();
+        let (ready, missing) = resolve_playlist_order(&lib, &items);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(missing, 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
