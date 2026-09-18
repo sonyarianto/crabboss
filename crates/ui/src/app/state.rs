@@ -282,6 +282,9 @@ pub(crate) struct App {
     pub(crate) playlist_selected: Option<String>,
     pub(crate) playlist_detail: Vec<PlaylistDetailItem>,
     pub(crate) playlist_detail_missing: usize,
+    /// Rename input for the expanded playlist (P0: core `rename`
+    /// existed with no UI — this buffer backs it).
+    pub(crate) playlist_rename: String,
 
     pub(crate) last_recovery: Option<String>,
     pub(crate) tick_count: u64,

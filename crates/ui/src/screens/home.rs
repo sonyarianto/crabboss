@@ -86,6 +86,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                 .padding(6)
                 .width(Length::Fill),
             button(text("Create").size(12)).on_press(Message::PlaylistCreate),
+            button(text("Import .m3u").size(12)).on_press(Message::PlaylistImport),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
@@ -144,6 +145,22 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
 /// stay listed with a flag — the fire path skips them with a count.
 fn detail_view<'a>(state: &'a App, playlist_id: &str) -> Element<'a, Message> {
     let mut col = column![].spacing(2).padding(iced::padding::left(12));
+    // P0 rename: the core `rename` had no UI. Prefilled on expand
+    // (`playlist_select`); blank saves are rejected with a status line.
+    col = col.push(
+        row![
+            text_input("Rename playlist...", &state.playlist_rename)
+                .on_input(Message::PlaylistRenameInput)
+                .padding(6)
+                .width(Length::Fill),
+            button(text("Rename").size(11))
+                .on_press(Message::PlaylistRename(playlist_id.to_string())),
+            button(text("Export .m3u").size(11))
+                .on_press(Message::PlaylistExport(playlist_id.to_string())),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
+    );
     if state.playlist_detail.is_empty() {
         col = col.push(text("Empty — pick a track in Library, then Add here").size(11));
     } else {

@@ -81,6 +81,10 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::PlaylistRemoveItem(id, idx) => generator::playlist_remove_item(state, id, idx),
         Message::PlaylistMoveUp(id, idx) => generator::playlist_move(state, id, idx, true),
         Message::PlaylistMoveDown(id, idx) => generator::playlist_move(state, id, idx, false),
+        Message::PlaylistRenameInput(v) => state.playlist_rename = v,
+        Message::PlaylistRename(id) => generator::playlist_rename(state, id),
+        Message::PlaylistExport(id) => generator::playlist_export(state, id),
+        Message::PlaylistImport => generator::playlist_import(state),
         // -- Scheduler -------------------------------------------------------
         Message::SchedulerMasterToggled(en) => scheduler::master_toggled(state, en),
         Message::SchedulerToggleEvent(i) => scheduler::toggle_event(state, i),

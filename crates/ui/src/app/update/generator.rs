@@ -330,7 +330,14 @@ pub(crate) fn playlist_select(state: &mut App, playlist_id: String) {
         state.playlist_selected = None;
         state.playlist_detail.clear();
         state.playlist_detail_missing = 0;
+        state.playlist_rename.clear();
     } else {
+        state.playlist_rename = state
+            .saved_playlists
+            .iter()
+            .find(|p| p.id == playlist_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
         state.playlist_selected = Some(playlist_id);
         state.refresh_playlist_detail();
     }
@@ -460,6 +467,243 @@ pub(crate) fn playlist_move(state: &mut App, playlist_id: String, idx: usize, up
             state.gen_status = format!("Move failed: {e}");
         }
     }
+}
+
+/// P0: rename the playlist (core `rename` existed with no UI —
+/// blank names are rejected by the manager, and the id stays so the
+/// expanded detail and scheduler targets by id keep working; scheduler
+/// `load` by display name picks the new name up on next fire).
+pub(crate) fn playlist_rename(state: &mut App, playlist_id: String) {
+    let name = state.playlist_rename.trim().to_string();
+    if name.is_empty() {
+        state.gen_status = "Name the playlist first".into();
+        return;
+    }
+    match state.playlist_manager.rename(&playlist_id, &name) {
+        Ok(()) => {
+            state.playlist_rename = name.clone();
+            state.refresh_saved_playlists();
+            state.refresh_playlist_detail();
+            state.gen_status = format!("Renamed to '{name}'");
+        }
+        Err(e) => {
+            state.gen_status = format!("Rename failed: {e}");
+        }
+    }
+}
+
+/// Filename-safe default for the m3u save dialog (the playlist name
+/// may contain characters the OS refuses as a file name).
+pub(crate) fn sanitize_m3u_filename(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c => c,
+        })
+        .collect();
+    if out.trim().is_empty() {
+        out = "playlist".into();
+    }
+    out
+}
+
+/// Render stored-order file paths as an `.m3u8` document (UTF-8,
+/// `#EXTM3U` header, one absolute path per line).
+pub(crate) fn build_m3u(paths: &[String]) -> String {
+    let mut out = String::from("#EXTM3U\n");
+    for p in paths {
+        out.push_str(p);
+        out.push('\n');
+    }
+    out
+}
+
+/// Parse an `.m3u`/`.m3u8` document into raw entries in order:
+/// trims whitespace/CR, skips blanks and `#` comment/directive lines
+/// (incl. `#EXTM3U`/`#EXTINF`), strips a leading `file://` scheme.
+pub(crate) fn parse_m3u_entries(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .map(|l| l.trim().trim_end_matches('\r'))
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| {
+            l.strip_prefix("file://")
+                .map(|s| {
+                    // `file:///C:/...` -> `C:/...`; keep Unix paths intact.
+                    s.strip_prefix('/')
+                        .filter(|s| s.len() >= 2 && s.as_bytes()[1] == b':')
+                        .map_or(s.to_string(), |s| s.to_string())
+                })
+                .unwrap_or(l)
+        })
+        .collect()
+}
+
+/// Resolve one m3u entry against the playlist file's directory:
+/// absolute entries stay as-is, relative ones join the base dir.
+pub(crate) fn resolve_m3u_entry(raw: &str, base_dir: &std::path::Path) -> PathBuf {
+    let p = PathBuf::from(raw);
+    if p.is_absolute() {
+        p
+    } else {
+        base_dir.join(p)
+    }
+}
+
+/// P0: export one saved playlist to `.m3u8` (stored order, absolute
+/// paths). Read-only over the engine: no transport, queue, or
+/// play-log side effects — the file is the only output.
+pub(crate) fn playlist_export(state: &mut App, playlist_id: String) {
+    let pl = match state.playlist_manager.get_with_items(&playlist_id) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            state.gen_status = "Playlist gone — pick another".into();
+            return;
+        }
+        Err(e) => {
+            state.gen_status = format!("Playlist read failed: {e}");
+            return;
+        }
+    };
+    if pl.items.is_empty() {
+        state.gen_status = format!("'{}' is empty, nothing to export", pl.name);
+        return;
+    }
+    let mut paths = Vec::new();
+    let mut missing = 0usize;
+    for item in &pl.items {
+        match state.library.get_track(&item.track_id).ok().flatten() {
+            Some(t) => paths.push(t.file_path),
+            None => missing += 1,
+        }
+    }
+    if paths.is_empty() {
+        state.gen_status = format!("'{}': all tracks gone from library", pl.name);
+        return;
+    }
+    let doc = build_m3u(&paths);
+    let default_name = format!("{}.m3u8", sanitize_m3u_filename(&pl.name));
+    let Some(dest) = rfd::FileDialog::new()
+        .set_title("Export playlist (.m3u8)")
+        .set_file_name(default_name)
+        .add_filter("M3U playlist", &["m3u", "m3u8"])
+        .save_file()
+    else {
+        return;
+    };
+    match std::fs::write(&dest, doc) {
+        Ok(()) => {
+            let mut msg = format!("Exported '{}' ({} tracks)", pl.name, paths.len());
+            if missing > 0 {
+                msg.push_str(&format!(", {missing} library-gone skipped"));
+            }
+            tracing::info!("{msg} -> {}", dest.display());
+            state.gen_status = msg;
+        }
+        Err(e) => {
+            tracing::error!("Playlist export failed: {e}");
+            state.gen_status = format!("Export failed: {e}");
+        }
+    }
+}
+
+/// P0: import one `.m3u`/`.m3u8` file as a new saved playlist.
+/// Only the library + playlist store are touched (no transport):
+/// entries are matched to library tracks by path in file order —
+/// unknown paths and missing files are skipped with a count, never
+/// imported as dead rows.
+pub(crate) fn playlist_import(state: &mut App) {
+    let Some(src) = rfd::FileDialog::new()
+        .set_title("Import playlist (.m3u / .m3u8)")
+        .add_filter("M3U playlist", &["m3u", "m3u8"])
+        .pick_file()
+    else {
+        return;
+    };
+    let content = match std::fs::read_to_string(&src) {
+        Ok(c) => c,
+        Err(e) => {
+            state.gen_status = format!("Import failed: {e}");
+            return;
+        }
+    };
+    let base = src.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let entries = parse_m3u_entries(&content);
+    if entries.is_empty() {
+        state.gen_status = "No tracks in that playlist file".into();
+        return;
+    }
+    let name = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "Imported".into());
+    let pl = match state.playlist_manager.create(&name, Some("Imported .m3u")) {
+        Ok(p) => p,
+        Err(e) => {
+            state.gen_status = format!("Import failed: {e}");
+            return;
+        }
+    };
+    let mut added = 0usize;
+    let mut unknown = 0usize;
+    let mut missing = 0usize;
+    for raw in &entries {
+        let candidate = resolve_m3u_entry(raw, &base);
+        let key = candidate.to_string_lossy().into_owned();
+        let hit = state.library.find_by_path(&key).ok().flatten().or_else(|| {
+            // Stale working-directory-relative entry: try the raw
+            // string itself before giving up.
+            if key != *raw {
+                state.library.find_by_path(raw).ok().flatten()
+            } else {
+                None
+            }
+        });
+        match hit {
+            Some(t) if PathBuf::from(&t.file_path).is_file() => {
+                let (is_jingle, is_ad) = match t.kind {
+                    TrackKind::Jingle => (true, false),
+                    TrackKind::Ad => (false, true),
+                    TrackKind::Music => (false, false),
+                };
+                match state
+                    .playlist_manager
+                    .add_track(&pl.id, &t.id, is_jingle, is_ad)
+                {
+                    Ok(()) => added += 1,
+                    Err(e) => {
+                        tracing::warn!("Playlist import: add failed for {}: {e}", t.file_path);
+                        unknown += 1;
+                    }
+                }
+            }
+            Some(_) => missing += 1,
+            None => unknown += 1,
+        }
+    }
+    if added == 0 {
+        let _ = state.playlist_manager.delete(&pl.id);
+        state.gen_status = format!("Nothing imported ({unknown} unknown, {missing} missing)");
+        return;
+    }
+    state.playlist_count = state.playlist_manager.list_all().unwrap_or_default().len();
+    state.refresh_saved_playlists();
+    state.playlist_selected = Some(pl.id);
+    state.refresh_playlist_detail();
+    state.playlist_rename = name.clone();
+    let mut parts = vec![format!("Imported '{name}' ({added} tracks)")];
+    if unknown > 0 {
+        parts.push(format!("{unknown} unknown skipped"));
+    }
+    if missing > 0 {
+        parts.push(format!("{missing} missing skipped"));
+    }
+    state.gen_status = parts.join(", ");
 }
 
 /// A1 "Playlist to Air": fire a saved playlist in its stored order.
@@ -759,5 +1003,47 @@ mod tests {
         assert_eq!(ready.len(), 1);
         assert_eq!(missing, 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn m3u_parse_skips_comments_and_blanks() {
+        let doc = "#EXTM3U\n#EXTINF:123,Artist - Title\nC:/mix/song one.mp3\r\n\n  \n# a comment\nrel/song2.wav\n";
+        assert_eq!(
+            parse_m3u_entries(doc),
+            vec![
+                "C:/mix/song one.mp3".to_string(),
+                "rel/song2.wav".to_string()
+            ]
+        );
+        assert!(parse_m3u_entries("#EXTM3U\n# only comments\n").is_empty());
+    }
+
+    #[test]
+    fn m3u_resolve_keeps_absolute_and_joins_relative() {
+        use std::path::PathBuf;
+
+        let base = PathBuf::from("/base/dir");
+        assert_eq!(
+            resolve_m3u_entry("C:/mix/a.mp3", &base),
+            PathBuf::from("C:/mix/a.mp3")
+        );
+        assert_eq!(
+            resolve_m3u_entry("sub/b.wav", &base),
+            PathBuf::from("/base/dir/sub/b.wav")
+        );
+    }
+
+    #[test]
+    fn m3u_build_roundtrips_through_parse() {
+        let paths = vec!["C:/a.mp3".to_string(), "/m/b song.wav".to_string()];
+        let doc = build_m3u(&paths);
+        assert!(doc.starts_with("#EXTM3U\n"));
+        assert_eq!(parse_m3u_entries(&doc), paths);
+    }
+
+    #[test]
+    fn m3u_filename_sanitizes_os_refused_chars() {
+        assert_eq!(sanitize_m3u_filename("Morning: Mix/8?"), "Morning_ Mix_8_");
+        assert_eq!(sanitize_m3u_filename("   "), "playlist");
     }
 }

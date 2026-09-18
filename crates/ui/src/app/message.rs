@@ -61,6 +61,11 @@ pub(crate) enum Message {
     PlaylistRemoveItem(String, usize),
     PlaylistMoveUp(String, usize),
     PlaylistMoveDown(String, usize),
+    // P0: rename (core existed, UI missing) + m3u interchange.
+    PlaylistRenameInput(String),
+    PlaylistRename(String),
+    PlaylistExport(String),
+    PlaylistImport,
     // Scheduler
     SchedulerMasterToggled(bool),
     SchedulerToggleEvent(usize),

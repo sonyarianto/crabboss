@@ -324,6 +324,7 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         playlist_selected: None,
         playlist_detail: Vec::new(),
         playlist_detail_missing: 0,
+        playlist_rename: String::new(),
         last_recovery: None,
         tick_count: 0,
     };
