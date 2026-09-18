@@ -1,7 +1,6 @@
 # CrabBoss Website
 
-Official site sources (VitePress). Deployed **manually** to Vercel —
-no auto-deploy, no `vercel.json` needed.
+Official site sources (VitePress). Deployed **manually** to Vercel.
 
 ## Develop
 
@@ -19,7 +18,8 @@ npm run preview  # serve the built output
 
 1. Vercel → Add New → Project → import `sonyarianto/crabboss`.
 2. **Root Directory:** `website`.
-3. **Framework Preset:** VitePress (auto-detected).
+3. **Framework Preset:** VitePress (output `.vitepress/dist` is also
+   pinned in `vercel.json`, so a missing preset can't break the build).
 4. Deploy. Note the URL, then add it to the main README + this file.
 
 ## Rules for this folder
