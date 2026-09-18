@@ -79,10 +79,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
     // the primary highlight marks the *selection* for the next start.
     // The two disagree while live after a change — the note under the
     // row says so explicitly instead of silently lying.
-    let airing = matches!(
-        stream_state,
-        StreamState::Live | StreamState::Connecting
-    );
+    let airing = matches!(stream_state, StreamState::Live | StreamState::Connecting);
     // Any selection differing from the live snapshot needs a restart
     // (encoder + host/port/mount/TLS are all per-connection). No button
     // when off: there is nothing on air to disrupt.
@@ -101,8 +98,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
         } else {
             format.label().to_string()
         };
-        let entry =
-            button(text(label).size(12)).on_press(Message::StreamFormatChanged(format));
+        let entry = button(text(label).size(12)).on_press(Message::StreamFormatChanged(format));
         format_row = format_row.push(if stream_cfg.format == format {
             entry.style(iced::widget::button::primary)
         } else {
@@ -121,7 +117,11 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
     // buttons calls out a pending selection while live.
     let stream_status = match &stream_state {
         StreamState::Live => match &state.stream_live_config {
-            Some(live) => format!("🔴 Live — {} {} kbps", live.format.label(), live.bitrate_kbps),
+            Some(live) => format!(
+                "🔴 Live — {} {} kbps",
+                live.format.label(),
+                live.bitrate_kbps
+            ),
             None => stream_state.label(),
         },
         StreamState::Connecting => match &state.stream_live_config {
@@ -136,8 +136,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
     };
     let format_note = match &state.stream_live_config {
         Some(live) if airing => {
-            if live.format == stream_cfg.format && live.bitrate_kbps == stream_cfg.bitrate_kbps
-            {
+            if live.format == stream_cfg.format && live.bitrate_kbps == stream_cfg.bitrate_kbps {
                 format!(
                     "On air: {} {} kbps.",
                     live.format.label(),
@@ -225,13 +224,13 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
-            row![
-                button(text("Backup...").size(12)).on_press(Message::BackupNow),
-                button(text("Restore...").size(12)).on_press(Message::RestoreNow),
-            ]
-            .spacing(6),
-            text(&state.backup_status).size(11),
-            text(format!("Data: {}", state.data_dir.display())).size(11),
+                row![
+                    button(text("Backup...").size(12)).on_press(Message::BackupNow),
+                    button(text("Restore...").size(12)).on_press(Message::RestoreNow),
+                ]
+                .spacing(6),
+                text(&state.backup_status).size(11),
+                text(format!("Data: {}", state.data_dir.display())).size(11),
             ]
             .spacing(8);
             // Persistence health: boot-file warnings and save failures are
@@ -268,8 +267,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                 text(format!("Cue: {}", state.player.cue_device_name())).size(12),
                 devices,
                 text(&state.device_note).size(11),
-                button(text("Refresh devices").size(12))
-                    .on_press(Message::SettingsRefreshDevices),
+                button(text("Refresh devices").size(12)).on_press(Message::SettingsRefreshDevices),
                 cue_devices,
                 stepper(
                     format!("Cue volume: {:.0}%", cue_volume * 100.0),
@@ -330,10 +328,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                 ),
             ]
             .spacing(8);
-            container(col)
-                .width(Length::Fill)
-                .max_width(620.0)
-                .into()
+            container(col).width(Length::Fill).max_width(620.0).into()
         }
         SettingsSection::Loudness => column![
             text(sec.label()).size(16),
@@ -449,20 +444,18 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                         .on_input(Message::StreamPassword)
                         .padding(6)
                         .width(Length::Fill),
-                    button(text("Clear").size(12))
-                        .on_press(Message::StreamPasswordClear),
+                    button(text("Clear").size(12)).on_press(Message::StreamPasswordClear),
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
             );
-            body = body.push(
-                text(stream_password_status(!stream_cfg.password.is_empty())).size(11),
-            );
+            body =
+                body.push(text(stream_password_status(!stream_cfg.password.is_empty())).size(11));
             body = body.push(text("Encoder").size(13));
             body = body.push(stepper(
                 format!("Bitrate: {} kbps", stream_cfg.bitrate_kbps),
                 Message::StreamBitrateDec,
-                Message::StreamBitrateInc
+                Message::StreamBitrateInc,
             ));
             body = body.push(format_row.align_y(iced::Alignment::Center));
             body = body.push(text(format_note).size(11));

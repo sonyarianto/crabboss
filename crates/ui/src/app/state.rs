@@ -244,10 +244,10 @@ pub(crate) struct App {
     pub(crate) listeners_rx: Option<Receiver<Option<u64>>>,
     pub(crate) last_listeners_poll: Option<std::time::Instant>,
     /// Full config snapshot taken when the stream (re)starts. The encoder
-    /// + connection are built once per start from that snapshot, while
-    /// every field on the screen edits the *next* connection — so without
-    /// this the UI would show the selection as if it were on air. `None`
-    /// = stream never started (or stopped).
+    /// and connection are built once per start from that snapshot, while
+    /// every field on the screen edits the next connection, so without
+    /// this the UI would show the selection as if it were on air. A
+    /// missing value means the stream never started (or stopped).
     pub(crate) stream_live_config: Option<StreamConfig>,
     /// Boot-time settings file warning (invalid/unreadable file). `None`
     /// on first run and on clean loads: no news is good news.

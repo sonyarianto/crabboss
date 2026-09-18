@@ -68,7 +68,10 @@ pub(crate) fn cue_play(state: &mut App, i: usize) {
             tracing::info!("Cue preview: {:?}", path);
             state.lib_selected = Some(i);
             state.cue_status = state.player.cue_state().label();
-            state.lib_status = format!("Cue: {} (headphones, program untouched)", track_label(&track));
+            state.lib_status = format!(
+                "Cue: {} (headphones, program untouched)",
+                track_label(&track)
+            );
         }
         Err(e) => {
             let msg = e.to_string();

@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::audio::MicConfig;
 use crate::audio::CueConfig;
+use crate::audio::MicConfig;
 use crate::audio::EQ_BAND_COUNT;
 use crate::audio::{TARGET_LUFS, TARGET_MAX_LUFS, TARGET_MIN_LUFS};
 use crate::stream::StreamConfig;
@@ -289,7 +289,10 @@ mod tests {
                 ..Default::default()
             },
             mic: MicConfig::default(),
-            cue: CueConfig { device: Some("Headphones".into()), volume: 0.7 },
+            cue: CueConfig {
+                device: Some("Headphones".into()),
+                volume: 0.7,
+            },
             watch_folders: vec![PathBuf::from("D:/mix")],
             auto_sync_enabled: true,
             auto_sync_interval_mins: 30,
@@ -330,7 +333,10 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join("crabboss-settings-cue.json");
         let s = AppSettings {
-            cue: CueConfig { device: Some("Realtek".into()), volume: 0.7 },
+            cue: CueConfig {
+                device: Some("Realtek".into()),
+                volume: 0.7,
+            },
             ..Default::default()
         };
         s.save(&path).unwrap();

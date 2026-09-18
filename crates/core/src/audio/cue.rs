@@ -86,8 +86,24 @@ mod tests {
 
     #[test]
     fn volume_clamps() {
-        assert_eq!(CueConfig { device: None, volume: 9.0 }.sanitized().volume, 1.5);
-        assert_eq!(CueConfig { device: None, volume: -2.0 }.sanitized().volume, 0.0);
+        assert_eq!(
+            CueConfig {
+                device: None,
+                volume: 9.0
+            }
+            .sanitized()
+            .volume,
+            1.5
+        );
+        assert_eq!(
+            CueConfig {
+                device: None,
+                volume: -2.0
+            }
+            .sanitized()
+            .volume,
+            0.0
+        );
     }
 
     #[test]

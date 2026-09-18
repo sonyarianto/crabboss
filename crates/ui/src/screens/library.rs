@@ -119,10 +119,8 @@ pub(crate) fn panel(state: &App, tools: bool) -> Element<'_, Message> {
             let base = track_label(t);
             let title = if missing { format!("! {}", base) } else { base };
             let selected = Some(i) == state.lib_selected;
-            let onair =
-                live_path.as_deref() == Some(t.file_path.as_str()) && state.is_playing;
-            let cueing =
-                cue_live && cue_path.as_deref() == Some(t.file_path.as_str());
+            let onair = live_path.as_deref() == Some(t.file_path.as_str()) && state.is_playing;
+            let cueing = cue_live && cue_path.as_deref() == Some(t.file_path.as_str());
             let artist = t.artist.clone().unwrap_or_default();
             let dur = fmt_dur(t.duration_secs);
             let gain = t

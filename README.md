@@ -1,6 +1,6 @@
-# 🦀 CrabBoss
-
 [![CI](https://github.com/sonyarianto/crabboss/actions/workflows/ci.yml/badge.svg)](https://github.com/sonyarianto/crabboss/actions/workflows/ci.yml)
+
+# 🦀 CrabBoss
 
 **Radio Automation Software**
 

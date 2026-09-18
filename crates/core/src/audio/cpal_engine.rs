@@ -12,8 +12,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::RingBuffer;
 
-use crate::audio::engine::{Engine, PlayerState, TrackInfo};
 use crate::audio::cue::{CueConfig, CueState};
+use crate::audio::engine::{Engine, PlayerState, TrackInfo};
 use crate::audio::mic::{MicConfig, MicResampler, MicState, MIC_RING_SAMPLES};
 use crate::audio::mixer::{Frame, Mixer, EQ_BAND_COUNT};
 use crate::audio::silence::SilenceMonitor;
@@ -1666,7 +1666,9 @@ impl Engine for CpalEngine {
             return Err(CrabError::Audio("cue unavailable (no cue device)".into()));
         }
         if !path.exists() {
-            return Err(CrabError::FileNotFound { path: path.to_path_buf() });
+            return Err(CrabError::FileNotFound {
+                path: path.to_path_buf(),
+            });
         }
         // Flat preview gain for Phase 2 (no loudness/EQ on cue yet):
         // what the operator hears is the raw file at cue volume.
@@ -2067,7 +2069,10 @@ mod tests {
         assert_eq!(load_volume_bits(&eng.cue_gain_target), 1.0);
         // No cursor: stop parks immediately without touching the ramp.
         eng.cue_stop();
-        assert_eq!(eng.cue_state_atomic.load(Ordering::SeqCst), super::CUE_STOPPED);
+        assert_eq!(
+            eng.cue_state_atomic.load(Ordering::SeqCst),
+            super::CUE_STOPPED
+        );
         assert_eq!(load_volume_bits(&eng.cue_gain_target), 1.0);
     }
 
