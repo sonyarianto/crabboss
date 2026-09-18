@@ -52,6 +52,15 @@ pub(crate) enum Message {
     GenFire(usize),
     GenFireAll,
     PlaylistToAir(String),
+    // Manual builder (B): create/select/detail/reorder on Home.
+    PlaylistNewName(String),
+    PlaylistCreate,
+    PlaylistSelect(String),
+    PlaylistDelete(String),
+    PlaylistAddSelected(String),
+    PlaylistRemoveItem(String, usize),
+    PlaylistMoveUp(String, usize),
+    PlaylistMoveDown(String, usize),
     // Scheduler
     SchedulerMasterToggled(bool),
     SchedulerToggleEvent(usize),

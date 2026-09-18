@@ -231,12 +231,120 @@ impl PlaylistManager {
         Ok(())
     }
 
-    /// Remove a track from a playlist at the given position.
-    pub fn remove_at(&self, playlist_id: &str, position: i32) -> Result<()> {
-        self.conn.borrow().execute(
-            "DELETE FROM playlist_items WHERE playlist_id = ?1 AND position = ?2",
-            params![playlist_id, position],
+    /// Rename a playlist (non-blank name, `updated_at` bumped).
+    pub fn rename(&self, playlist_id: &str, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CrabError::Playlist("name is empty".into()));
+        }
+        let n = self.conn.borrow().execute(
+            "UPDATE playlists SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![name, Utc::now().to_rfc3339(), playlist_id],
         )?;
+        if n == 0 {
+            return Err(CrabError::Playlist("playlist not found".into()));
+        }
+        Ok(())
+    }
+
+    /// Remove a track from a playlist at the given position, then
+    /// renumber the survivors dense (`0..n`). The old implementation
+    /// left a gap, so `position` stopped matching list index and a
+    /// later `add_track` (`MAX+1`) drifted further. Runs in one
+    /// transaction: delete + rewrite commit together.
+    pub fn remove_at(&self, playlist_id: &str, position: i32) -> Result<()> {
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction()?;
+        let mut items: Vec<(String, i32, i32)> = tx
+            .prepare(
+                "SELECT track_id, is_jingle, is_ad FROM playlist_items
+                 WHERE playlist_id = ?1 ORDER BY position",
+            )?
+            .query_map(params![playlist_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i32>(1)?,
+                    row.get::<_, i32>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // Map the requested DB position to a list index (legacy rows may
+        // have gaps from the pre-renumber implementation).
+        let ordered_positions: Vec<i32> = tx
+            .prepare(
+                "SELECT position FROM playlist_items
+                 WHERE playlist_id = ?1 ORDER BY position",
+            )?
+            .query_map(params![playlist_id], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let Some(idx) = ordered_positions.iter().position(|p| *p == position) else {
+            return Err(CrabError::Playlist("item not found".into()));
+        };
+        items.remove(idx);
+        tx.execute(
+            "DELETE FROM playlist_items WHERE playlist_id = ?1",
+            params![playlist_id],
+        )?;
+        for (i, (track_id, jingle, ad)) in items.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO playlist_items (playlist_id, track_id, position, is_jingle, is_ad)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![playlist_id, track_id, i as i32, jingle, ad],
+            )?;
+        }
+        tx.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), playlist_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Move a playlist entry from one list index to another (both ends
+    /// inclusive, `0..len`). Indices are positions in the stored order
+    /// (`ORDER BY position`), not raw DB values, so legacy gaps can't
+    /// misaddress the move. No-op when `from == to`. Rewrites positions
+    /// dense `0..n` in one transaction.
+    pub fn move_item(&self, playlist_id: &str, from: usize, to: usize) -> Result<()> {
+        if from == to {
+            return Ok(());
+        }
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction()?;
+        let mut items: Vec<(String, i32, i32)> = tx
+            .prepare(
+                "SELECT track_id, is_jingle, is_ad FROM playlist_items
+                 WHERE playlist_id = ?1 ORDER BY position",
+            )?
+            .query_map(params![playlist_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i32>(1)?,
+                    row.get::<_, i32>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if from >= items.len() || to >= items.len() {
+            return Err(CrabError::Playlist("item index out of range".into()));
+        }
+        let row = items.remove(from);
+        items.insert(to, row);
+        tx.execute(
+            "DELETE FROM playlist_items WHERE playlist_id = ?1",
+            params![playlist_id],
+        )?;
+        for (i, (track_id, jingle, ad)) in items.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO playlist_items (playlist_id, track_id, position, is_jingle, is_ad)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![playlist_id, track_id, i as i32, jingle, ad],
+            )?;
+        }
+        tx.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), playlist_id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -366,5 +474,106 @@ mod tests {
             }
             other => panic!("expected Integrity error, got {other:?}"),
         }
+    }
+
+    fn seed_three(m: &PlaylistManager) -> Playlist {
+        m.conn
+            .borrow()
+            .execute_batch(
+                "INSERT OR IGNORE INTO tracks (id, file_path) VALUES
+                 ('t1', '/a.mp3'), ('t2', '/b.mp3'), ('t3', '/c.mp3');",
+            )
+            .unwrap();
+        let p = m.create("Manual", None).unwrap();
+        m.add_track(&p.id, "t1", false, false).unwrap();
+        m.add_track(&p.id, "t2", false, false).unwrap();
+        m.add_track(&p.id, "t3", false, false).unwrap();
+        p
+    }
+
+    #[test]
+    fn remove_renumbers_dense() {
+        let m = mem_manager();
+        let p = seed_three(&m);
+        m.remove_at(&p.id, 1).unwrap();
+        let full = m.get_with_items(&p.id).unwrap().unwrap();
+        assert_eq!(full.items.len(), 2);
+        assert_eq!(full.items[0].track_id, "t1");
+        assert_eq!(full.items[1].track_id, "t3");
+        assert_eq!(full.items[0].position, 0);
+        assert_eq!(full.items[1].position, 1);
+        // Appending after a remove continues the dense sequence.
+        m.conn
+            .borrow()
+            .execute_batch("INSERT OR IGNORE INTO tracks (id, file_path) VALUES ('t4', '/d.mp3');")
+            .unwrap();
+        m.add_track(&p.id, "t4", false, false).unwrap();
+        let full = m.get_with_items(&p.id).unwrap().unwrap();
+        assert_eq!(full.items[2].position, 2);
+    }
+
+    #[test]
+    fn remove_missing_position_is_error() {
+        let m = mem_manager();
+        let p = seed_three(&m);
+        m.remove_at(&p.id, 9)
+            .expect_err("unknown position must fail");
+        // Failed remove leaves the list untouched.
+        assert_eq!(m.get_with_items(&p.id).unwrap().unwrap().items.len(), 3);
+    }
+
+    #[test]
+    fn move_item_reorders_and_renumbers() {
+        let m = mem_manager();
+        let p = seed_three(&m);
+        // t1,t2,t3 -> move first to last.
+        m.move_item(&p.id, 0, 2).unwrap();
+        let ids: Vec<_> = m
+            .get_with_items(&p.id)
+            .unwrap()
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| i.track_id)
+            .collect();
+        assert_eq!(ids, vec!["t2", "t3", "t1"]);
+        let positions: Vec<_> = m
+            .get_with_items(&p.id)
+            .unwrap()
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| i.position)
+            .collect();
+        assert_eq!(positions, vec![0, 1, 2]);
+        // Move last back to first.
+        m.move_item(&p.id, 2, 0).unwrap();
+        let ids: Vec<_> = m
+            .get_with_items(&p.id)
+            .unwrap()
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| i.track_id)
+            .collect();
+        assert_eq!(ids, vec!["t1", "t2", "t3"]);
+        // Out-of-range moves fail without touching the list.
+        m.move_item(&p.id, 0, 3)
+            .expect_err("to out of range must fail");
+        m.move_item(&p.id, 5, 0)
+            .expect_err("from out of range must fail");
+        assert_eq!(m.get_with_items(&p.id).unwrap().unwrap().items.len(), 3);
+    }
+
+    #[test]
+    fn rename_validates_and_persists() {
+        let m = mem_manager();
+        let p = m.create("Old", None).unwrap();
+        m.rename(&p.id, "  ").expect_err("blank name must fail");
+        m.rename(&p.id, "New Name").unwrap();
+        let all = m.list_all().unwrap();
+        assert_eq!(all[0].name, "New Name");
+        m.rename("missing-id", "X")
+            .expect_err("unknown playlist must fail");
     }
 }

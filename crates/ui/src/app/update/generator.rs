@@ -54,6 +54,13 @@ pub(crate) struct SavedPlaylist {
     pub(crate) tracks: usize,
 }
 
+/// One expanded row of the manual builder (B): stored-order item with
+/// its display label. `missing` marks files the fire path would skip.
+pub(crate) struct PlaylistDetailItem {
+    pub(crate) label: String,
+    pub(crate) missing: bool,
+}
+
 /// One persisted rotation.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct FireResult {
@@ -239,6 +246,219 @@ impl App {
             }
         }
         self.saved_playlists = out;
+        // A deleted playlist must not stay expanded with stale rows.
+        if let Some(sel) = self.playlist_selected.clone() {
+            if !self.saved_playlists.iter().any(|p| p.id == sel) {
+                self.playlist_selected = None;
+                self.playlist_detail.clear();
+                self.playlist_detail_missing = 0;
+            } else {
+                self.refresh_playlist_detail();
+            }
+        }
+    }
+
+    /// Rebuild the expanded detail for `playlist_selected` in stored
+    /// order. Missing files stay visible with a flag (the fire path
+    /// skips them with a count) so the operator can remove or
+    /// re-import them deliberately.
+    pub(crate) fn refresh_playlist_detail(&mut self) {
+        self.playlist_detail.clear();
+        self.playlist_detail_missing = 0;
+        let Some(sel) = self.playlist_selected.clone() else {
+            return;
+        };
+        let pl = match self.playlist_manager.get_with_items(&sel) {
+            Ok(Some(p)) => p,
+            _ => {
+                self.playlist_selected = None;
+                return;
+            }
+        };
+        for item in &pl.items {
+            match self.library.get_track(&item.track_id).ok().flatten() {
+                Some(t) => {
+                    let missing = !PathBuf::from(&t.file_path).is_file();
+                    if missing {
+                        self.playlist_detail_missing += 1;
+                    }
+                    self.playlist_detail.push(PlaylistDetailItem {
+                        label: track_label(&t),
+                        missing,
+                    });
+                }
+                None => {
+                    self.playlist_detail_missing += 1;
+                    self.playlist_detail.push(PlaylistDetailItem {
+                        label: "(track removed from library)".into(),
+                        missing: true,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// B: create an empty manual playlist from the Home input.
+pub(crate) fn playlist_create(state: &mut App) {
+    let name = state.playlist_new_name.trim().to_string();
+    if name.is_empty() {
+        state.gen_status = "Name the playlist first".into();
+        return;
+    }
+    match state
+        .playlist_manager
+        .create(&name, Some("Manual playlist"))
+    {
+        Ok(pl) => {
+            state.playlist_new_name.clear();
+            state.playlist_count = state.playlist_manager.list_all().unwrap_or_default().len();
+            state.refresh_saved_playlists();
+            state.playlist_selected = Some(pl.id);
+            state.refresh_playlist_detail();
+            state.gen_status = format!("Created '{}'", name);
+        }
+        Err(e) => {
+            state.gen_status = format!("Create failed: {e}");
+        }
+    }
+}
+
+/// B: expand/collapse a saved playlist to edit its order.
+pub(crate) fn playlist_select(state: &mut App, playlist_id: String) {
+    if state.playlist_selected.as_deref() == Some(playlist_id.as_str()) {
+        state.playlist_selected = None;
+        state.playlist_detail.clear();
+        state.playlist_detail_missing = 0;
+    } else {
+        state.playlist_selected = Some(playlist_id);
+        state.refresh_playlist_detail();
+    }
+}
+
+/// B: delete a whole saved playlist (items go via FK cascade).
+pub(crate) fn playlist_delete(state: &mut App, playlist_id: String) {
+    let name = state
+        .saved_playlists
+        .iter()
+        .find(|p| p.id == playlist_id)
+        .map(|p| p.name.clone())
+        .unwrap_or_default();
+    match state.playlist_manager.delete(&playlist_id) {
+        Ok(()) => {
+            if state.playlist_selected.as_deref() == Some(playlist_id.as_str()) {
+                state.playlist_selected = None;
+                state.playlist_detail.clear();
+                state.playlist_detail_missing = 0;
+            }
+            state.playlist_count = state.playlist_manager.list_all().unwrap_or_default().len();
+            state.refresh_saved_playlists();
+            state.gen_status = if name.is_empty() {
+                "Playlist deleted".into()
+            } else {
+                format!("Deleted '{name}'")
+            };
+        }
+        Err(e) => {
+            state.gen_status = format!("Delete failed: {e}");
+        }
+    }
+}
+
+/// B: append the currently selected Library track to a playlist.
+pub(crate) fn playlist_add_selected(state: &mut App, playlist_id: String) {
+    let Some(i) = state.lib_selected else {
+        state.gen_status = "Pick a track in Library first".into();
+        return;
+    };
+    let Some(track) = state.lib_tracks.get(i).cloned() else {
+        state.gen_status = "Selected track is gone — pick another".into();
+        return;
+    };
+    if !PathBuf::from(&track.file_path).is_file() {
+        state.gen_status = format!("'{}' file is missing, not added", track_label(&track));
+        return;
+    }
+    let (is_jingle, is_ad) = match track.kind {
+        TrackKind::Jingle => (true, false),
+        TrackKind::Ad => (false, true),
+        TrackKind::Music => (false, false),
+    };
+    match state
+        .playlist_manager
+        .add_track(&playlist_id, &track.id, is_jingle, is_ad)
+    {
+        Ok(()) => {
+            state.refresh_saved_playlists();
+            state.refresh_playlist_detail();
+            state.gen_status = format!("Added '{}'", track_label(&track));
+        }
+        Err(e) => {
+            state.gen_status = format!("Add failed: {e}");
+        }
+    }
+}
+
+/// B: remove one stored-order entry by its list index.
+pub(crate) fn playlist_remove_item(state: &mut App, playlist_id: String, idx: usize) {
+    let position = match state
+        .playlist_manager
+        .get_with_items(&playlist_id)
+        .ok()
+        .flatten()
+    {
+        Some(pl) => match pl.items.get(idx) {
+            Some(item) => item.position,
+            None => {
+                state.gen_status = "Row is gone — reopen the playlist".into();
+                return;
+            }
+        },
+        None => {
+            state.gen_status = "Playlist gone — pick another".into();
+            return;
+        }
+    };
+    match state.playlist_manager.remove_at(&playlist_id, position) {
+        Ok(()) => {
+            state.refresh_saved_playlists();
+            state.refresh_playlist_detail();
+            state.gen_status = "Removed 1 track".into();
+        }
+        Err(e) => {
+            state.gen_status = format!("Remove failed: {e}");
+        }
+    }
+}
+
+/// B: nudge one entry up (`up = true`) or down in stored order.
+pub(crate) fn playlist_move(state: &mut App, playlist_id: String, idx: usize, up: bool) {
+    let len = state
+        .playlist_manager
+        .get_with_items(&playlist_id)
+        .ok()
+        .flatten()
+        .map(|p| p.items.len())
+        .unwrap_or(0);
+    if len == 0 {
+        state.gen_status = "Playlist gone — pick another".into();
+        return;
+    }
+    if up && idx == 0 {
+        return;
+    }
+    if !up && idx + 1 >= len {
+        return;
+    }
+    let to = if up { idx - 1 } else { idx + 1 };
+    match state.playlist_manager.move_item(&playlist_id, idx, to) {
+        Ok(()) => {
+            state.refresh_saved_playlists();
+            state.refresh_playlist_detail();
+        }
+        Err(e) => {
+            state.gen_status = format!("Move failed: {e}");
+        }
     }
 }
 

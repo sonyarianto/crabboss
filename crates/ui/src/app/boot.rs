@@ -320,6 +320,10 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         gen_counts: [crate::app::update::generator::DEFAULT_GEN_COUNT; 4],
         gen_status: String::new(),
         saved_playlists: Vec::new(),
+        playlist_new_name: String::new(),
+        playlist_selected: None,
+        playlist_detail: Vec::new(),
+        playlist_detail_missing: 0,
         last_recovery: None,
         tick_count: 0,
     };
