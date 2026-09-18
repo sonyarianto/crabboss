@@ -2,7 +2,7 @@
 
 # 🦀 CrabBoss
 
-**Radio Automation Software**
+**Radio Automation Software** — 🌐 Official website: https://crabboss.vercel.app/
 
 A professional radio station management application featuring audio playback, library management, playlist automation, and streaming capabilities.
 

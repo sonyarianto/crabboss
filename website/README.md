@@ -1,5 +1,7 @@
 # CrabBoss Website
 
+Live: https://crabboss.vercel.app/
+
 Official site sources (VitePress). Deployed **manually** to Vercel.
 
 ## Develop
