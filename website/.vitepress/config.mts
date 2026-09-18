@@ -1,8 +1,25 @@
 import { defineConfig } from 'vitepress'
 
+const SITE_URL = 'https://crabboss.vercel.app'
+const SITE_DESC =
+  'Gapless playout, true-PFL cueing, and Icecast streaming — free and open source.'
+
 export default defineConfig({
   title: 'CrabBoss',
-  description: 'Open radio automation software — gapless playout, true-PFL cueing, Icecast streaming.',
+  description: SITE_DESC,
+  head: [
+    ['meta', { name: 'theme-color', content: '#16171a' }],
+    ['meta', { property: 'og:type', content: 'website' }],
+    ['meta', { property: 'og:site_name', content: 'CrabBoss' }],
+    ['meta', { property: 'og:title', content: 'CrabBoss — Radio automation software' }],
+    ['meta', { property: 'og:description', content: SITE_DESC }],
+    ['meta', { property: 'og:url', content: `${SITE_URL}/` }],
+    ['meta', { property: 'og:image', content: `${SITE_URL}/og-image.png` }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['meta', { name: 'twitter:title', content: 'CrabBoss — Radio automation software' }],
+    ['meta', { name: 'twitter:description', content: SITE_DESC }],
+    ['meta', { name: 'twitter:image', content: `${SITE_URL}/og-image.png` }],
+  ],
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
