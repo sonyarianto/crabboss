@@ -507,7 +507,8 @@ mod tests {
             let tail = &decoded[half..];
             let (mut sum_l, mut sum_r, mut sum_d, mut peak) = (0.0f64, 0.0, 0.0, 0i32);
             let mut n = 0u32;
-            for s in tail.chunks_exact(2) {
+            let (pairs, _) = tail.as_chunks::<2>();
+            for s in pairs {
                 let (l, r) = (s[0] as f64, s[1] as f64);
                 sum_l += l * l;
                 sum_r += r * r;
