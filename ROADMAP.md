@@ -94,7 +94,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP + "valid until" expiry with row badges and warnings banner + `load` fires a named playlist in stored order + `queue` insert-after | ✅ |
 | Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
 | Preview / PFL | Pre-listen on a second output without broadcasting | Independent cue bus (second output, click-free fades) + explicit On Air gate; cue never touches program/stream/reports | ✅ |
-| Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
+| Voice tracking / teasers | Voice tracks, auto-intro, teasers | v1: record mic takes + fire On Air / queue Next from the Playout desk (outside library/reports); voice-over overlap, auto-intro, scheduled teasers open | 🟡 |
 | Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME + Opus + HE-AAC v1/v2, PUT + SOURCE fallback, TLS, paced, reconnect, metadata) + Shoutcast v1/v2 source client (MP3, `:#sid`, admin.cgi titles + viewjson listeners) + Settings UI (protocol + sid selector, MP3-only guard) with live status, live-encoder indicator, one-click restart + listener count + Playout cover art; relay open, live-DNAS validation open | 🟡 |
 | Mic / line-in | Mixed input, sidechain ducking, bed music | cpal input + `rtrb` ring summed pre-limiter/tap, voice-activated ducker, live device switching, Settings mic panel | ✅ |
 | Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
