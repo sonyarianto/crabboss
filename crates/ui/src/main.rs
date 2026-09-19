@@ -17,5 +17,9 @@ fn main() -> iced::Result {
         .title("CrabBoss")
         .subscription(subscription)
         .theme(|_: &app::App| iced::Theme::Dark)
+        // Off so the X button routes through `Message::WindowCloseRequested`
+        // (graceful stream/Stereo Tool shutdown) instead of killing the
+        // window while the sender thread still owns a live DSP instance.
+        .exit_on_close_request(false)
         .run()
 }

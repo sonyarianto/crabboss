@@ -51,6 +51,7 @@ fn cart_hotkey(key: iced::keyboard::Key, _: iced::keyboard::Modifiers) -> Option
 pub(crate) fn subscription(_: &App) -> Subscription<Message> {
     Subscription::batch(vec![
         iced::time::every(Duration::from_millis(200)).map(|_| Message::Tick),
+        iced::window::close_requests().map(Message::WindowCloseRequested),
         iced::keyboard::listen().filter_map(|event| match event {
             iced::keyboard::Event::KeyPressed { key, modifiers, .. } => cart_hotkey(key, modifiers),
             _ => None,

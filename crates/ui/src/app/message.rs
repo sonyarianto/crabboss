@@ -15,6 +15,11 @@ pub(crate) enum Message {
     Navigate(Screen),
     SettingsNav(SettingsSection),
     Tick,
+    /// Window X pressed (only fired because `exit_on_close_request`
+    /// is off in `main`): stop live I/O first so Stereo Tool teardown
+    /// on the sender thread finishes before the window — and the
+    /// process — goes away.
+    WindowCloseRequested(iced::window::Id),
     // Transport
     Play,
     Pause,

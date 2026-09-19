@@ -225,6 +225,10 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       loudly on broken setup, never silent-unprocessed), license state
       in Settings. Live-verified against the real v11.05 DLL
       (process + license check). Program-bus (monitor) insertion open.
+- [x] Graceful shutdown on exit: window close stops the stream first and
+      joins the sender thread (bounded 15 s), so Stereo Tool teardown
+      (`stereoTool_Delete` on that thread) completes before process
+      teardown unloads the DLL — no zombie process after close.
 
 ### 1.6 Mic / Live Assist
 - [x] Mic input via `cpal` input stream, mixed into program bus (device

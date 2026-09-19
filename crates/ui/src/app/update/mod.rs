@@ -39,6 +39,17 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::Tick => {
             state.on_tick();
         }
+        Message::WindowCloseRequested(id) => {
+            // Graceful exit: stop live I/O (stream sender + mic input)
+            // before the window closes. `stream_stop` signals the sender
+            // thread and joins it (bounded), so `stereoTool_Delete` on
+            // that thread completes before process teardown can unload
+            // the DLL from under a live instance — otherwise the window
+            // closes but `crabui` lingers as a zombie process.
+            state.player.stream_stop();
+            state.player.mic_stop();
+            return iced::window::close(id);
+        }
         // -- Transport ------------------------------------------------------
         Message::Play => transport::play(state),
         Message::Pause => transport::pause(state),

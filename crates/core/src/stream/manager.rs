@@ -40,6 +40,14 @@ const STATE_ERROR: u8 = 3;
 const MAX_RECONNECTS: u32 = 5;
 const RETRY_DELAYS_SECS: [u64; 5] = [2, 5, 10, 20, 30];
 
+/// How long `stop` (and `Drop`) waits for the sender thread to exit,
+/// including Stereo Tool teardown (`stereoTool_Delete` runs on that
+/// thread). The DLL itself aborts its internal idle-wait after 10 s, so
+/// 15 s covers even the pathological path; afterwards the thread is
+/// detached rather than freezing close forever. The graceful path
+/// (generation bump, no wedged connection) exits in milliseconds.
+const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Producer side of the tap: the audio callback calls [`StreamTap::push`]
 /// with post-DSP interleaved stereo frames. Never blocks; on overflow the
 /// newest samples are dropped (the stream stalls gracefully rather than
@@ -83,6 +91,12 @@ pub struct StreamManager {
     generation: Arc<AtomicU64>,
     /// Live tap for the engine (cleared by `stop`).
     tap: Option<StreamTap>,
+    /// Sender thread handle. `stop` (and `Drop`) joins it so Stereo Tool
+    /// teardown (`stereoTool_Delete`, which must run on the thread that
+    /// owns the instance) completes before the library unloads — an
+    /// un-joined drop during process teardown leaves a zombie `crabui`
+    /// in Task Manager after the window closes.
+    sender: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Atomic mirror of [`StreamStats`] so the UI can read counters without
@@ -115,6 +129,7 @@ impl StreamManager {
             dsp_status: Arc::new(Mutex::new(String::new())),
             generation: Arc::new(AtomicU64::new(0)),
             tap: None,
+            sender: None,
         }
     }
 
@@ -174,6 +189,15 @@ impl StreamManager {
             return self.tap.clone();
         }
 
+        // Reap a previous sender that already exited on its own (e.g. it
+        // gave up after bounded reconnects). A still-running one stays
+        // detached — the generation bump below tells it to exit.
+        if let Some(old) = self.sender.take() {
+            if old.is_finished() {
+                let _ = old.join();
+            }
+        }
+
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.state.store(STATE_CONNECTING, Ordering::Relaxed);
         *self.last_error.lock().unwrap() = String::new();
@@ -212,23 +236,63 @@ impl StreamManager {
                     gen,
                 );
             });
-        if spawned.is_err() {
-            // Thread spawn failed: roll back to Off.
-            self.generation.fetch_add(1, Ordering::SeqCst);
-            self.state.store(STATE_OFF, Ordering::Relaxed);
-            self.tap = None;
-            tracing::error!("Stream: failed to spawn sender thread");
-            return None;
+        match spawned {
+            Ok(handle) => {
+                self.sender = Some(handle);
+                Some(tap)
+            }
+            Err(_) => {
+                // Thread spawn failed: roll back to Off.
+                self.generation.fetch_add(1, Ordering::SeqCst);
+                self.state.store(STATE_OFF, Ordering::Relaxed);
+                self.tap = None;
+                tracing::error!("Stream: failed to spawn sender thread");
+                None
+            }
         }
-        Some(tap)
     }
 
-    /// Stop streaming and tear down the sender thread (the tap goes
-    /// stale via generation bump; the thread exits on its next check).
+    /// Stop streaming: the tap goes stale via generation bump and the
+    /// sender thread is joined (bounded) so Stereo Tool teardown on that
+    /// thread finishes before the caller — and before process teardown
+    /// can unload the DLL from under a live instance.
     pub fn stop(&mut self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.state.store(STATE_OFF, Ordering::Relaxed);
         self.tap = None;
+        self.join_sender();
+    }
+
+    /// Wait for the sender thread to exit, up to
+    /// [`SHUTDOWN_JOIN_TIMEOUT`]. Detaches (with a warning) instead of
+    /// blocking forever when the thread is wedged.
+    fn join_sender(&mut self) {
+        let Some(handle) = self.sender.take() else {
+            return;
+        };
+        let deadline = Instant::now() + SHUTDOWN_JOIN_TIMEOUT;
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            tracing::warn!(
+                "Stream: sender thread did not exit in {:?}; detaching",
+                SHUTDOWN_JOIN_TIMEOUT
+            );
+        }
+    }
+}
+
+impl Drop for StreamManager {
+    fn drop(&mut self) {
+        // A drop without `stop` (e.g. window close tearing down the
+        // engine) must still shut the sender down first: dropping the
+        // manager while its thread owns a live Stereo Tool instance
+        // hangs process teardown (zombie process after close).
+        // Bounded — strictly better than hanging forever.
+        self.stop();
     }
 }
 
@@ -551,5 +615,35 @@ mod tests {
         let big = vec![0.1f32; RING_SAMPLES + 4096];
         tap.push(&big);
         mgr.stop();
+    }
+
+    #[test]
+    fn stop_joins_the_sender_thread() {
+        let mut mgr = StreamManager::new(cfg());
+        let _ = mgr.start(48_000);
+        assert!(mgr.sender.is_some(), "start stores the sender handle");
+        mgr.stop();
+        assert!(!mgr.running());
+        assert!(mgr.sender.is_none(), "stop joins and reaps the handle");
+        // Second stop is a safe no-op (no thread, no hang).
+        mgr.stop();
+    }
+
+    #[test]
+    fn drop_without_stop_shuts_down_promptly() {
+        // Window-close path: the engine is torn down without an explicit
+        // stop. Drop must signal + join (bounded), never hang — with a
+        // refused connection the sender sits in interruptible retry
+        // sleeps, so this returns in well under the join timeout.
+        let t0 = Instant::now();
+        {
+            let mut mgr = StreamManager::new(cfg());
+            let _ = mgr.start(48_000);
+            // No stop() — drop directly.
+        }
+        assert!(
+            t0.elapsed() < SHUTDOWN_JOIN_TIMEOUT,
+            "drop must not wait out the full join timeout"
+        );
     }
 }
