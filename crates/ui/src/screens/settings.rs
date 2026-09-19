@@ -602,6 +602,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                         .on_input(Message::StLibPath)
                         .padding(6)
                         .width(Length::Fill),
+                    button(text("Browse...").size(12)).on_press(Message::StPickLibrary),
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
@@ -620,6 +621,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                         .on_input(Message::StPresetPath)
                         .padding(6)
                         .width(Length::Fill),
+                    button(text("Browse...").size(12)).on_press(Message::StPickPreset),
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),

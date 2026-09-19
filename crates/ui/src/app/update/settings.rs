@@ -6,7 +6,7 @@ use crabcore::stream::{StreamFormat, StreamProtocol};
 
 use std::sync::mpsc;
 
-use super::super::App;
+use super::super::{App, Message};
 use crate::widgets::{
     duck_ms_step, opus_bitrate_step, opus_snap_bitrate, stream_bitrate_step, ATTACK_LADDER,
     RELEASE_LADDER,
@@ -338,6 +338,57 @@ pub(crate) fn st_license_key(state: &mut App, v: String) {
 pub(crate) fn st_preset_path(state: &mut App, v: String) {
     state.settings.stream.stereotool.preset_path = v;
     push_stereo_tool(state);
+}
+
+/// Native file picker for the Stereo Tool library (async: `update`
+/// must return immediately so the dialog can enumerate folders).
+/// Filter covers every platform's extension; the operator picks the
+/// one matching their OS.
+pub(crate) fn st_pick_library(state: &mut App) -> iced::Task<Message> {
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_title("Select Stereo Tool library")
+        .add_filter("Stereo Tool library", &["dll", "so", "dylib"]);
+    if let Some(dir) = existing_parent(&state.settings.stream.stereotool.lib_path) {
+        dialog = dialog.set_directory(dir);
+    }
+    iced::Task::perform(dialog.pick_file(), |handle| {
+        Message::StLibraryPicked(handle.map(|h| h.path().to_path_buf()))
+    })
+}
+
+pub(crate) fn st_library_picked(state: &mut App, picked: Option<std::path::PathBuf>) {
+    // Cancelled: leave the field untouched.
+    if let Some(path) = picked {
+        state.settings.stream.stereotool.lib_path = path.to_string_lossy().into_owned();
+        push_stereo_tool(state);
+    }
+}
+
+/// Native file picker for the `.sts` preset.
+pub(crate) fn st_pick_preset(state: &mut App) -> iced::Task<Message> {
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_title("Select Stereo Tool preset")
+        .add_filter("Stereo Tool preset", &["sts"]);
+    if let Some(dir) = existing_parent(&state.settings.stream.stereotool.preset_path) {
+        dialog = dialog.set_directory(dir);
+    }
+    iced::Task::perform(dialog.pick_file(), |handle| {
+        Message::StPresetPicked(handle.map(|h| h.path().to_path_buf()))
+    })
+}
+
+pub(crate) fn st_preset_picked(state: &mut App, picked: Option<std::path::PathBuf>) {
+    if let Some(path) = picked {
+        state.settings.stream.stereotool.preset_path = path.to_string_lossy().into_owned();
+        push_stereo_tool(state);
+    }
+}
+
+/// Start directory for the pickers: the current field's parent, when
+/// it exists (second pick starts where the first one landed).
+fn existing_parent(field: &str) -> Option<std::path::PathBuf> {
+    let parent = std::path::Path::new(field).parent()?;
+    parent.is_dir().then(|| parent.to_path_buf())
 }
 
 pub(crate) fn mic_toggle(state: &mut App) {

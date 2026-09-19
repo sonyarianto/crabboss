@@ -110,8 +110,9 @@ The Library never touches the broadcast; the Playout desk owns it.
 ## Stereo Tool (optional on-air DSP)
 
 - **Settings → Stereo Tool**: enable, then point **Library** at your own
-  `libStereoTool` copy (from Thimeo's plugin SDK — never bundled),
-  paste the **license key**, and pick a **Preset** (`.sts`). **Bypass**
+  `libStereoTool` copy (from Thimeo's plugin SDK — never bundled, use
+  **Browse...** or paste the path), paste the **license key**, and pick a
+  **Preset** (`.sts`, also via **Browse...**). **Bypass**
   keeps everything loaded but passes audio through untouched.
 - Processing sits post-tap, pre-encoder on the stream — monitors stay
   dry. Applies on stream start/restart. A broken setup fails the start
