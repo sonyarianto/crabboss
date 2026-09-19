@@ -27,6 +27,7 @@
   "auto_sync_interval_mins": 60,
   "stream": {
     "enabled": false,
+    "protocol": "icecast",
     "host": "127.0.0.1",
     "port": 8000,
     "mount": "/stream",
@@ -38,7 +39,8 @@
     "description": "",
     "public": false,
     "bitrate_kbps": 128,
-    "format": "mp3"
+    "format": "mp3",
+    "sid": 1
   },
   "mic": {
     "enabled": false,

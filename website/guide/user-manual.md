@@ -94,13 +94,18 @@ The Library never touches the broadcast; the Playout desk owns it.
 
 ## Streaming
 
-- **Settings → Streaming**: Icecast host/port/mount/credentials, TLS,
-  format (**MP3**/**Opus**) and bitrate. Opus snaps to its own ladder
-  (24–160 kbps) and needs far fewer bits for the same quality.
-- The status names the live encoder (`🔴 Live — Opus 128 kbps`). Format,
-  bitrate, and connection edits apply on **restart** — while live, a red
-  **Apply & restart** button appears for pending changes. Every restart
-  rebuffers listeners, so batch your edits.
+- **Settings → Streaming**: protocol (**Icecast** / **Shoutcast v1** /
+  **Shoutcast v2**), host/port/credentials, TLS, format (**MP3**/**Opus**)
+  and bitrate. Opus snaps to its own ladder (24–160 kbps) and needs far
+  fewer bits for the same quality — Icecast only, Shoutcast is MP3-only
+  (picking Shoutcast auto-switches the format).
+- Icecast uses host/port/**mount**; Shoutcast v1 uses the *source* port
+  (usually listener port + 1, e.g. 8001, no mount); Shoutcast v2 uses
+  portbase (e.g. 8000) plus a **Stream ID** (1 = default).
+- The status names the live source (`🔴 Live — Icecast Opus 128 kbps`).
+  Protocol, format, bitrate, and connection edits apply on **restart** —
+  while live, a red **Apply & restart** button appears for pending
+  changes. Every restart rebuffers listeners, so batch your edits.
 
 ## Sound
 

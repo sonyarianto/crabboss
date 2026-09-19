@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use crabcore::library::TrackKind;
-use crabcore::stream::StreamFormat;
+use crabcore::stream::{StreamFormat, StreamProtocol};
 
 use super::{Screen, SettingsSection};
 
@@ -138,6 +138,9 @@ pub(crate) enum Message {
     StreamBitrateInc,
     StreamBitrateDec,
     StreamFormatChanged(StreamFormat),
+    StreamProtocolChanged(StreamProtocol),
+    StreamSidInc,
+    StreamSidDec,
     StreamRestart,
     MicToggle,
     MicRefreshDevices,

@@ -2,7 +2,7 @@
 //! EQ, loudness, streaming, mic, station, backup).
 
 use crabcore::audio::{EQ_BAND_COUNT, TARGET_MAX_LUFS, TARGET_MIN_LUFS};
-use crabcore::stream::StreamFormat;
+use crabcore::stream::{StreamFormat, StreamProtocol};
 
 use std::sync::mpsc;
 
@@ -247,6 +247,38 @@ pub(crate) fn stream_format_changed(state: &mut App, format: StreamFormat) {
     if format == StreamFormat::Opus {
         state.settings.stream.bitrate_kbps = opus_snap_bitrate(state.settings.stream.bitrate_kbps);
     }
+    state.save_settings();
+    state
+        .player
+        .set_stream_config(state.settings.stream.clone());
+}
+
+pub(crate) fn stream_protocol_changed(state: &mut App, protocol: StreamProtocol) {
+    // Takes effect on the next start (a new handshake wraps the fresh
+    // connection); restart the stream to apply it live. Shoutcast is
+    // MP3-only, so move off Opus now instead of failing at connect.
+    state.settings.stream.protocol = protocol;
+    if protocol.is_shoutcast() && state.settings.stream.format == StreamFormat::Opus {
+        state.settings.stream.format = StreamFormat::Mp3;
+        tracing::info!("Stream protocol needs MP3; format switched from Opus");
+    }
+    state.save_settings();
+    state
+        .player
+        .set_stream_config(state.settings.stream.clone());
+}
+
+pub(crate) fn stream_sid_inc(state: &mut App) {
+    // DNAS stream IDs start at 1; cap high enough for big servers.
+    state.settings.stream.sid = (state.settings.stream.sid + 1).clamp(1, 99);
+    state.save_settings();
+    state
+        .player
+        .set_stream_config(state.settings.stream.clone());
+}
+
+pub(crate) fn stream_sid_dec(state: &mut App) {
+    state.settings.stream.sid = state.settings.stream.sid.saturating_sub(1).max(1);
     state.save_settings();
     state
         .player

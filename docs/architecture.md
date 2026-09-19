@@ -36,7 +36,9 @@ crabboss/
   stream tap sits pre-volume so the broadcast keeps full level.
 - Mic/line-in arrives via `rtrb` ring, is ducked against the music bed,
   and sums in pre-limiter/tap so the broadcast hears it.
-- Icecast tee: post-DSP tap → MP3/Opus sender thread with real-time pacing.
+- Stream tee: post-DSP tap → MP3/Opus sender thread with real-time
+  pacing → Icecast (`PUT`/`SOURCE`, mount-based) or Shoutcast v1/v2
+  (`password` + `icy-*`, MP3-only, titles via `admin.cgi`).
 - Cue/PFL preview runs on its own output stream (second device), flat with
   ~30 ms click-free fades. It never feeds the stream tap, the mixer, the
   silence monitor, or the play log.

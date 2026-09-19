@@ -169,6 +169,11 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::StreamBitrateInc => settings::stream_bitrate_inc(state),
         Message::StreamBitrateDec => settings::stream_bitrate_dec(state),
         Message::StreamFormatChanged(format) => settings::stream_format_changed(state, format),
+        Message::StreamProtocolChanged(protocol) => {
+            settings::stream_protocol_changed(state, protocol)
+        }
+        Message::StreamSidInc => settings::stream_sid_inc(state),
+        Message::StreamSidDec => settings::stream_sid_dec(state),
         Message::StreamRestart => settings::stream_restart(state),
         Message::MicToggle => settings::mic_toggle(state),
         Message::MicRefreshDevices => settings::mic_refresh_devices(state),

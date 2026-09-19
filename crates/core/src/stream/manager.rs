@@ -3,7 +3,8 @@
 //! The cpal callback pushes the post-DSP program mix into a lock-free
 //! ring buffer ([`rtrb`]) — never blocks, never allocates on the audio
 //! thread. A background thread drains it, encodes (MP3 or Opus, per the
-//! stream config), and sends to the Icecast server paced in real time (the source must behave like a
+//! stream config), and sends to the configured server (Icecast or
+//! Shoutcast) paced in real time (the source must behave like a
 //! live feed). Drops and server restarts trigger bounded reconnects.
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -13,8 +14,7 @@ use std::time::{Duration, Instant};
 use rtrb::RingBuffer;
 
 use crate::stream::encoder::build_encoder;
-use crate::stream::source::IcecastSource;
-use crate::stream::{StreamConfig, StreamState, StreamStats};
+use crate::stream::{SourceConn, StreamConfig, StreamState, StreamStats};
 
 /// Ring capacity in stereo f32 samples (~10.9 s at 48 kHz stereo).
 /// Large enough to ride out a reconnect, small enough to stay bounded.
@@ -186,7 +186,7 @@ impl StreamManager {
         let generation = self.generation.clone();
 
         let spawned = std::thread::Builder::new()
-            .name("icecast-sender".into())
+            .name("stream-sender".into())
             .spawn(move || {
                 sender_loop(
                     consumer,
@@ -252,7 +252,7 @@ fn sender_loop(
 
         // --- Connect ---
         state.store(STATE_CONNECTING, Ordering::Relaxed);
-        let (mut source, _proto) = match IcecastSource::connect(&cfg) {
+        let mut source = match SourceConn::connect(&cfg) {
             Ok(pair) => pair,
             Err(e) => {
                 if reconnects >= MAX_RECONNECTS {

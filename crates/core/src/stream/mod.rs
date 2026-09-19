@@ -2,23 +2,28 @@
 //!
 //! The cpal mix bus (post-DSP, pre-monitor-volume: exactly what the
 //! program feed plays at full level) is tapped into a [`StreamManager`], which encodes it to MP3 (LAME)
-//! or Opus (in Ogg, constant bitrate) and pushes it to an Icecast server as a source
-//! client — `PUT` protocol with legacy `SOURCE` fallback, paced at
-//! real time as the Icecast spec requires.
+//! or Opus (in Ogg, constant bitrate) and pushes it to the server as a
+//! source client — Icecast `PUT`/`SOURCE` (mount-based) or Shoutcast
+//! DNAS v1/v2 (`password` + `icy-*` headers), paced at real time as a
+//! live feed requires.
 
 mod encoder;
 mod encoder_mp3;
 mod encoder_opus;
 mod listeners;
 mod manager;
+mod shoutcast;
 mod source;
 
 pub use listeners::{fetch_listener_count, parse_listener_count, LISTENER_POLL_SECS};
 pub use manager::{StreamManager, StreamTap};
+pub use shoutcast::ShoutcastSource;
 #[allow(unused_imports)]
 pub use source::IcecastSource;
 
 use serde::{Deserialize, Serialize};
+
+use crate::error::Result;
 
 /// Encoder/container for the stream (MP3 via LAME, Opus in Ogg).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,9 +63,12 @@ impl StreamFormat {
 pub struct StreamConfig {
     /// Master switch: manager runs when true.
     pub enabled: bool,
+    /// Which server protocol to speak (Icecast 2, Shoutcast v1/v2).
+    pub protocol: StreamProtocol,
     pub host: String,
     pub port: u16,
     /// Mount path, normalized to start with `/` (e.g. `/stream`).
+    /// Icecast only — ignored by Shoutcast (DNAS has no mounts).
     pub mount: String,
     /// Source username (Icecast default: `source`).
     pub username: String,
@@ -82,6 +90,84 @@ pub struct StreamConfig {
     /// Constant bitrate in kbps (encoder picks the nearest supported).
     pub bitrate_kbps: u32,
     pub format: StreamFormat,
+    /// Shoutcast v2 stream ID (`:#sid` selection; 1 = server default).
+    /// Ignored by Icecast and Shoutcast v1.
+    #[serde(default = "default_stream_sid")]
+    pub sid: u32,
+}
+
+/// Default Shoutcast v2 stream ID (the DNAS default stream).
+fn default_stream_sid() -> u32 {
+    1
+}
+
+/// Which server protocol the source client speaks (ROADMAP §1.5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamProtocol {
+    /// Icecast 2 (`PUT` with `SOURCE` fallback, mount-based).
+    /// The default; the only protocol with Opus support.
+    #[default]
+    Icecast,
+    /// Shoutcast DNAS 1.x (`password` + `icy-*` headers on the
+    /// *source* port — usually listener `portbase + 1`). MP3 only.
+    #[serde(rename = "shoutcast-v1")]
+    ShoutcastV1,
+    /// Shoutcast DNAS 2.x (v1-compatible flow on `portbase` plus
+    /// `:#sid` stream selection). MP3 only.
+    #[serde(rename = "shoutcast-v2")]
+    ShoutcastV2,
+}
+
+impl StreamProtocol {
+    /// Short UI label.
+    pub fn label(self) -> &'static str {
+        match self {
+            StreamProtocol::Icecast => "Icecast",
+            StreamProtocol::ShoutcastV1 => "Shoutcast v1",
+            StreamProtocol::ShoutcastV2 => "Shoutcast v2",
+        }
+    }
+
+    /// True for either Shoutcast variant (MP3-only, no mounts).
+    pub fn is_shoutcast(self) -> bool {
+        !matches!(self, StreamProtocol::Icecast)
+    }
+}
+
+/// A connected source, either protocol: audio in (paced by the
+/// caller), titles via each protocol's metadata path.
+#[derive(Debug)]
+pub enum SourceConn {
+    Icecast(IcecastSource),
+    Shoutcast(ShoutcastSource),
+}
+
+impl SourceConn {
+    /// Connect + handshake per the config's protocol.
+    pub fn connect(config: &StreamConfig) -> Result<Self> {
+        if config.clone().sanitized().protocol.is_shoutcast() {
+            ShoutcastSource::connect(config).map(SourceConn::Shoutcast)
+        } else {
+            IcecastSource::connect(config).map(|(s, _)| SourceConn::Icecast(s))
+        }
+    }
+
+    /// Send encoded audio bytes (passthrough; the caller paces).
+    pub fn send(&mut self, audio: &[u8]) -> Result<()> {
+        match self {
+            SourceConn::Icecast(s) => s.send(audio),
+            SourceConn::Shoutcast(s) => s.send(audio),
+        }
+    }
+
+    /// Push a now-playing title (best effort; failures warn).
+    pub fn set_metadata(&mut self, title: &str) -> Result<()> {
+        match self {
+            SourceConn::Icecast(s) => s.set_metadata(title),
+            SourceConn::Shoutcast(s) => s.set_metadata(title),
+        }
+    }
 }
 
 impl std::fmt::Debug for StreamConfig {
@@ -94,6 +180,8 @@ impl std::fmt::Debug for StreamConfig {
             .field("username", &self.username)
             .field("password", &"<redacted>")
             .field("tls", &self.tls)
+            .field("protocol", &self.protocol)
+            .field("sid", &self.sid)
             .field("name", &self.name)
             .field("genre", &self.genre)
             .field("description", &self.description)
@@ -108,6 +196,7 @@ impl Default for StreamConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            protocol: StreamProtocol::Icecast,
             host: "127.0.0.1".into(),
             port: 8000,
             mount: "/stream".into(),
@@ -120,6 +209,7 @@ impl Default for StreamConfig {
             public: false,
             bitrate_kbps: 128,
             format: StreamFormat::Mp3,
+            sid: default_stream_sid(),
         }
     }
 }
@@ -146,6 +236,9 @@ impl StreamConfig {
         }
         if !(1..=320).contains(&self.bitrate_kbps) {
             self.bitrate_kbps = 128;
+        }
+        if self.sid == 0 {
+            self.sid = default_stream_sid();
         }
         self
     }
@@ -245,6 +338,43 @@ mod tests {
     #[test]
     fn content_type_for_mp3() {
         assert_eq!(StreamFormat::Mp3.content_type(), "audio/mpeg");
+    }
+
+    #[test]
+    fn protocol_defaults_to_icecast_for_old_configs() {
+        // Pre-Shoutcast settings.json files have no `protocol`/`sid`
+        // keys: they keep working as Icecast on the default stream.
+        let cfg: StreamConfig = serde_json::from_str(r#"{"host":"x"}"#).unwrap();
+        assert_eq!(cfg.protocol, StreamProtocol::Icecast);
+        assert_eq!(cfg.sid, 1);
+        assert!(!cfg.protocol.is_shoutcast());
+        assert!(StreamProtocol::ShoutcastV1.is_shoutcast());
+        assert!(StreamProtocol::ShoutcastV2.is_shoutcast());
+    }
+
+    #[test]
+    fn protocol_roundtrips_through_json() {
+        let cfg = StreamConfig {
+            protocol: StreamProtocol::ShoutcastV2,
+            sid: 3,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("shoutcast-v2"), "{json}");
+        let back: StreamConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cfg);
+        let v1: StreamProtocol = serde_json::from_str("\"shoutcast-v1\"").unwrap();
+        assert_eq!(v1.label(), "Shoutcast v1");
+    }
+
+    #[test]
+    fn sanitize_repairs_zero_sid() {
+        let cfg = StreamConfig {
+            sid: 0,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(cfg.sid, 1);
     }
 
     #[test]

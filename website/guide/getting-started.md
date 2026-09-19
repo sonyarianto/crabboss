@@ -38,6 +38,6 @@ cargo run -p crabui
 - Every tunable with its default is documented in
   [`settings.example.json`](https://github.com/sonyarianto/crabboss/blob/main/settings.example.json).
   Never commit your own `settings.json`: it holds machine devices and
-  the plaintext Icecast password — protect it with OS permissions.
+  the plaintext stream source password — protect it with OS permissions.
 
 Next: [User Manual](./user-manual.md).

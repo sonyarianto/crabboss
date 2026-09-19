@@ -2,7 +2,7 @@ import { defineConfig } from 'vitepress'
 
 const SITE_URL = 'https://crabboss.vercel.app'
 const SITE_DESC =
-  'Gapless playout, true-PFL cueing, and Icecast streaming — free and open source.'
+  'Gapless playout, true-PFL cueing, and live streaming (Icecast + Shoutcast) — free and open source.'
 
 export default defineConfig({
   title: 'CrabBoss',

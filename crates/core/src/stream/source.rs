@@ -109,7 +109,7 @@ impl IcecastSource {
     pub fn connect(config: &StreamConfig) -> Result<(Self, HandshakeProtocol)> {
         let config = config.clone().sanitized();
         let addr = format!("{}:{}", config.host, config.port);
-        let mut stream = Self::open(&config, &addr)?;
+        let mut stream = Self::open(&config, &addr, "Icecast")?;
         let headers = Self::request_headers(&config);
         let mount = config.mount.clone();
         match Self::handshake(&mut stream, &addr, "PUT", &mount, &headers, true) {
@@ -120,7 +120,7 @@ impl IcecastSource {
             Err(put_err) => {
                 tracing::warn!("Icecast PUT failed ({put_err}); trying legacy SOURCE");
                 // Reconnect: the failed attempt may have consumed bytes.
-                let mut stream = Self::open(&config, &addr)?;
+                let mut stream = Self::open(&config, &addr, "Icecast")?;
                 let meta_interval =
                     Self::handshake(&mut stream, &addr, "SOURCE", &mount, &headers, false)
                         .map_err(|src_err| {
@@ -137,21 +137,22 @@ impl IcecastSource {
     /// Open the transport: plain TCP, or TLS-wrapped when the config asks
     /// (servers behind HTTPS, e.g. port 443). Timeouts go on the raw
     /// socket first so the TLS handshake itself stays bounded; SNI uses
-    /// the configured host. Shared with the listener-stats poll.
-    pub(crate) fn open(config: &StreamConfig, addr: &str) -> Result<SourceStream> {
+    /// the configured host. Shared with the listener-stats poll and the
+    /// Shoutcast source client (`service` names the protocol in errors).
+    pub(crate) fn open(config: &StreamConfig, addr: &str, service: &str) -> Result<SourceStream> {
         // Bounded resolve + connect: a filtered port must fail here in
         // seconds, not after the OS minute-long TCP timeout.
         let sock_addr = addr
             .to_socket_addrs()
-            .map_err(|e| CrabError::Audio(format!("Icecast resolve {addr}: {e}")))?
+            .map_err(|e| CrabError::Audio(format!("{service} resolve {addr}: {e}")))?
             .next()
-            .ok_or_else(|| CrabError::Audio(format!("Icecast resolve {addr}: no address")))?;
+            .ok_or_else(|| CrabError::Audio(format!("{service} resolve {addr}: no address")))?;
         let stream = TcpStream::connect_timeout(&sock_addr, HANDSHAKE_TIMEOUT)
-            .map_err(|e| CrabError::Audio(format!("Icecast connect {addr}: {e}")))?;
+            .map_err(|e| CrabError::Audio(format!("{service} connect {addr}: {e}")))?;
         stream
             .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
             .and_then(|_| stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT)))
-            .map_err(|e| CrabError::Audio(format!("Icecast timeouts: {e}")))?;
+            .map_err(|e| CrabError::Audio(format!("{service} timeouts: {e}")))?;
         if !config.tls {
             return Ok(SourceStream::Plain(stream));
         }

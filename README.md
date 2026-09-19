@@ -19,14 +19,13 @@ A professional radio station management application featuring audio playback, li
 - ✅ **Advertisement Scheduler** — Dated blocks with intro→spot→outro chained breaks
 - ✅ **Cart Wall** — 8 pads with hotkeys, progress, assign-from-library
 - ✅ **12-Band EQ + Limiter + Loudness** — Program EQ, brickwall limiter, BS.1770/R128 normalization
-- ✅ **Streaming Output** — Icecast source client (MP3/Opus, plain + TLS) with auto-reconnect, live-encoder indicator, one-click apply-and-restart, and Settings UI
+- ✅ **Streaming Output** — Icecast + Shoutcast v1/v2 source client (MP3/Opus on Icecast, MP3 on Shoutcast, plain + TLS) with auto-reconnect, live-encoder indicator, one-click apply-and-restart, and Settings UI
 - ✅ **Microphone/Line-In** — Live input with voice-activated ducking and bed mix
 - ✅ **Reports** — Play logs with ranged reports + CSV/XLSX export
 - ✅ **Dark Theme UI** — Modern dark radio-station theme via Iced (sidebar navigation, on-air status footer, aligned library table)
 
 ### Coming Soon
 
-- 🔄 Shoutcast output
 - 🔄 Voice tracking & teasers
 - 🔄 Library depth (mass tag editor, BPM scan)
 - 🔄 PDF report export
@@ -77,7 +76,7 @@ cargo run -p crabui
 > machine devices and secrets. `settings.example.json` documents every
 > tunable with defaults.
 >
-> > **Security note (Stage A):** the Icecast source password is stored
+> > **Security note (Stage A):** the stream source password is stored
 > > **plaintext** in the local `settings.json` (and in backups of it).
 > > Anyone who can read that file can impersonate your stream source.
 > > A platform credential store (Stage B) will replace this with a

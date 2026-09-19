@@ -33,7 +33,7 @@ background loader: symphonia decode -> loudness gain -> rubato resample ->
 Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
   cpal OutputStream (program, x monitor volume)
   + cpal InputStream (mic/line-in via rtrb, ducked, pre-limiter/tap)
-  + Icecast tee (post-DSP tap via rtrb -> MP3/Opus sender thread)
+  + Stream tee (post-DSP tap via rtrb -> MP3/Opus sender thread -> Icecast or Shoutcast v1/v2)
   + cue/PFL bus (own cpal OutputStream on a second device, flat preview
     with ~30 ms click-free fades; never feeds the stream tap, mixer,
     silence monitor, or play log)
@@ -73,7 +73,7 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
        the selected track (crossfaded, Auto-DJ-aware continuity), cold
        start (Play / Auto-DJ toggle begin the first pick), persisted ON/OFF + Up-next
 - [x] Ad scheduler (dated blocks with intros/outros, chained breaks — see §1.3)
-- [x] Icecast output (MP3/Opus — see §1.5); Shoutcast open
+- [x] Icecast output (MP3/Opus — see §1.5); Shoutcast v1/v2 output (MP3 — see §1.5)
 - [x] Mic/line-in input with ducking (see §1.6)
 - [x] Report generator (play logs → CSV + XLSX + screen; PDF open — see §1.9)
 - [x] File dialog (`rfd`) + import progress in UI (see §1.9) — native multi-select dialog, chunked per-tick import with live status
@@ -94,7 +94,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
 | Preview / PFL | Pre-listen on a second output without broadcasting | Independent cue bus (second output, click-free fades) + explicit On Air gate; cue never touches program/stream/reports | ✅ |
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
-| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME + Opus, PUT + SOURCE fallback, TLS, paced, reconnect, metadata) + Settings UI with live status, live-encoder indicator, one-click restart + listener count + Playout cover art; Shoutcast/relay open | 🟡 |
+| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME + Opus, PUT + SOURCE fallback, TLS, paced, reconnect, metadata) + Shoutcast v1/v2 source client (MP3, `:#sid`, admin.cgi titles + viewjson listeners) + Settings UI (protocol + sid selector, MP3-only guard) with live status, live-encoder indicator, one-click restart + listener count + Playout cover art; relay open, live-DNAS validation open | 🟡 |
 | Mic / line-in | Mixed input, sidechain ducking, bed music | cpal input + `rtrb` ring summed pre-limiter/tap, voice-activated ducker, live device switching, Settings mic panel | ✅ |
 | Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
 | Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
@@ -202,7 +202,14 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       the client sees RST seconds after handshake. Run the source path
       direct to the pod (plain HTTP, e.g. :8000) or via TCP passthrough;
       keep HTTPS for listeners
-- [ ] Shoutcast v1/v2 source client
+- [x] Shoutcast v1/v2 source client (`password` + `icy-*` headers, MP3-only):
+      v1 on the source port (usually portbase+1), v2 on portbase with
+      documented `:#sid` stream selection (sid 1 verbatim), titles via
+      `admin.cgi?mode=updinfo`, listeners via `admin.cgi?mode=viewjson`,
+      protocol + sid selector in Settings. Fake-DNAS tested; live DNAS
+      validation open (no DNAS server available — verified live against
+      Icecast 2.5 instead). Native Ultravox POST deliberately not spoken
+      (unpublished bytes; v1-compatible flow is DNAS-recommended).
 - [x] Listener/connection stats in UI (local bytes/uptime plus listener
       count polled from the public status API while live; "—" when the
       API is disabled/unreachable — never an error state)

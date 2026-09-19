@@ -1,4 +1,5 @@
-//! Listener stats via Icecast's public `status-json.xsl`.
+//! Listener stats: Icecast's public `status-json.xsl`, or DNAS
+//! `admin.cgi` (`mode=viewjson`) for Shoutcast.
 //!
 //! Optional telemetry, never an error state: every failure (disabled
 //! admin pages, unreachable server, unparseable body) is `None` and the
@@ -9,6 +10,7 @@
 use std::io::{Read, Write};
 use std::time::Duration;
 
+use super::shoutcast::percent_encode;
 use super::source::IcecastSource;
 use super::StreamConfig;
 
@@ -42,10 +44,26 @@ pub fn parse_listener_count(body: &str, mount: &str) -> Option<u64> {
     })
 }
 
-/// Blocking one-shot poll: GET `status-json.xsl`, return this mount's
-/// listener count. `None` on any failure (optional stat).
+/// Blocking one-shot poll: this mount/stream's listener count.
+/// `None` on any failure (optional stat).
 pub fn fetch_listener_count(config: &StreamConfig) -> Option<u64> {
     let cfg = config.clone().sanitized();
+    if cfg.protocol.is_shoutcast() {
+        // DNAS honors the *source* password on admin.cgi (no admin
+        // password needed); `sid` selects the stream on v2 servers.
+        let path = format!(
+            "/admin.cgi?sid={}&mode=viewjson&pass={}",
+            cfg.sid,
+            percent_encode(&cfg.password)
+        );
+        return match http_get(&cfg, &path) {
+            Ok(body) => parse_shoutcast_listeners(&body),
+            Err(e) => {
+                tracing::debug!("Shoutcast listener poll failed: {e}");
+                None
+            }
+        };
+    }
     match http_get(&cfg, "/status-json.xsl") {
         Ok(body) => parse_listener_count(&body, &cfg.mount),
         Err(e) => {
@@ -57,9 +75,25 @@ pub fn fetch_listener_count(config: &StreamConfig) -> Option<u64> {
     }
 }
 
+/// Listeners inside a DNAS `viewjson` body: scan for
+/// `"currentlisteners": N` without assuming the object shape (it
+/// varies across DNAS builds).
+pub fn parse_shoutcast_listeners(body: &str) -> Option<u64> {
+    let key = "\"currentlisteners\"";
+    let i = body.find(key)?;
+    let after = body[i + key.len()..].split_once(':')?.1.trim_start();
+    after
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
 fn http_get(cfg: &StreamConfig, path: &str) -> Result<String, String> {
     let addr = format!("{}:{}", cfg.host, cfg.port);
-    let mut stream = IcecastSource::open(cfg, &addr).map_err(|e| format!("connect {addr}: {e}"))?;
+    let mut stream =
+        IcecastSource::open(cfg, &addr, "Stream").map_err(|e| format!("connect {addr}: {e}"))?;
     // Tighten past the handshake-grade timeouts from `open`: one poll
     // must stay far under the poll interval even against a dripping
     // server (the busy flag skips overlapping rounds regardless).
@@ -158,5 +192,48 @@ mod tests {
         assert_eq!(fetch_listener_count(&cfg(port)), None);
         let port = serve_once("nope", "HTTP/1.0 200 OK");
         assert_eq!(fetch_listener_count(&cfg(port)), None);
+    }
+
+    #[test]
+    fn shoutcast_parse_reads_current_listeners() {
+        let body = r#"{"shoutcast":{"source":{"sid":1,"currentlisteners":12,"peaklisteners":40}}}"#;
+        assert_eq!(parse_shoutcast_listeners(body), Some(12));
+        assert_eq!(parse_shoutcast_listeners(r#"{"a":1}"#), None);
+        assert_eq!(parse_shoutcast_listeners("not json"), None);
+    }
+
+    #[test]
+    fn shoutcast_fetch_hits_admin_cgi_with_sid() {
+        use crate::stream::StreamProtocol;
+        let body = r#"{"currentlisteners": 7}"#;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = body.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let n = std::io::Read::read(&mut sock, &mut buf).unwrap_or(0);
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let resp = format!(
+                "HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut sock, resp.as_bytes());
+        });
+        let cfg = StreamConfig {
+            host: "127.0.0.1".into(),
+            port,
+            password: "secret".into(),
+            protocol: StreamProtocol::ShoutcastV2,
+            sid: 2,
+            ..Default::default()
+        };
+        assert_eq!(fetch_listener_count(&cfg), Some(7));
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(
+            req.contains("GET /admin.cgi?sid=2&mode=viewjson&pass=secret HTTP/1.0"),
+            "{req}"
+        );
     }
 }

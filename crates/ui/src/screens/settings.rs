@@ -6,7 +6,7 @@ use iced::{
 };
 
 use crabcore::audio::{CueState, EQ_BAND_COUNT};
-use crabcore::stream::{StreamFormat, StreamState};
+use crabcore::stream::{StreamFormat, StreamProtocol, StreamState};
 
 use crate::app::{App, Message, SettingsSection};
 use crate::widgets::{
@@ -118,7 +118,8 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
     let stream_status = match &stream_state {
         StreamState::Live => match &state.stream_live_config {
             Some(live) => format!(
-                "🔴 Live — {} {} kbps",
+                "🔴 Live — {} {} {} kbps",
+                live.protocol.label(),
                 live.format.label(),
                 live.bitrate_kbps
             ),
@@ -126,7 +127,8 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
         },
         StreamState::Connecting => match &state.stream_live_config {
             Some(live) => format!(
-                "⏳ Connecting… — {} {} kbps",
+                "⏳ Connecting… — {} {} {} kbps",
+                live.protocol.label(),
                 live.format.label(),
                 live.bitrate_kbps
             ),
@@ -156,8 +158,16 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
             "Connection settings changed — restart stream to apply.".to_string()
         }
         _ => {
-            "Opus sounds better per bit; mounts often end in .opus. Format applies on stream start."
-                .to_string()
+            if stream_cfg.protocol.is_shoutcast() {
+                if stream_cfg.format == StreamFormat::Opus {
+                    "Opus needs Icecast — switch Protocol to Icecast or Format to MP3.".to_string()
+                } else {
+                    "Shoutcast streams MP3 only. Settings apply on stream start.".to_string()
+                }
+            } else {
+                "Opus sounds better per bit; mounts often end in .opus. Format applies on stream start."
+                    .to_string()
+            }
         }
     };
 
@@ -371,14 +381,19 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                     .unwrap_or_else(|| "—".into());
                 // Name the live encoder, not just the bitrate: the
                 // selection may already point at the next connection.
-                let (lf, lb) = state
+                let (lp, lf, lb) = state
                     .stream_live_config
                     .as_ref()
-                    .map(|c| (c.format, c.bitrate_kbps))
-                    .unwrap_or((stream_cfg.format, stream_cfg.bitrate_kbps));
+                    .map(|c| (c.protocol, c.format, c.bitrate_kbps))
+                    .unwrap_or((
+                        stream_cfg.protocol,
+                        stream_cfg.format,
+                        stream_cfg.bitrate_kbps,
+                    ));
                 body = body.push(
                     text(format!(
-                        "{} {} kbps - {:.1} MB - {}s - {}",
+                        "{} {} {} kbps - {:.1} MB - {}s - {}",
+                        lp.label(),
                         lf.label(),
                         lb,
                         stream_stats.bytes_sent as f64 / 1_048_576.0,
@@ -388,6 +403,22 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                     .size(11),
                 );
             }
+            // Protocol first: it decides what host/port/mount mean below.
+            let mut proto_row = row![text("Protocol:").size(12)].spacing(6);
+            for protocol in [
+                StreamProtocol::Icecast,
+                StreamProtocol::ShoutcastV1,
+                StreamProtocol::ShoutcastV2,
+            ] {
+                let entry = button(text(protocol.label()).size(12))
+                    .on_press(Message::StreamProtocolChanged(protocol));
+                proto_row = proto_row.push(if stream_cfg.protocol == protocol {
+                    entry.style(iced::widget::button::primary)
+                } else {
+                    entry
+                });
+            }
+            body = body.push(proto_row.align_y(iced::Alignment::Center));
             body = body.push(text("Server").size(13));
             // Labels persist; placeholders carry example values
             // (placeholders vanish once filled, and these persist).
@@ -407,17 +438,41 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
             );
-            body = body.push(
-                row![
-                    text("Mount:").size(12).width(Length::Fixed(56.0)),
-                    text_input("/stream", &stream_cfg.mount)
-                        .on_input(Message::StreamMount)
-                        .padding(6)
-                        .width(Length::Fill),
-                ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
-            );
+            // Shoutcast has no mounts and no listener-port/source-port
+            // split like Icecast: v1 speaks on the *source* port
+            // (usually listener portbase + 1), v2 on portbase with a
+            // stream ID below.
+            if stream_cfg.protocol.is_shoutcast() {
+                let hint = match stream_cfg.protocol {
+                    StreamProtocol::ShoutcastV1 => {
+                        "Shoutcast v1: enter the source port (usually listener port + 1, e.g. 8001). No mount."
+                    }
+                    _ => {
+                        "Shoutcast v2: enter portbase (e.g. 8000). Stream ID picks the stream (1 = default)."
+                    }
+                };
+                body = body.push(text(hint).size(11));
+            }
+            if stream_cfg.protocol == StreamProtocol::ShoutcastV2 {
+                body = body.push(stepper(
+                    format!("Stream ID: {}", stream_cfg.sid),
+                    Message::StreamSidDec,
+                    Message::StreamSidInc,
+                ));
+            }
+            if stream_cfg.protocol == StreamProtocol::Icecast {
+                body = body.push(
+                    row![
+                        text("Mount:").size(12).width(Length::Fixed(56.0)),
+                        text_input("/stream", &stream_cfg.mount)
+                            .on_input(Message::StreamMount)
+                            .padding(6)
+                            .width(Length::Fill),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
             body = body.push(
                 row![checkbox(stream_cfg.tls)
                     .label("TLS (https)")

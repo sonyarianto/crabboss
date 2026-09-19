@@ -82,7 +82,7 @@ impl SettingsSection {
             }
             SettingsSection::Loudness => "ReplayGain-style normalization toward the target loudness.",
             SettingsSection::Streaming => {
-                "Icecast source client: server, mount, encoder, and live status."
+                "Source client (Icecast / Shoutcast v1 / v2): server, encoder, and live status."
             }
             SettingsSection::Microphone => {
                 "Live input with voice-activated ducking of the music bed."
