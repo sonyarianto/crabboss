@@ -43,7 +43,9 @@ pub(crate) fn panel(state: &App, tools: bool) -> Element<'_, Message> {
         .padding(8);
 
     // Kind filter + missing-only: narrows the same list, no new queries.
-    let mut filters = row![text("Kind:").size(12)].spacing(6);
+    let mut filters = row![text("Kind:").size(12)]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
     for (label, kind) in [
         ("All", None),
         ("Music", Some(TrackKind::Music)),
