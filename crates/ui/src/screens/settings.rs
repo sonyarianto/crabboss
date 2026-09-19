@@ -197,7 +197,6 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
         SettingsSection::Loudness,
         SettingsSection::Streaming,
         SettingsSection::Microphone,
-        SettingsSection::License,
     ] {
         let entry = button(text(sec.label()).size(13))
             .width(Length::Fill)
@@ -521,26 +520,6 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                 Message::MicReleaseDec,
                 Message::MicReleaseInc
             ),
-        ]
-        .spacing(8)
-        .into(),
-        SettingsSection::License => column![
-            text(sec.label()).size(16),
-            text(sec.description()).size(11),
-            text(format!("License: {}", state.license_status)).size(12),
-            text(&state.license_error).size(11),
-            text_input("License key CB-XXXX-XXXX-XXXX", &state.license_key)
-                .on_input(Message::LicenseKeyInput)
-                .padding(6),
-            row![
-                button(text("Activate").size(12))
-                    .width(Length::Fill)
-                    .on_press(Message::ActivateLicense),
-                button(text("Clear").size(12))
-                    .width(Length::Fill)
-                    .on_press(Message::ClearLicense),
-            ]
-            .spacing(6),
         ]
         .spacing(8)
         .into(),

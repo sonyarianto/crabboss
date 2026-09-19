@@ -1,5 +1,5 @@
 //! All messages the UI can send: navigation, transport, library,
-//! scheduler, carts, reports, ads, settings, backup, and license.
+//! scheduler, carts, reports, ads, settings, and backup.
 //! The central dispatcher in `update` matches on these and delegates
 //! to one domain function each.
 
@@ -156,8 +156,4 @@ pub(crate) enum Message {
     StationName(String),
     BackupNow,
     RestoreNow,
-    // License
-    LicenseKeyInput(String),
-    ActivateLicense,
-    ClearLicense,
 }

@@ -132,7 +132,6 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                 state.player.device_name()
             ))
             .size(11),
-            text(format!("License: {}", state.license_status)).size(11),
         ]
         .spacing(12)
         .padding(16),

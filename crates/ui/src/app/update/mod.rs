@@ -187,10 +187,6 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::StationName(v) => settings::station_name(state, v),
         Message::BackupNow => settings::backup_now(state),
         Message::RestoreNow => settings::restore_now(state),
-        // -- License ----------------------------------------------------------
-        Message::LicenseKeyInput(v) => settings::license_key_input(state, v),
-        Message::ActivateLicense => settings::activate_license(state),
-        Message::ClearLicense => settings::clear_license(state),
     }
     Task::none()
 }

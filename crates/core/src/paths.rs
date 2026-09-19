@@ -13,10 +13,6 @@
 //!
 //! `resolve*` is pure (creates nothing); [`AppPaths::ensure_root`]
 //! creates the root explicitly before any store opens.
-//!
-//! `license.json` is deliberately NOT migrated here: licensing is out of
-//! scope until a separate product decision, so [`AppPaths::license`]
-//! keeps pointing at the legacy current-directory location.
 
 use std::path::{Path, PathBuf};
 
@@ -29,9 +25,6 @@ pub struct AppPaths {
     pub settings: PathBuf,
     /// `<root>/crabboss.db`.
     pub database: PathBuf,
-    /// Legacy location (current directory): licensing stays put until a
-    /// separate decision moves it.
-    pub license: PathBuf,
 }
 
 /// Outcome of migrating one legacy file.
@@ -90,22 +83,20 @@ fn default_root() -> PathBuf {
 
 /// Resolve paths without touching disk. `--data-dir` wins, then the
 /// per-user data dir, then the current-directory fallback.
-pub fn resolve_from(args: &[String], legacy_dir: &Path) -> AppPaths {
+pub fn resolve_from(args: &[String]) -> AppPaths {
     let root = data_dir_override(args).unwrap_or_else(default_root);
     AppPaths {
         settings: root.join("settings.json"),
         database: root.join("crabboss.db"),
-        license: legacy_dir.join("license.json"),
         root,
     }
 }
 
-/// Resolve from the real process state: CLI args + current directory as
-/// the legacy location. Pure (creates no directories).
+/// Resolve from the real process state: CLI args. Pure (creates no
+/// directories).
 pub fn resolve() -> AppPaths {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let legacy_dir = std::env::current_dir().unwrap_or_default();
-    resolve_from(&args, &legacy_dir)
+    resolve_from(&args)
 }
 
 impl AppPaths {
@@ -115,7 +106,7 @@ impl AppPaths {
     }
 
     /// One-time migration of legacy current-directory files (settings +
-    /// database only — never the license). Rules, in order:
+    /// database only). Rules, in order:
     ///
     /// - destination exists → keep it, legacy untouched;
     /// - no legacy file → nothing to do;
@@ -206,39 +197,26 @@ mod tests {
 
     #[test]
     fn data_dir_override_parses_both_forms() {
-        let legacy = Path::new("/legacy");
         let a = ["--data-dir", "/tmp/portable"];
-        assert_eq!(
-            resolve_from(&args(&a), legacy).root,
-            PathBuf::from("/tmp/portable")
-        );
+        assert_eq!(resolve_from(&args(&a)).root, PathBuf::from("/tmp/portable"));
         let a = ["--data-dir=/tmp/eq"];
-        assert_eq!(
-            resolve_from(&args(&a), legacy).root,
-            PathBuf::from("/tmp/eq")
-        );
+        assert_eq!(resolve_from(&args(&a)).root, PathBuf::from("/tmp/eq"));
         // Missing value: no override, falls back to the default root.
         let a = ["--data-dir"];
-        assert_ne!(
-            resolve_from(&args(&a), legacy).root,
-            PathBuf::from("--data-dir")
-        );
+        assert_ne!(resolve_from(&args(&a)).root, PathBuf::from("--data-dir"));
         // Other flags are ignored.
         let a = ["--engine", "cpal"];
-        let r = resolve_from(&args(&a), legacy);
+        let r = resolve_from(&args(&a));
         assert_eq!(r.settings, r.root.join("settings.json"));
         assert_eq!(r.database, r.root.join("crabboss.db"));
-        // License always stays at the legacy location.
-        assert_eq!(r.license, legacy.join("license.json"));
     }
 
     #[test]
     fn resolve_creates_nothing() {
         let root = std::env::temp_dir().join("crabboss-paths-untouched");
         std::fs::remove_dir_all(&root).ok();
-        let legacy = std::env::temp_dir().join("crabboss-paths-legacy");
         let arg = format!("--data-dir={}", root.display());
-        let paths = resolve_from(&args(&[arg.as_str()]), &legacy);
+        let paths = resolve_from(&args(&[arg.as_str()]));
         assert!(!paths.root.exists(), "resolver must not create dirs");
         paths.ensure_root().unwrap();
         assert!(paths.root.is_dir());
@@ -254,11 +232,10 @@ mod tests {
         (legacy, root)
     }
 
-    fn paths_for(legacy: &Path, root: &Path) -> AppPaths {
+    fn paths_for(root: &Path) -> AppPaths {
         AppPaths {
             settings: root.join("settings.json"),
             database: root.join("crabboss.db"),
-            license: legacy.join("license.json"),
             root: root.to_path_buf(),
         }
     }
@@ -268,7 +245,7 @@ mod tests {
         let (legacy, root) = sandbox("crabboss-mig-copy");
         std::fs::write(legacy.join("settings.json"), r#"{"a":1}"#).unwrap();
         std::fs::write(legacy.join("crabboss.db"), b"sqlite-ish").unwrap();
-        let paths = paths_for(&legacy, &root);
+        let paths = paths_for(&root);
         paths.ensure_root().unwrap();
         let report = paths.migrate_legacy(&legacy);
         assert!(report.copied_any());
@@ -282,11 +259,6 @@ mod tests {
         );
         // Legacy kept as fallback.
         assert!(legacy.join("settings.json").exists());
-        // License never migrates, even when present in legacy.
-        std::fs::write(legacy.join("license.json"), b"lic").unwrap();
-        let report = paths.migrate_legacy(&legacy);
-        assert!(!report.copied_any());
-        assert!(!root.join("license.json").exists());
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
@@ -296,7 +268,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("settings.json"), r#"{"a":2}"#).unwrap();
         std::fs::write(legacy.join("settings.json"), r#"{"a":1}"#).unwrap();
-        let paths = paths_for(&legacy, &root);
+        let paths = paths_for(&root);
         let report = paths.migrate_legacy(&legacy);
         assert_eq!(report.settings, FileMigration::SkippedExisting);
         assert_eq!(
@@ -309,7 +281,7 @@ mod tests {
     #[test]
     fn migration_without_legacy_is_noop() {
         let (legacy, root) = sandbox("crabboss-mig-noop");
-        let paths = paths_for(&legacy, &root);
+        let paths = paths_for(&root);
         paths.ensure_root().unwrap();
         let report = paths.migrate_legacy(&legacy);
         assert_eq!(report.settings, FileMigration::SkippedNoLegacy);
@@ -323,7 +295,7 @@ mod tests {
         // `--data-dir` pointing at the legacy folder must not eat itself.
         let (legacy, _) = sandbox("crabboss-mig-self");
         std::fs::write(legacy.join("settings.json"), r#"{"a":1}"#).unwrap();
-        let paths = paths_for(&legacy, &legacy);
+        let paths = paths_for(&legacy);
         let report = paths.migrate_legacy(&legacy);
         assert_eq!(report.settings, FileMigration::SkippedExisting);
         assert_eq!(

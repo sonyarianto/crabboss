@@ -28,7 +28,7 @@ pub(crate) fn boot() -> (App, Task<Message>) {
     // working directory. Legacy current-directory files migrate once.
     let legacy_dir = std::env::current_dir().unwrap_or_default();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let paths = crabcore::paths::resolve_from(&args, &legacy_dir);
+    let paths = crabcore::paths::resolve_from(&args);
     tracing::info!("Data dir: {}", paths.root.display());
     if let Err(e) = paths.ensure_root() {
         tracing::error!("Cannot create data dir {}: {e}", paths.root.display());
@@ -181,11 +181,6 @@ pub(crate) fn boot() -> (App, Task<Message>) {
 
     let ads = crabcore::ads::AdsManager::open(&db_path).expect("Failed to open ads store");
 
-    // License stays at the legacy location on purpose (out of scope
-    // until a separate product decision moves it).
-    let license_path = paths.license.clone();
-    let license = crabcore::license::LicenseStore::open(&license_path);
-
     let volume = {
         let v = player.volume();
         if v <= 0.0 || v > 1.5 {
@@ -213,7 +208,6 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         settings_path,
         data_dir,
         db_path,
-        license,
         screen: Screen::Home,
         settings_section: SettingsSection::default(),
         station_name,
@@ -305,9 +299,6 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         settings_notice,
         settings_save_error: None,
         settings_needs_quarantine,
-        license_status: String::new(),
-        license_error: String::new(),
-        license_key: String::new(),
         track_count,
         playlist_count,
         upcoming_count: 0,
@@ -328,7 +319,6 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         last_recovery: None,
         tick_count: 0,
     };
-    app.license_status = app.license.status().label().to_string();
     app.cue_status = app.player.cue_state().label();
     if app.settings.stream.enabled {
         app.mark_stream_live();

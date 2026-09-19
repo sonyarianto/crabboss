@@ -1,6 +1,5 @@
 //! Settings: every tuner on the Settings screen (device, playout,
-//! EQ, loudness, streaming, mic, station, backup) plus the license
-//! admin next to it.
+//! EQ, loudness, streaming, mic, station, backup).
 
 use crabcore::audio::{EQ_BAND_COUNT, TARGET_MAX_LUFS, TARGET_MIN_LUFS};
 use crabcore::stream::StreamFormat;
@@ -525,30 +524,4 @@ pub(crate) fn pump_listeners(state: &mut App) {
             state.listeners_polling = false;
         }
     }
-}
-
-pub(crate) fn license_key_input(state: &mut App, v: String) {
-    state.license_key = v;
-}
-
-pub(crate) fn activate_license(state: &mut App) {
-    let key = state.license_key.clone();
-    match state.license.activate(&key, "Station") {
-        Ok(info) => {
-            tracing::info!("License activated: {}", info.key);
-            state.license_status = state.license.status().label().to_string();
-            state.license_error.clear();
-        }
-        Err(e) => {
-            tracing::warn!("Invalid license '{}': {}", key, e);
-            state.license_error = format!("Invalid key: {}", e);
-        }
-    }
-}
-
-pub(crate) fn clear_license(state: &mut App) {
-    state.license.clear().ok();
-    tracing::info!("License cleared");
-    state.license_status = state.license.status().label().to_string();
-    state.license_error.clear();
 }

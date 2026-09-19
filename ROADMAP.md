@@ -52,7 +52,7 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
 - [x] Fix `Player::stop()` sink recreation bug
 - [x] `CpalEngine` MVP (play/pause/volume parity) — rubato resample TODO
 - [x] Router: Home / Playout (stacked broadcast strip) / Library / Scheduler / Cart Wall / Reports / Ads / Settings screens + sidebar nav + on-air footer
-- [x] License key activation (offline, `CB-XXXX-XXXX-XXXX`)
+- [x] ~~License key activation (offline, `CB-XXXX-XXXX-XXXX`)~~ — removed for pure MIT (all features free, no keys)
 - [x] Library: `scan_directory()` via `walkdir`, live list + search model, aligned Kind/Title/Artist/Dur/Gain columns, async `rfd` import dialog (starting-directory aware), tap-to-cue + On Air program gate
 - [x] Playlist store wired (`PlaylistManager::open`, Home saved list with counts + stored-order detail) + unit tests (manager CRUD incl. rename, dense remove, move/reorder; resolve-order + missing-skip contract)
 - [x] Playlist to Air (A1): Home `Queue to Air` fires a saved rotation in stored order (first track plays now, rest queue behind; missing skipped with a count)
@@ -77,7 +77,7 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
 - [x] Mic/line-in input with ducking (see §1.6)
 - [x] Report generator (play logs → CSV + XLSX + screen; PDF open — see §1.9)
 - [x] File dialog (`rfd`) + import progress in UI (see §1.9) — native multi-select dialog, chunked per-tick import with live status
-- [x] Settings screen (device picker, live DSP prefs, license, streaming config — see §1.9)
+- [x] Settings screen (device picker, live DSP prefs, streaming config — see §1.9)
 - [x] Quality: `cargo fmt/clippy`, unit tests (`library`, `playlist`), CI (see §1.10)
 
 ## Gap Matrix vs RadioBOSS 7.x (2026)
@@ -103,9 +103,9 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Track health | Proactive missing/corrupt detection | ✅ `missing_files()` + startup/on-demand scan, `!` row flags | ✅ |
 | UI niceties | Hotkeys, screen-reader a11y, drag-drop, waveform | Cart hotkeys 1–8 + sidebar nav + status footer; a11y/drag-drop/waveform open | 🟡 |
 | Stream archive | Scheduled output recording | — | — |
-| License | Offline key, holder, tier | MVP done: checksum keys + vendor `genkey`, status labels (checksum → ed25519 TODO). NOT enforced yet: `features_enabled()` unwired, holder hardcoded — enforcement, per-station names, and expiry gating parked until the business model is decided | 🟡 |
+| License | MIT only, no keys | Removed: proprietary `CB-XXXX` key activation + vendor `genkey` deleted; all features free | ✅ |
 | File import UX | File dialog | Native `rfd` multi-select import with per-tick progress + report-export dialog | ✅ |
-| Quality gates | — | Full suite green across all areas (library, playlist, scheduler, cart, mixer, license, stream, audio engine incl. lock-poisoning, settings); FK cascades proven; `cargo fmt` + `clippy -D warnings` in CI | ✅ |
+| Quality gates | — | Full suite green across all areas (library, playlist, scheduler, cart, mixer, stream, audio engine incl. lock-poisoning, settings); FK cascades proven; `cargo fmt` + `clippy -D warnings` in CI | ✅ |
 
 Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardware, see §2).
 
@@ -254,11 +254,11 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       (persisted, dashboard header), section sub-pages with descriptions,
       engine display, crossfade + silence-alarm
       steppers (persisted, applied live), graphic-EQ faders + limiter,
-      streaming (MP3/Opus + restart), license section
+      streaming (MP3/Opus + restart)
 - [x] Async `rfd` native file dialog for import (+ report export)
 
 ### 1.10 Quality gates
-- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer/license bar) — full suite green, no exceptions: kind classification + repair, loudness store/count, migrations, generator rules (incl. cross-pick `RuleHistory` + forecast + live-jingle cadence parity), manager CRUD (incl. rename, dense remove, move/reorder), stored-order resolve + missing-skip, audio engine (loader generations, tap sharing, prefetch guard, handshake matrix, lock-poison survival), remove-track FK cascade across managers, settings (incl. example-file drift guard). (Counts intentionally unlisted — they rot every PR; CI is the source of truth.)
+- [x] Unit tests for `library` and `playlist` (match scheduler/cart/mixer bar) — full suite green, no exceptions: kind classification + repair, loudness store/count, migrations, generator rules (incl. cross-pick `RuleHistory` + forecast + live-jingle cadence parity), manager CRUD (incl. rename, dense remove, move/reorder), stored-order resolve + missing-skip, audio engine (loader generations, tap sharing, prefetch guard, handshake matrix, lock-poison survival), remove-track FK cascade across managers, settings (incl. example-file drift guard). (Counts intentionally unlisted — they rot every PR; CI is the source of truth.)
 - [x] `cargo fmt` + `clippy` in CI (`-D warnings`, zero warnings) + `ci.yml` (fmt/clippy/test on push+PR)
 
 ## 2. Beyond Parity — Where CrabBoss Wins
@@ -277,8 +277,8 @@ beats it on these axes instead of just chasing feature count:
       as version-controllable TOML/JSON instead of GUI-only config.
 - [ ] **Open plugin points** in `Engine`/manager traits (custom scheduler
       actions, streaming targets, import sources) without forking.
-- [ ] **Fair licensing** — genuine free tier + transparent paid tier vs
-      flat $149.95, aimed at hobbyist/community radio.
+- [x] **MIT free for all** — no paid tier, no keys; hobbyist/community radio gets everything vs
+      flat $149.95 proprietary.
 
 ## 3. Phase Sequencing
 

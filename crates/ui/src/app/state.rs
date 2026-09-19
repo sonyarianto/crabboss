@@ -54,7 +54,6 @@ pub(crate) enum SettingsSection {
     Loudness,
     Streaming,
     Microphone,
-    License,
 }
 
 impl SettingsSection {
@@ -67,7 +66,6 @@ impl SettingsSection {
             SettingsSection::Loudness => "Loudness",
             SettingsSection::Streaming => "Streaming",
             SettingsSection::Microphone => "Microphone",
-            SettingsSection::License => "License",
         }
     }
 
@@ -89,7 +87,6 @@ impl SettingsSection {
             SettingsSection::Microphone => {
                 "Live input with voice-activated ducking of the music bed."
             }
-            SettingsSection::License => "Offline license key and status.",
         }
     }
 }
@@ -108,7 +105,6 @@ pub(crate) struct App {
     /// Database file, for whole-list operations (e.g. backup restore)
     /// that need a single transaction across managers.
     pub(crate) db_path: PathBuf,
-    pub(crate) license: crabcore::license::LicenseStore,
 
     pub(crate) screen: Screen,
     pub(crate) settings_section: SettingsSection,
@@ -258,11 +254,6 @@ pub(crate) struct App {
     /// Boot file was untrusted: preserve it aside on the first save
     /// instead of replacing it blindly.
     pub(crate) settings_needs_quarantine: bool,
-
-    // License UI
-    pub(crate) license_status: String,
-    pub(crate) license_error: String,
-    pub(crate) license_key: String,
 
     // Home counts
     pub(crate) track_count: usize,
