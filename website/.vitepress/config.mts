@@ -27,6 +27,14 @@ export default defineConfig({
         text: 'Roadmap',
         link: 'https://github.com/sonyarianto/crabboss/blob/main/ROADMAP.md',
       },
+      {
+        text: 'Sponsor',
+        items: [
+          { text: 'GitHub Sponsors', link: 'https://github.com/sponsors/sonyarianto' },
+          { text: 'Buy Me a Coffee', link: 'https://buymeacoffee.com/sonyarianto' },
+          { text: 'Ko-fi', link: 'https://ko-fi.com/sonyarianto' },
+        ],
+      },
     ],
     sidebar: [
       {
@@ -44,6 +52,8 @@ export default defineConfig({
             link: 'https://github.com/sonyarianto/crabboss/blob/main/docs/architecture.md',
           },
           { text: 'GitHub', link: 'https://github.com/sonyarianto/crabboss' },
+          { text: 'Sponsor', link: 'https://buymeacoffee.com/sonyarianto' },
+          { text: 'Ko-fi', link: 'https://ko-fi.com/sonyarianto' },
         ],
       },
     ],

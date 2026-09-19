@@ -1,4 +1,7 @@
 [![CI](https://github.com/sonyarianto/crabboss/actions/workflows/ci.yml/badge.svg)](https://github.com/sonyarianto/crabboss/actions/workflows/ci.yml)
+[![GitHub Sponsors](https://img.shields.io/github/sponsors/sonyarianto?style=social)](https://github.com/sponsors/sonyarianto)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?style=flat&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/sonyarianto)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/sonyarianto)
 
 # 🦀 CrabBoss
 
@@ -95,6 +98,14 @@ Thanks to symphonia and lofty, CrabBoss supports:
 - **Opus**
 - **WavPack**
 - **Musepack**
+
+## Support
+
+CrabBoss is free and open source (MIT). If it powers your station, please support development:
+
+- 💖 [GitHub Sponsors](https://github.com/sponsors/sonyarianto)
+- ☕ [Buy Me a Coffee](https://buymeacoffee.com/sonyarianto)
+- 🧋 [Ko-fi](https://ko-fi.com/sonyarianto)
 
 ## License
 

@@ -15,6 +15,9 @@ hero:
     - theme: alt
       text: View on GitHub
       link: https://github.com/sonyarianto/crabboss
+    - theme: alt
+      text: ❤ Sponsor
+      link: https://buymeacoffee.com/sonyarianto
 
 features:
   - title: Gapless Engine
