@@ -87,7 +87,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
         Some(live) => *live != s.stream && !matches!(stream_state, StreamState::Off),
         None => false,
     };
-    for format in [StreamFormat::Mp3, StreamFormat::Opus] {
+    for format in [StreamFormat::Mp3, StreamFormat::Opus, StreamFormat::HeAac] {
         let live_here = airing
             && state
                 .stream_live_config
@@ -159,11 +159,14 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
         }
         _ => {
             if stream_cfg.protocol.is_shoutcast() {
-                if stream_cfg.format == StreamFormat::Opus {
-                    "Opus needs Icecast — switch Protocol to Icecast or Format to MP3.".to_string()
-                } else {
+                if stream_cfg.format == StreamFormat::Mp3 {
                     "Shoutcast streams MP3 only. Settings apply on stream start.".to_string()
+                } else {
+                    "That format needs Icecast — switch Protocol to Icecast or Format to MP3."
+                        .to_string()
                 }
+            } else if stream_cfg.format == StreamFormat::HeAac {
+                "HE-AAC (FDK) for low-bandwidth listeners: v2 at ≤48 kbps, v1 above. Mounts often end in .aac. Format applies on stream start.".to_string()
             } else {
                 "Opus sounds better per bit; mounts often end in .opus. Format applies on stream start."
                     .to_string()

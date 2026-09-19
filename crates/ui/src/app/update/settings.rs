@@ -8,8 +8,8 @@ use std::sync::mpsc;
 
 use super::super::{App, Message};
 use crate::widgets::{
-    duck_ms_step, opus_bitrate_step, opus_snap_bitrate, stream_bitrate_step, ATTACK_LADDER,
-    RELEASE_LADDER,
+    duck_ms_step, heaac_bitrate_step, heaac_snap_bitrate, opus_bitrate_step, opus_snap_bitrate,
+    stream_bitrate_step, ATTACK_LADDER, RELEASE_LADDER,
 };
 
 pub(crate) fn refresh_devices(state: &mut App) {
@@ -221,6 +221,7 @@ pub(crate) fn stream_password_clear(state: &mut App) {
 pub(crate) fn stream_bitrate_inc(state: &mut App) {
     state.settings.stream.bitrate_kbps = match state.settings.stream.format {
         StreamFormat::Opus => opus_bitrate_step(state.settings.stream.bitrate_kbps, true),
+        StreamFormat::HeAac => heaac_bitrate_step(state.settings.stream.bitrate_kbps, true),
         StreamFormat::Mp3 => stream_bitrate_step(state.settings.stream.bitrate_kbps, true),
     };
     state.save_settings();
@@ -232,6 +233,7 @@ pub(crate) fn stream_bitrate_inc(state: &mut App) {
 pub(crate) fn stream_bitrate_dec(state: &mut App) {
     state.settings.stream.bitrate_kbps = match state.settings.stream.format {
         StreamFormat::Opus => opus_bitrate_step(state.settings.stream.bitrate_kbps, false),
+        StreamFormat::HeAac => heaac_bitrate_step(state.settings.stream.bitrate_kbps, false),
         StreamFormat::Mp3 => stream_bitrate_step(state.settings.stream.bitrate_kbps, false),
     };
     state.save_settings();
@@ -244,8 +246,16 @@ pub(crate) fn stream_format_changed(state: &mut App, format: StreamFormat) {
     // Takes effect on the next start (a new encoder + headers wrap
     // the fresh connection); restart the stream to apply it live.
     state.settings.stream.format = format;
-    if format == StreamFormat::Opus {
-        state.settings.stream.bitrate_kbps = opus_snap_bitrate(state.settings.stream.bitrate_kbps);
+    match format {
+        StreamFormat::Opus => {
+            state.settings.stream.bitrate_kbps =
+                opus_snap_bitrate(state.settings.stream.bitrate_kbps);
+        }
+        StreamFormat::HeAac => {
+            state.settings.stream.bitrate_kbps =
+                heaac_snap_bitrate(state.settings.stream.bitrate_kbps);
+        }
+        StreamFormat::Mp3 => {}
     }
     state.save_settings();
     state
@@ -256,11 +266,11 @@ pub(crate) fn stream_format_changed(state: &mut App, format: StreamFormat) {
 pub(crate) fn stream_protocol_changed(state: &mut App, protocol: StreamProtocol) {
     // Takes effect on the next start (a new handshake wraps the fresh
     // connection); restart the stream to apply it live. Shoutcast is
-    // MP3-only, so move off Opus now instead of failing at connect.
+    // MP3-only, so move off Opus/HE-AAC now instead of failing at connect.
     state.settings.stream.protocol = protocol;
-    if protocol.is_shoutcast() && state.settings.stream.format == StreamFormat::Opus {
+    if protocol.is_shoutcast() && state.settings.stream.format != StreamFormat::Mp3 {
+        tracing::info!("Stream protocol needs MP3; format switched to MP3");
         state.settings.stream.format = StreamFormat::Mp3;
-        tracing::info!("Stream protocol needs MP3; format switched from Opus");
     }
     state.save_settings();
     state

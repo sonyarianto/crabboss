@@ -26,7 +26,7 @@ pub fn build_encoder(config: &StreamConfig, sample_rate: u32) -> Result<Box<dyn 
     // with an actionable message rather than a silent dead stream.
     if config.protocol.is_shoutcast() && config.format != StreamFormat::Mp3 {
         return Err(CrabError::Audio(
-            "Shoutcast output supports MP3 only — switch Format to MP3 (or Protocol to Icecast for Opus)"
+            "Shoutcast output supports MP3 only — switch Format to MP3 (or Protocol to Icecast for Opus/HE-AAC)"
                 .into(),
         ));
     }
@@ -36,6 +36,10 @@ pub fn build_encoder(config: &StreamConfig, sample_rate: u32) -> Result<Box<dyn 
             sample_rate,
         )?)),
         StreamFormat::Opus => Ok(Box::new(crate::stream::encoder_opus::OpusOggEncoder::new(
+            config,
+            sample_rate,
+        )?)),
+        StreamFormat::HeAac => Ok(Box::new(crate::stream::encoder_he_aac::HeAacEncoder::new(
             config,
             sample_rate,
         )?)),

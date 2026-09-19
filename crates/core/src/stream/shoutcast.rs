@@ -18,7 +18,7 @@
 //! needs no suffix. The native Ultravox POST handshake is deliberately
 //! NOT spoken — its bytes are unpublished and untestable here, and the
 //! v1-compatible flow is what DNAS 2.x itself recommends to
-//! third-party sources. Shoutcast is MP3-only (no Opus/AAC encode
+//! third-party sources. Shoutcast is MP3-only (no Opus/HE-AAC encode
 //! path); a non-MP3 config fails at connect with a plain message.
 
 use std::io::{Read, Write};
@@ -63,7 +63,7 @@ impl ShoutcastSource {
         let cfg = config.clone().sanitized();
         if cfg.format != StreamFormat::Mp3 {
             return Err(CrabError::Audio(
-                "Shoutcast output supports MP3 only — switch Format to MP3 (or Protocol to Icecast for Opus)"
+                "Shoutcast output supports MP3 only — switch Format to MP3 (or Protocol to Icecast for Opus/HE-AAC)"
                     .into(),
             ));
         }

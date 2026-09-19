@@ -2,7 +2,8 @@
 //!
 //! The cpal callback pushes the post-DSP program mix into a lock-free
 //! ring buffer ([`rtrb`]) — never blocks, never allocates on the audio
-//! thread. A background thread drains it, encodes (MP3 or Opus, per the
+//! thread. A background thread drains it, encodes (MP3, Opus, or HE-AAC,
+//! per the stream config), and sends to the configured server (Icecast or
 //! stream config), and sends to the configured server (Icecast or
 //! Shoutcast) paced in real time (the source must behave like a
 //! live feed). Drops and server restarts trigger bounded reconnects.
