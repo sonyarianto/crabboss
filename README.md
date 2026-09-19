@@ -22,12 +22,13 @@ A professional radio station management application featuring audio playback, li
 - ✅ **Streaming Output** — Icecast + Shoutcast v1/v2 source client (MP3/Opus/HE-AAC on Icecast, MP3 on Shoutcast, plain + TLS) with auto-reconnect, live-encoder indicator, one-click apply-and-restart, and Settings UI
 - ✅ **Stereo Tool DSP** — Optional Thimeo on-air processing on the stream (bring your own library + key + preset, bypass toggle, license status; verified live against the real DLL)
 - ✅ **Microphone/Line-In** — Live input with voice-activated ducking and bed mix
+- ✅ **Voice Tracking v1** — Record mic takes to timestamped WAV on the Playout desk (10-minute budget), fire On Air now or queue Next with crossfade; takes stay out of music reports and rotations
 - ✅ **Reports** — Play logs with ranged reports + CSV/XLSX export
 - ✅ **Dark Theme UI** — Modern dark radio-station theme via Iced (sidebar navigation, on-air status footer, aligned library table)
 
 ### Coming Soon
 
-- 🔄 Voice tracking & teasers
+- 🔄 Voice tracking v1 (record + fire — voice-over overlap, auto-intro & teasers open)
 - 🔄 Library depth (mass tag editor, BPM scan)
 - 🔄 PDF report export
 - 🔄 Headless/server mode + web remote UI

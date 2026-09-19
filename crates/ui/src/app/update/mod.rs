@@ -15,6 +15,7 @@ pub(crate) mod reports;
 pub(crate) mod scheduler;
 pub(crate) mod settings;
 pub(crate) mod transport;
+pub(crate) mod voice;
 
 impl App {
     /// Cross-domain home counts (library + playlists + scheduler), used
@@ -130,6 +131,11 @@ pub(crate) fn update(state: &mut App, message: Message) -> Task<Message> {
         // -- Reports -----------------------------------------------------------
         Message::ReportRangeChanged(i) => reports::range_changed(state, i),
         Message::ReportExport => reports::export(state),
+        // -- Voice tracking ------------------------------------------------------
+        Message::VoiceRecordToggle => voice::record_toggle(state),
+        Message::VoiceFireNow(id) => voice::fire_now(state, id),
+        Message::VoiceQueueNext(id) => voice::queue_next(state, id),
+        Message::VoiceDelete(id) => voice::delete_take(state, id),
         // -- Ads ----------------------------------------------------------------
         Message::AdsToggle(i) => ads::toggle(state, i),
         Message::AdsDelete(i) => ads::delete(state, i),

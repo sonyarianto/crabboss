@@ -97,6 +97,11 @@ pub(crate) enum Message {
     // Reports
     ReportRangeChanged(usize),
     ReportExport,
+    // Voice tracking (§1.4): record takes, fire now or queue next.
+    VoiceRecordToggle,
+    VoiceFireNow(String),
+    VoiceQueueNext(String),
+    VoiceDelete(String),
     // Ads
     AdsToggle(usize),
     AdsDelete(usize),

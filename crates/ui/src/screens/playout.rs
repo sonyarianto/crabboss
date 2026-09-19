@@ -53,6 +53,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
     column![
         text("Playout").size(16),
         view_player_panel(state),
+        view_voice_panel(state),
         coming_up,
         container(library::panel(state, false))
             .width(Length::Fill)
@@ -157,4 +158,78 @@ fn view_player_panel(state: &App) -> Element<'_, Message> {
     .align_y(iced::Alignment::Center)
     .padding(12)
     .into()
+}
+
+/// Voice tracking desk: record takes from the live mic, fire them now
+/// or queue them next. Takes are talk segments outside the library —
+/// no music reports, no Auto-DJ rotations.
+fn view_voice_panel(state: &App) -> Element<'_, Message> {
+    use crabcore::audio::MicState;
+
+    let rec_label = if state.voice_recording {
+        format!("■ Stop ({})", fmt_dur(Some(state.voice_rec_elapsed)))
+    } else {
+        "● Record".to_string()
+    };
+    let mut header = row![
+        text("🎙 Voice tracking").size(14),
+        button(text(rec_label).size(12)).on_press(Message::VoiceRecordToggle),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+
+    // Mic must be live before a take can roll; say so inline instead
+    // of a dead button.
+    let mic_line = match state.player.mic_state() {
+        MicState::Live => {
+            let db = state.player.mic_level_db();
+            if db <= -90.0 {
+                "Mic live — talk to set a level".to_string()
+            } else {
+                format!("Mic live ({db:.0} dB)")
+            }
+        }
+        MicState::Error(e) => format!("Mic error: {e}"),
+        MicState::Off => "Mic off — start it in Settings → Microphone".to_string(),
+    };
+    header = header.push(text(mic_line).size(11));
+
+    let mut col = column![header].spacing(4);
+    if !state.voice_status.is_empty() {
+        col = col.push(text(&state.voice_status).size(11));
+    }
+    // Latest takes first (manager order); cap the desk list so one
+    // long session doesn't push the library off screen.
+    const SHOWN: usize = 6;
+    for v in state.voice_list.iter().take(SHOWN) {
+        let id_now = v.id.clone();
+        let id_next = v.id.clone();
+        let id_del = v.id.clone();
+        col = col.push(
+            row![
+                text(format!("{} ({})", v.name, fmt_dur(Some(v.duration_secs)))).size(12),
+                iced::widget::space::horizontal(),
+                button(text("On Air").size(11)).on_press(Message::VoiceFireNow(id_now)),
+                button(text("Next").size(11)).on_press(Message::VoiceQueueNext(id_next)),
+                button(text("Del").size(11)).on_press(Message::VoiceDelete(id_del)),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    if state.voice_list.len() > SHOWN {
+        col = col.push(
+            text(format!(
+                "+ {} more take{} (delete old ones to tidy up)",
+                state.voice_list.len() - SHOWN,
+                if state.voice_list.len() - SHOWN == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ))
+            .size(11),
+        );
+    }
+    col.padding(iced::padding::left(8)).into()
 }

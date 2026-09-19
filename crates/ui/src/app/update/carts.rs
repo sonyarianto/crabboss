@@ -131,6 +131,7 @@ impl App {
                 self.engine_track = Some(path);
                 self.up_next.clear();
                 self.pending_source = None;
+                super::voice::clear_voice_labels(self);
             }
             Err(e) => tracing::error!("Cart play failed: {}", e),
         }

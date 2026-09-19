@@ -37,6 +37,7 @@ pub(crate) fn play(state: &mut App) {
                         state.now_title = track_label(&track);
                         state.now_artist = track.artist.clone().unwrap_or_default();
                         state.engine_track = Some(path);
+                        super::voice::clear_voice_labels(state);
                     }
                     Err(e) => {
                         tracing::error!("Failed to play: {}", e);
@@ -88,6 +89,7 @@ pub(crate) fn play_selected(state: &mut App) {
             // "Up next" label dies with it.
             state.up_next.clear();
             state.pending_source = None;
+            super::voice::clear_voice_labels(state);
         }
         Err(e) => {
             tracing::error!("On Air failed: {}", e);
@@ -105,6 +107,7 @@ pub(crate) fn stop(state: &mut App) {
     state.up_next.clear();
     state.engine_track = None;
     state.pending_source = None;
+    super::voice::clear_voice_labels(state);
 }
 
 pub(crate) fn next(state: &mut App) {
@@ -121,6 +124,7 @@ pub(crate) fn prev(state: &mut App) {
                 state.engine_track = Some(cur);
                 state.up_next.clear();
                 state.pending_source = None;
+                super::voice::clear_voice_labels(state);
             }
             Err(e) => tracing::error!("Prev failed: {}", e),
         }
@@ -198,6 +202,7 @@ impl App {
                 // Direct play discards any pending queue (and its source).
                 // (History already advanced inside generate_next.)
                 self.pending_source = None;
+                super::voice::clear_voice_labels(self);
             }
             Err(e) => tracing::error!("Auto-DJ play failed: {}", e),
         }

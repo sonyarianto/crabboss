@@ -68,6 +68,17 @@ The Library never touches the broadcast; the Playout desk owns it.
 - Assign flow: select a track in Media, turn **Assign ON**, then
   **Place here** on a pad. Hotkeys `1`–`8` fire pads 1–8.
 
+## Voice Tracking — Talk Segments
+
+- On the Playout desk: **● Record** captures the live mic to a WAV take
+  (mic must be ON in Settings → Microphone), **■ Stop** files it with a
+  timestamp name. Takes auto-stop at 10 minutes.
+- Each take has **On Air** (plays now, crossfading over program) and
+  **Next** (queued after the current track, promoted with a 🎙 label).
+  `Del` removes the take and its file.
+- Takes live outside the music library: no play reports, no Auto-DJ
+  rotations, no loudness scans. Stream metadata shows the take name.
+
 ## Ads — Dated Blocks
 
 - Blocks chain **intro → spot → outro** with a validity window

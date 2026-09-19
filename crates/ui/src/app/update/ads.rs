@@ -170,5 +170,6 @@ impl App {
         self.is_playing = true;
         self.now_title = format!("AD: {}", block.name);
         self.now_artist = "Ad break".into();
+        super::voice::clear_voice_labels(self);
     }
 }
