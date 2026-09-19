@@ -80,9 +80,17 @@ impl ShoutcastSource {
             .flush()
             .map_err(|e| CrabError::Audio(format!("Shoutcast flush: {e}")))?;
         let reply = read_line(&mut stream).map_err(|e| {
-            // DNAS drops the connection on a bad password with no reply,
-            // which reads as EOF — translate it into operator guidance.
-            if e.to_string().contains("closed") {
+            // DNAS drops the connection on a bad password with no reply.
+            // A clean FIN reads as EOF, but depending on timing the server
+            // RSTs instead (10053/10054) — real servers do both, so both
+            // map to the same operator guidance.
+            let dropped = matches!(
+                e.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionReset
+            ) || e.to_string().contains("closed");
+            if dropped {
                 CrabError::Audio(
                     "Shoutcast closed the connection during login — wrong password, \
                      or wrong port (v1 needs the source port, usually listener port + 1; v2 needs portbase)"
@@ -497,7 +505,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
-            // Drop immediately: the DNAS wrong-password behavior.
+            // Drop immediately: the DNAS wrong-password behavior. The
+            // client may observe this as a clean FIN or as an RST
+            // (10053/10054) depending on timing — both must hint.
             let _ = listener.accept();
         });
         let err = ShoutcastSource::connect(&cfg(port)).unwrap_err();

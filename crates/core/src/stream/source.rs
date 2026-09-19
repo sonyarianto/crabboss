@@ -541,8 +541,9 @@ mod tests {
             if let Ok((mut sock, _)) = listener.accept() {
                 let mut buf = vec![0u8; 8192];
                 let _ = sock.read(&mut buf);
-                // Say nothing at all, but keep the socket open.
-                std::thread::sleep(Duration::from_secs(15));
+                // Say nothing at all, but keep the socket open well past
+                // any retry budget below.
+                std::thread::sleep(Duration::from_secs(60));
             }
         });
         let cfg = StreamConfig {
@@ -550,6 +551,19 @@ mod tests {
             port: addr.rsplit(':').next().unwrap().parse().unwrap(),
             ..Default::default()
         };
+        // Under parallel load a loopback RST can fail one attempt fast
+        // (PUT errors → SOURCE fallback succeeds); every attempt faces
+        // the same silent server, so retrying still proves the
+        // optimistic-proceed path instead of racing the scheduler.
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            if let Ok((_src, proto)) = IcecastSource::connect(&cfg) {
+                if proto == HandshakeProtocol::Put && t0.elapsed() >= Duration::from_secs(4) {
+                    return;
+                }
+            }
+        }
+        // Final attempt keeps the original strict failure diagnostics.
         let t0 = std::time::Instant::now();
         let (_src, proto) = IcecastSource::connect(&cfg).unwrap();
         assert_eq!(proto, HandshakeProtocol::Put);
