@@ -14,5 +14,6 @@ pub mod report;
 pub mod scheduler;
 pub mod settings;
 pub mod stream;
+pub mod voice;
 
 pub use error::{CrabError, Result};

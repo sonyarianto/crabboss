@@ -181,6 +181,16 @@ pub(crate) fn boot() -> (App, Task<Message>) {
 
     let ads = crabcore::ads::AdsManager::open(&db_path).expect("Failed to open ads store");
 
+    let voice_manager =
+        crabcore::voice::VoiceManager::open(&db_path).expect("Failed to open voice store");
+    let voice_dir = data_dir.join("voicetracks");
+    if let Err(e) = std::fs::create_dir_all(&voice_dir) {
+        tracing::warn!(
+            "Voice take folder unavailable ({}): {e}",
+            voice_dir.display()
+        );
+    }
+
     let volume = {
         let v = player.volume();
         if v <= 0.0 || v > 1.5 {
@@ -204,6 +214,8 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         scheduler,
         carts,
         ads,
+        voice_manager,
+        voice_dir,
         settings,
         settings_path,
         data_dir,
@@ -284,6 +296,13 @@ pub(crate) fn boot() -> (App, Task<Message>) {
         ab_time: "09:00".into(),
         ab_days: [true; 7],
         ads_error: String::new(),
+        voice_list: Vec::new(),
+        voice_status: String::new(),
+        voice_recording: false,
+        voice_rec_elapsed: 0.0,
+        voice_live: None,
+        voice_queued: None,
+        voice_take_path: None,
         output_devices,
         sel_device,
         device_note: String::new(),
@@ -327,6 +346,7 @@ pub(crate) fn boot() -> (App, Task<Message>) {
     app.refresh_scheduler();
     app.refresh_carts();
     app.refresh_ads();
+    app.refresh_voice();
     app.refresh_report();
     app.refresh_counts();
 

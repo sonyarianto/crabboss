@@ -177,7 +177,11 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       API (`assign_at` replace-in-slot, fixed 8-pad wall)
 
 ### 1.4 Voice Tracking & Teasers
-- [ ] Record a voice track that auto-ducks/overlaps between two library tracks
+- [x] Record a voice track (live mic → timestamped WAV take on the Playout
+      desk, 10-minute budget, take list with On Air / queue-Next / delete;
+      takes live outside the library: no reports, no rotations, no scans)
+- [ ] Voice-over overlap: voice over outgoing song's tail with the music
+      bed ducked (today takes fire as standalone segments)
 - [ ] Auto-intro: voice over outgoing song's tail, timed to end as next vocals start
 - [ ] Teaser/promo clips scheduled between songs
 

@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::RingBuffer;
@@ -53,6 +54,15 @@ const CUE_PLAYING: u8 = 1;
 
 /// Preemption-resistant output buffer in frames (~43 ms @ 48 kHz stereo).
 const OUTPUT_BUFFER_FRAMES: u32 = 2048;
+
+/// Voice-take ring capacity in f32 samples (~10 s of stereo @ 48 kHz).
+/// Large enough that a preempted writer thread never starves the take.
+const VOICE_RING_SAMPLES: usize = 1 << 20;
+
+/// How long `voice_record_stop` (and `Drop`) waits for the writer
+/// thread to finalize the WAV before giving up (never a hang source:
+/// the thread only does file I/O).
+const VOICE_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn encode_state(s: PlayerState) -> u8 {
     match s {
@@ -555,6 +565,13 @@ pub struct CpalEngine {
     mic_live: Arc<AtomicBool>,
     mic_config: Arc<Mutex<MicConfig>>,
     mic_state: Arc<Mutex<MicState>>,
+    /// Voice-take recording (§1.4): tap published to the output
+    /// callback, writer thread joined by `voice_record_stop` (and
+    /// `Drop`, so a close mid-take still finalizes the WAV).
+    voice_tap: Arc<Mutex<Option<crate::voice::VoiceTap>>>,
+    voice_writer: Option<std::thread::JoinHandle<Result<crate::voice::wav::WavMeta>>>,
+    voice_done: Arc<AtomicBool>,
+    voice_started: Option<Instant>,
     /// Background decode loader: `play`/`queue` only enqueue here and
     /// return instantly, so the UI thread never waits on full-file decode
     /// + sinc resample (seconds of frozen window on real songs).
@@ -630,6 +647,8 @@ impl CpalEngine {
         let mic_live = Arc::new(AtomicBool::new(false));
         let mic_config = Arc::new(Mutex::new(MicConfig::default()));
         let mic_state: Arc<Mutex<MicState>> = Arc::new(Mutex::new(MicState::Off));
+        let voice_tap: Arc<Mutex<Option<crate::voice::VoiceTap>>> = Arc::new(Mutex::new(None));
+        let voice_done = Arc::new(AtomicBool::new(false));
 
         let (stream, device_rate, device_name) = match Self::open_silent_stream(
             xfade.clone(),
@@ -642,6 +661,7 @@ impl CpalEngine {
             mic_consumer.clone(),
             mic_live.clone(),
             mic_config.clone(),
+            voice_tap.clone(),
             want,
         ) {
             Ok((s, rate, name)) => {
@@ -723,6 +743,10 @@ impl CpalEngine {
             mic_live,
             mic_config,
             mic_state,
+            voice_tap,
+            voice_writer: None,
+            voice_done,
+            voice_started: None,
             load_tx,
             load_gen,
             load_inflight,
@@ -860,6 +884,7 @@ impl CpalEngine {
         mic_consumer: Arc<Mutex<Option<rtrb::Consumer<f32>>>>,
         mic_live: Arc<AtomicBool>,
         mic_config: Arc<Mutex<MicConfig>>,
+        voice_tap: Arc<Mutex<Option<crate::voice::VoiceTap>>>,
         want: Option<String>,
     ) -> std::result::Result<(cpal::Stream, u32, String), String> {
         let host = cpal::default_host();
@@ -905,6 +930,7 @@ impl CpalEngine {
             let mic_consumer = mic_consumer.clone();
             let mic_live = mic_live.clone();
             let mic_config = mic_config.clone();
+            let voice_tap = voice_tap.clone();
             // Last-known mic level: reused while the config lock is contended
             // so the callback never blocks on a UI-held lock.
             let mut last_mic_level = 1.0f32;
@@ -922,6 +948,12 @@ impl CpalEngine {
                 let tap = callback_try(&stream_tap).and_then(|g| g.clone());
                 let mut tap_buf = [0.0f32; 8192];
                 let mut tap_n = 0usize;
+                // Voice-take tap (recording): cloned once per callback
+                // like the stream tap; mic frames stage below and flush
+                // at the end of this invocation.
+                let vtap = callback_try(&voice_tap).and_then(|g| g.clone());
+                let mut voice_buf = [0.0f32; 4096];
+                let mut voice_n = 0usize;
                 // Mic drain: locked once per callback, popped per frame.
                 // Input and output devices drift apart over hours, so
                 // bound the buffered latency — discard the oldest down
@@ -987,6 +1019,24 @@ impl CpalEngine {
                         tap_buf[tap_n + 1] = r;
                         tap_n += 2;
                     }
+                    // Voice-take tap: the live mic frame (zeros when the
+                    // mic underruns or stopped mid-take, keeping take
+                    // timing honest). Independent of transport/volume.
+                    if vtap.is_some() {
+                        if voice_n + 2 > voice_buf.len() {
+                            if let Some(v) = &vtap {
+                                v.push_slice(&voice_buf[..voice_n]);
+                            }
+                            voice_n = 0;
+                        }
+                        let (ml, mr) = match mic_frame {
+                            Some(f) => (f.l, f.r),
+                            None => (0.0, 0.0),
+                        };
+                        voice_buf[voice_n] = ml;
+                        voice_buf[voice_n + 1] = mr;
+                        voice_n += 2;
+                    }
                     // Dead-air alarm watches the PROGRAM bus (pre-volume):
                     // a muted monitor is intentional silence, not dead air
                     // (same rule as paused). Measuring post-volume would
@@ -1008,6 +1058,10 @@ impl CpalEngine {
                 // Flush the tap buffer for this callback invocation.
                 if let Some(t) = &tap {
                     t.push(&tap_buf[..tap_n]);
+                }
+                // Flush the voice-take staging for this invocation.
+                if let Some(v) = &vtap {
+                    v.push_slice(&voice_buf[..voice_n]);
                 }
                 // Auto-stop at EOF (once per track — a brief lock is fine).
                 if playing && xf.is_done() {
@@ -1606,6 +1660,99 @@ impl Engine for CpalEngine {
         self.mic_live.load(Ordering::Relaxed) && self.mixer.lock().unwrap().ducking()
     }
 
+    // -- Voice-track recording (§1.4) ------------------------------------
+    // The output callback stages live mic frames into the take ring;
+    // this writer thread drains it to WAV. Take timing stays honest
+    // when the mic stops mid-take (the callback stages zeros).
+    fn voice_record_start(&mut self, path: &Path) -> Result<()> {
+        if self.voice_writer.is_some() {
+            return Err(CrabError::Audio("a voice take is already rolling".into()));
+        }
+        if self._stream.is_none() {
+            return Err(CrabError::Audio(
+                "voice record needs an output device (headless engine has no callback pump)".into(),
+            ));
+        }
+        if !self.mic_live.load(Ordering::Relaxed) {
+            return Err(CrabError::Audio(
+                "mic is not live — start it first (Settings → Microphone)".into(),
+            ));
+        }
+        // Drop stale mic backlog so the take opens clean, not with old audio.
+        if let Ok(mut guard) = self.mic_consumer.lock() {
+            if let Some(con) = guard.as_mut() {
+                while con.pop().is_ok() {}
+            }
+        }
+        let (producer, consumer) = RingBuffer::new(VOICE_RING_SAMPLES);
+        *self.voice_tap.lock().unwrap() = Some(crate::voice::VoiceTap {
+            producer: Arc::new(Mutex::new(producer)),
+        });
+        self.voice_done.store(false, Ordering::Relaxed);
+        let done = self.voice_done.clone();
+        let rate = self.device_rate;
+        let path = path.to_path_buf();
+        match std::thread::Builder::new()
+            .name("voice-recorder".into())
+            .spawn(move || voice_writer_thread(consumer, path, rate, done))
+        {
+            Ok(handle) => {
+                self.voice_writer = Some(handle);
+                self.voice_started = Some(Instant::now());
+                tracing::info!("Voice take rolling");
+                Ok(())
+            }
+            Err(e) => {
+                *self.voice_tap.lock().unwrap() = None;
+                Err(CrabError::Audio(format!("voice recorder thread: {e}")))
+            }
+        }
+    }
+
+    fn voice_record_stop(&mut self) -> Result<crate::voice::VoiceTake> {
+        if self.voice_writer.is_none() {
+            return Err(CrabError::Audio("no voice take rolling".into()));
+        }
+        *self.voice_tap.lock().unwrap() = None;
+        self.voice_done.store(true, Ordering::Relaxed);
+        self.voice_started = None;
+        let handle = self.voice_writer.take().expect("checked above");
+        let deadline = Instant::now() + VOICE_JOIN_TIMEOUT;
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !handle.is_finished() {
+            return Err(CrabError::Audio(
+                "voice writer did not finish — take file may be partial".into(),
+            ));
+        }
+        match handle.join() {
+            Ok(Ok(meta)) => {
+                tracing::info!(
+                    "Voice take done: {:.1} s @ {} Hz",
+                    meta.duration_secs(),
+                    meta.sample_rate
+                );
+                Ok(crate::voice::VoiceTake {
+                    duration_secs: meta.duration_secs(),
+                    sample_rate: meta.sample_rate,
+                })
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(CrabError::Audio("voice writer panicked".into())),
+        }
+    }
+
+    fn voice_recording(&self) -> bool {
+        self.voice_writer.is_some()
+    }
+
+    fn voice_record_secs(&self) -> f64 {
+        self.voice_started
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0)
+    }
+
     // -- Cue (PFL) audition bus (B2 Phase 2) --------------------------------
     // Independent decode + output. Program `xfade`/`mixer`/`silence`/
     // `stream_tap` are never touched here; locks are taken sequentially
@@ -1946,6 +2093,47 @@ fn resample_stereo(interleaved: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>
         stereo.push(*r);
     }
     Ok(stereo)
+}
+
+/// Voice-take writer thread: drains the take ring to a stereo WAV file
+/// until `done` with an empty ring, then finalizes the header sizes.
+fn voice_writer_thread(
+    mut consumer: rtrb::Consumer<f32>,
+    path: PathBuf,
+    rate: u32,
+    done: Arc<AtomicBool>,
+) -> Result<crate::voice::wav::WavMeta> {
+    let mut writer = crate::voice::wav::WavWriter::create(&path, 2, rate)?;
+    let mut staging = Vec::<i16>::with_capacity(8192);
+    loop {
+        while consumer.slots() >= 2 {
+            let l = consumer.pop().unwrap_or(0.0);
+            let r = consumer.pop().unwrap_or(0.0);
+            staging.push((l.clamp(-1.0, 1.0) * 32767.0) as i16);
+            staging.push((r.clamp(-1.0, 1.0) * 32767.0) as i16);
+            if staging.len() >= 8192 {
+                writer.write_frames(&staging)?;
+                staging.clear();
+            }
+        }
+        if !staging.is_empty() {
+            writer.write_frames(&staging)?;
+            staging.clear();
+        }
+        if done.load(Ordering::Relaxed) && consumer.slots() == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    writer.finalize()
+}
+
+impl Drop for CpalEngine {
+    fn drop(&mut self) {
+        // A close mid-take still finalizes the WAV (bounded wait) instead
+        // of abandoning a header-less stub on disk.
+        let _ = self.voice_record_stop();
+    }
 }
 
 #[cfg(test)]
@@ -2563,5 +2751,49 @@ mod tests {
         eng.set_loudness_enabled(false);
         assert_eq!(eng.gain_for(Path::new("/m/a.mp3")), 0.0);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn voice_record_guards_without_live_mic() {
+        let mut eng = CpalEngine::new();
+        // Idle stop is an error, never a panic; idle meters read zero.
+        assert!(eng.voice_record_stop().is_err());
+        assert!(!eng.voice_recording());
+        assert_eq!(eng.voice_record_secs(), 0.0);
+        // The mic is off on a fresh engine (and CI may have no devices
+        // at all): starting a take must fail loudly either way, and a
+        // failed start must never leave a stub file behind.
+        let path = std::env::temp_dir().join("crabboss-voice-test-guard.wav");
+        let _ = std::fs::remove_file(&path);
+        assert!(eng.voice_record_start(&path).is_err());
+        assert!(!eng.voice_recording());
+        assert!(!path.exists(), "failed start must not leave a file");
+    }
+
+    #[test]
+    fn voice_writer_thread_drains_ring_to_valid_wav() {
+        use std::sync::atomic::AtomicBool;
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("crabboss-voice-test-writer.wav");
+        let _ = std::fs::remove_file(&path);
+        let (mut prod, cons) = RingBuffer::new(1 << 12);
+        // 1000 stereo frames of mono 0.5 sine-ish (values only need
+        // to survive the f32→i16 trip recognizably).
+        for i in 0..1000 {
+            let s = (i as f32 / 1000.0 * 2.0 - 1.0) * 0.5;
+            prod.push(s).unwrap();
+            prod.push(s).unwrap();
+        }
+        let done = Arc::new(AtomicBool::new(true));
+        let meta = voice_writer_thread(cons, path.clone(), 48_000, done).unwrap();
+        assert_eq!(meta.sample_rate, 48_000);
+        assert_eq!(meta.samples, 1000);
+        assert!((meta.duration_secs() - 1000.0 / 48_000.0).abs() < 1e-9);
+        // Valid WAV on disk (header + data, no truncation).
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() >= 44 + 1000 * 2 * 2);
+        assert_eq!(&bytes[0..4], b"RIFF");
+        let _ = std::fs::remove_file(&path);
     }
 }

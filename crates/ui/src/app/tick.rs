@@ -22,6 +22,18 @@ impl App {
         super::update::settings::pump_listeners(self);
         super::update::settings::maybe_poll_listeners(self);
 
+        // Voice take bookkeeping: mirror recording state + elapsed,
+        // auto-stop at the 10-minute budget with a truthful status.
+        self.voice_recording = self.player.voice_recording();
+        if self.voice_recording {
+            self.voice_rec_elapsed = self.player.voice_record_secs();
+            if self.voice_rec_elapsed >= crabcore::voice::VOICE_MAX_RECORD_SECS {
+                super::update::voice::stop_take(self, true);
+            }
+        } else {
+            self.voice_rec_elapsed = 0.0;
+        }
+
         let pos = self.player.position_secs();
         let (dur, has_dur) = match self.player.current_track() {
             Some(t) => (
@@ -43,6 +55,12 @@ impl App {
                     .map(|f| strip_audio_extension(&f.to_string_lossy()))
                     .unwrap_or_default()
             });
+            // A live voice take names the stream (take filename stems
+            // are timestamps, not show titles).
+            let label = match &self.voice_live {
+                Some((vp, name)) if vp == &t.path => name.clone(),
+                _ => label,
+            };
             self.player.set_stream_title(&label);
         }
         let _ = (pos, dur, has_dur);
@@ -80,6 +98,22 @@ impl App {
                                 .filter(|a| !a.trim().is_empty())
                                 .unwrap_or(source);
                             self.up_next.clear();
+                            // A music deck is never a voice take.
+                            self.voice_live = None;
+                        } else if let Some((vp, name)) =
+                            self.voice_queued.clone().filter(|(vp, _)| vp == p)
+                        {
+                            // A queued voice take reached the air: label it
+                            // (no `record_play` — takes stay out of music
+                            // reports), then it behaves like program.
+                            tracing::info!("Promoted queued voice take: {name}");
+                            self.is_playing = true;
+                            self.now_title = format!("🎙 {name}");
+                            self.now_artist = "Voice track".into();
+                            self.up_next.clear();
+                            self.player.set_stream_title(&name);
+                            self.voice_live = Some((vp, name));
+                            self.voice_queued = None;
                         }
                     }
                     self.engine_track = engine_path;
@@ -194,6 +228,7 @@ impl App {
                                 self.engine_track = Some(path);
                                 self.up_next.clear();
                                 self.pending_source = None;
+                                super::update::voice::clear_voice_labels(self);
                             }
                             Err(e) => tracing::error!("Filler play failed: {}", e),
                         }

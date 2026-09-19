@@ -166,6 +166,29 @@ pub trait Engine {
     fn mic_ducking(&self) -> bool {
         false
     }
+    /// Start recording the live mic to `path` (WAV, written by a
+    /// background thread). Errors when the mic isn't live, no output
+    /// device runs the callback pump, or a take is already rolling.
+    fn voice_record_start(&mut self, _path: &Path) -> Result<()> {
+        Err(crate::error::CrabError::Audio(
+            "voice record unavailable (no audio device)".into(),
+        ))
+    }
+    /// Stop the take and finalize the WAV file.
+    fn voice_record_stop(&mut self) -> Result<crate::voice::VoiceTake> {
+        Err(crate::error::CrabError::Audio(
+            "no voice take rolling".into(),
+        ))
+    }
+    /// True while a take is rolling.
+    fn voice_recording(&self) -> bool {
+        false
+    }
+    /// Seconds recorded so far (0 when idle; the UI auto-stops at
+    /// [`crate::voice::VOICE_MAX_RECORD_SECS`]).
+    fn voice_record_secs(&self) -> f64 {
+        0.0
+    }
     /// Seconds into the current track (`0.0` when nothing is playing).
     fn position_secs(&self) -> f64 {
         0.0

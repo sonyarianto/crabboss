@@ -804,6 +804,7 @@ pub(crate) fn fire_playlist_to_air(
                 .map(|(_, _, _, l)| l.clone())
                 .unwrap_or_default();
             state.pending_source = Some("Playlist".into());
+            super::voice::clear_voice_labels(state);
             let fire = PlaylistFire {
                 name: pl.name.clone(),
                 to_air: queued + 1,

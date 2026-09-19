@@ -11,6 +11,7 @@ use crabcore::audio::Engine;
 use crabcore::library::{Library, Track, TrackKind};
 use crabcore::playlist::{PlaylistManager, RuleHistory};
 use crabcore::stream::StreamConfig;
+use crabcore::voice::{VoiceManager, VoiceTrack};
 
 use super::update::generator::{PlaylistDetailItem, SavedPlaylist};
 use crate::widgets::{LoudnessDone, SyncFound};
@@ -226,6 +227,20 @@ pub(crate) struct App {
     pub(crate) ab_time: String,
     pub(crate) ab_days: [bool; 7],
     pub(crate) ads_error: String,
+
+    // Voice tracking (§1.4): recorded takes live outside the library
+    // (never music reports/rotations). `voice_live`/`voice_queued`
+    // are (path, name) pairs the tick uses to label voice decks.
+    pub(crate) voice_manager: VoiceManager,
+    pub(crate) voice_dir: PathBuf,
+    pub(crate) voice_list: Vec<VoiceTrack>,
+    pub(crate) voice_status: String,
+    pub(crate) voice_recording: bool,
+    pub(crate) voice_rec_elapsed: f64,
+    pub(crate) voice_live: Option<(PathBuf, String)>,
+    pub(crate) voice_queued: Option<(PathBuf, String)>,
+    /// Rolling take path (set at record start, consumed at stop).
+    pub(crate) voice_take_path: Option<PathBuf>,
 
     // Settings UI caches
     pub(crate) output_devices: Vec<String>,
