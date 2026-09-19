@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use rtrb::RingBuffer;
 
 use crate::stream::encoder::build_encoder;
-use crate::stream::{SourceConn, StreamConfig, StreamState, StreamStats};
+use crate::stream::{SourceConn, StereoTool, StreamConfig, StreamState, StreamStats};
 
 /// Ring capacity in stereo f32 samples (~10.9 s at 48 kHz stereo).
 /// Large enough to ride out a reconnect, small enough to stay bounded.
@@ -76,6 +76,8 @@ pub struct StreamManager {
     /// up and emits an in-band metadata block.
     title: Arc<Mutex<String>>,
     stats: Arc<StreamStatsAtomic>,
+    /// Stereo Tool status line (sender thread writes, UI reads).
+    dsp_status: Arc<Mutex<String>>,
     /// Monotonic generation: bumped by every `start`/`stop`; the tap
     /// only accepts pushes while its generation matches.
     generation: Arc<AtomicU64>,
@@ -110,6 +112,7 @@ impl StreamManager {
             last_error: Arc::new(Mutex::new(String::new())),
             title: Arc::new(Mutex::new(String::new())),
             stats: Arc::new(StreamStatsAtomic::default()),
+            dsp_status: Arc::new(Mutex::new(String::new())),
             generation: Arc::new(AtomicU64::new(0)),
             tap: None,
         }
@@ -142,6 +145,13 @@ impl StreamManager {
     /// a no-op when the server didn't negotiate metadata).
     pub fn set_title(&self, title: &str) {
         *self.title.lock().unwrap() = title.replace(['\r', '\n'], " ");
+    }
+
+    /// Stereo Tool status for Settings ("off", "bypassed", version +
+    /// license state). Written by the sender thread; empty = never
+    /// started with processing enabled.
+    pub fn dsp_status(&self) -> String {
+        self.dsp_status.lock().unwrap().clone()
     }
 
     /// True while the manager wants audio (connecting or live).
@@ -183,6 +193,7 @@ impl StreamManager {
         let last_error = self.last_error.clone();
         let title = self.title.clone();
         let stats = self.stats.clone();
+        let dsp_status = self.dsp_status.clone();
         let generation = self.generation.clone();
 
         let spawned = std::thread::Builder::new()
@@ -196,6 +207,7 @@ impl StreamManager {
                     last_error,
                     title,
                     stats,
+                    dsp_status,
                     generation,
                     gen,
                 );
@@ -231,6 +243,7 @@ fn sender_loop(
     last_error: Arc<Mutex<String>>,
     title: Arc<Mutex<String>>,
     stats: Arc<StreamStatsAtomic>,
+    dsp_status: Arc<Mutex<String>>,
     generation: Arc<AtomicU64>,
     gen: u64,
 ) {
@@ -281,6 +294,43 @@ fn sender_loop(
             }
         };
 
+        // --- Optional on-air DSP (Thimeo Stereo Tool) ---
+        // Opened per connection on this thread (the instance never
+        // crosses threads). A broken DSP setup fails the start loudly:
+        // silently streaming "processed" audio that isn't would lie to
+        // the operator about loudness/compliance processing.
+        let mut dsp = if cfg.stereotool.wants_processing() {
+            match StereoTool::open(
+                &cfg.stereotool.lib_path,
+                &cfg.stereotool.license_key,
+                &cfg.stereotool.preset_path,
+            ) {
+                Ok(st) => {
+                    let ver = st.software_version();
+                    *dsp_status.lock().unwrap() =
+                        format!("Stereo Tool v{ver} · verifying license…");
+                    tracing::info!("Stream DSP: Stereo Tool v{ver} loaded");
+                    Some(st)
+                }
+                Err(e) => {
+                    fail(&state, &last_error, &e.to_string());
+                    tracing::error!("Stream DSP: {e}");
+                    return;
+                }
+            }
+        } else {
+            *dsp_status.lock().unwrap() = if cfg.stereotool.enabled {
+                "Stereo Tool off (library/preset path missing)".to_string()
+            } else {
+                String::new()
+            };
+            None
+        };
+        // Frames processed so far (for the one-shot license check —
+        // Thimeo needs audio through the chain first).
+        let mut dsp_frames: u64 = 0;
+        let mut dsp_licensed: Option<bool> = None;
+
         // --- Live ---
         state.store(STATE_LIVE, Ordering::Relaxed);
         reconnects = 0;
@@ -326,6 +376,37 @@ fn sender_loop(
                 }
             }
 
+            // Optional on-air DSP (post-tap, pre-encoder): the same
+            // interleaved stereo the encoder would eat. Bypass keeps
+            // the instance loaded but passes audio through untouched.
+            if let Some(st) = dsp.as_mut() {
+                if !cfg.stereotool.bypass {
+                    st.process(&mut scratch, 2, device_rate);
+                    dsp_frames += frames as u64;
+                    // One-shot license check once ~3 s of audio flowed
+                    // (Thimeo needs audio through the chain first).
+                    if dsp_licensed.is_none() && dsp_frames >= 3 * device_rate as u64 {
+                        let (valid, detail) = st.license_check(true);
+                        dsp_licensed = Some(valid);
+                        let ver = st.software_version();
+                        *dsp_status.lock().unwrap() = if valid {
+                            format!("Stereo Tool v{ver} · licensed")
+                        } else if detail.is_empty() {
+                            format!("Stereo Tool v{ver} · UNLICENSED")
+                        } else {
+                            format!("Stereo Tool v{ver} · UNLICENSED: {detail}")
+                        };
+                        if !valid {
+                            tracing::warn!("Stream DSP license: {detail}");
+                        }
+                    }
+                } else if dsp_licensed.is_none() {
+                    dsp_licensed = Some(true); // don't nag in bypass
+                    let ver = st.software_version();
+                    *dsp_status.lock().unwrap() = format!("Stereo Tool v{ver} · bypassed");
+                }
+            }
+
             let bytes = match encoder.encode(&scratch) {
                 Ok(b) => b,
                 Err(e) => {
@@ -334,7 +415,6 @@ fn sender_loop(
                     return;
                 }
             };
-
             if let Err(e) = source.send(bytes) {
                 // Connection dropped mid-stream: fall through to reconnect.
                 tracing::warn!("Stream send failed: {e}");

@@ -881,6 +881,7 @@ dependencies = [
  "chrono",
  "cpal",
  "dirs",
+ "libloading",
  "lofty",
  "mp3lame-encoder",
  "native-tls",

@@ -207,6 +207,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
         SettingsSection::Loudness,
         SettingsSection::Streaming,
         SettingsSection::Microphone,
+        SettingsSection::Processor,
     ] {
         let entry = button(text(sec.label()).size(13))
             .width(Length::Fill)
@@ -578,6 +579,58 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
         ]
         .spacing(8)
         .into(),
+        SettingsSection::Processor => {
+            // Optional Thimeo on-air DSP (stream path only): the
+            // operator's own library + key + preset. Applies on stream
+            // start/restart, like every stream setting.
+            let st = &stream_cfg.stereotool;
+            column![
+                text(sec.label()).size(16),
+                text(sec.description()).size(11),
+                row![checkbox(st.enabled)
+                    .label("Process stream audio")
+                    .on_toggle(|_| Message::StToggle),]
+                .spacing(8),
+                row![checkbox(st.bypass)
+                    .label("Bypass (loaded, passes audio through)")
+                    .on_toggle(|_| Message::StBypassToggle),]
+                .spacing(8),
+                text(state.player.stream_dsp_status()).size(12),
+                row![
+                    text("Library:").size(12).width(Length::Fixed(76.0)),
+                    text_input("…/libStereoTool_64.dll", &st.lib_path)
+                        .on_input(Message::StLibPath)
+                        .padding(6)
+                        .width(Length::Fill),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+                row![
+                    text("License:").size(12).width(Length::Fixed(76.0)),
+                    text_input("Thimeo license key", &st.license_key)
+                        .on_input(Message::StLicenseKey)
+                        .padding(6)
+                        .width(Length::Fill),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+                row![
+                    text("Preset:").size(12).width(Length::Fixed(76.0)),
+                    text_input("…/preset.sts", &st.preset_path)
+                        .on_input(Message::StPresetPath)
+                        .padding(6)
+                        .width(Length::Fill),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+                text("Bring your own library from Thimeo's plugin SDK — it is never bundled. \
+                      The key stays in your local settings file (never shared). \
+                      A broken setup fails the stream start loudly instead of airing unprocessed audio.")
+                    .size(11),
+            ]
+            .spacing(8)
+            .into()
+        }
     };
 
     row![

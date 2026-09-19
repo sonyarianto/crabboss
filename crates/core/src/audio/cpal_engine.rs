@@ -1527,6 +1527,10 @@ impl Engine for CpalEngine {
         self.stream.lock().unwrap().stats()
     }
 
+    fn stream_dsp_status(&self) -> String {
+        self.stream.lock().unwrap().dsp_status()
+    }
+
     fn set_stream_title(&self, title: &str) {
         self.stream.lock().unwrap().set_title(title);
     }

@@ -303,6 +303,43 @@ pub(crate) fn stream_restart(state: &mut App) {
     tracing::info!("Stream restarted with new settings");
 }
 
+/// Push the (nested) Stereo Tool config to the engine. Like every
+/// stream setting it applies on the next start — restart the stream
+/// to pick it up while live.
+fn push_stereo_tool(state: &mut App) {
+    state.save_settings();
+    state
+        .player
+        .set_stream_config(state.settings.stream.clone());
+}
+
+pub(crate) fn st_toggle(state: &mut App) {
+    state.settings.stream.stereotool.enabled = !state.settings.stream.stereotool.enabled;
+    push_stereo_tool(state);
+}
+
+pub(crate) fn st_bypass_toggle(state: &mut App) {
+    state.settings.stream.stereotool.bypass = !state.settings.stream.stereotool.bypass;
+    push_stereo_tool(state);
+}
+
+pub(crate) fn st_lib_path(state: &mut App, v: String) {
+    state.settings.stream.stereotool.lib_path = v;
+    push_stereo_tool(state);
+}
+
+pub(crate) fn st_license_key(state: &mut App, v: String) {
+    // The key lives in the local settings.json only (gitignored) and
+    // is redacted from logs — same treatment as the stream password.
+    state.settings.stream.stereotool.license_key = v;
+    push_stereo_tool(state);
+}
+
+pub(crate) fn st_preset_path(state: &mut App, v: String) {
+    state.settings.stream.stereotool.preset_path = v;
+    push_stereo_tool(state);
+}
+
 pub(crate) fn mic_toggle(state: &mut App) {
     state.settings.mic.enabled = !state.settings.mic.enabled;
     state.save_settings();

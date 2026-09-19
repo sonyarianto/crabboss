@@ -33,7 +33,7 @@ background loader: symphonia decode -> loudness gain -> rubato resample ->
 Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
   cpal OutputStream (program, x monitor volume)
   + cpal InputStream (mic/line-in via rtrb, ducked, pre-limiter/tap)
-  + Stream tee (post-DSP tap via rtrb -> MP3/Opus sender thread -> Icecast or Shoutcast v1/v2)
+  + Stream tee (post-DSP tap via rtrb -> optional Thimeo Stereo Tool -> MP3/Opus sender thread -> Icecast or Shoutcast v1/v2)
   + cue/PFL bus (own cpal OutputStream on a second device, flat preview
     with ~30 ms click-free fades; never feeds the stream tap, mixer,
     silence monitor, or play log)
@@ -88,6 +88,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 |---|---|---|---|
 | Playback engine | Gapless, sample-accurate crossfade, curve choice | Stereo dual-cursor engine, equal-power/linear crossfade, background decode loader, gapless queued handoff | ✅ |
 | EQ / dynamics | Full EQ, limiter, loudness normalization | 12-band peaking EQ (±12 dB) + brickwall limiter + BS.1770/R128 loudness normalization (library scan, per-track gain at decode) | ✅ |
+| On-air DSP | Stereo Tool support (DSP plugin) | Stream-path Thimeo libStereoTool (runtime-loaded, operator-owned lib + key + preset, bypass, license status; live-verified v11.05); monitor-bus insertion open | ✅ |
 | Playlist generator | Rotation, no-repeat, separation, playcount priority, dayparting, multi-playlist UI | Engine complete (repeat/separation/priority/daypart/jingles) + scheduler `generate` + Auto-DJ rotation + Home multi-preset UI (4 dayparts at once) + saved list with stored-order Queue to Air + manual builder (create/reorder/remove/delete) | ✅ |
 | Ad scheduler | Dated blocks, intros/outros, color-coded list | Dated blocks with intro→spot→outro chained breaks + engine pending queue | ✅ |
 | Scheduler | Time+weekday, expirations, weekday column, insert-after | MVP + "valid until" expiry with row badges and warnings banner + `load` fires a named playlist in stored order + `queue` insert-after | ✅ |
@@ -217,6 +218,13 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
       install, shown as cover in the Playout strip; the Icecast/Shoutcast
       source protocol is text-only (`StreamTitle`), so there is no
       encoder sink by design — not a gap)
+- [x] On-air DSP via Thimeo libStereoTool (stream path: post-tap,
+      pre-encoder): runtime-loaded operator-owned library (never
+      bundled — MIT stays clean), headless instance + `.sts` preset,
+      bypass toggle, per-connection load on the sender thread (fail
+      loudly on broken setup, never silent-unprocessed), license state
+      in Settings. Live-verified against the real v11.05 DLL
+      (process + license check). Program-bus (monitor) insertion open.
 
 ### 1.6 Mic / Live Assist
 - [x] Mic input via `cpal` input stream, mixed into program bus (device

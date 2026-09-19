@@ -54,6 +54,7 @@ pub(crate) enum SettingsSection {
     Loudness,
     Streaming,
     Microphone,
+    Processor,
 }
 
 impl SettingsSection {
@@ -66,6 +67,7 @@ impl SettingsSection {
             SettingsSection::Loudness => "Loudness",
             SettingsSection::Streaming => "Streaming",
             SettingsSection::Microphone => "Microphone",
+            SettingsSection::Processor => "Stereo Tool",
         }
     }
 
@@ -86,6 +88,9 @@ impl SettingsSection {
             }
             SettingsSection::Microphone => {
                 "Live input with voice-activated ducking of the music bed."
+            }
+            SettingsSection::Processor => {
+                "Optional Thimeo on-air DSP on the stream (bring your own library + key + preset)."
             }
         }
     }

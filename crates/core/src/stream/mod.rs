@@ -14,12 +14,14 @@ mod listeners;
 mod manager;
 mod shoutcast;
 mod source;
+mod stereotool;
 
 pub use listeners::{fetch_listener_count, parse_listener_count, LISTENER_POLL_SECS};
 pub use manager::{StreamManager, StreamTap};
 pub use shoutcast::ShoutcastSource;
 #[allow(unused_imports)]
 pub use source::IcecastSource;
+pub use stereotool::{StereoTool, StereoToolConfig};
 
 use serde::{Deserialize, Serialize};
 
@@ -94,6 +96,10 @@ pub struct StreamConfig {
     /// Ignored by Icecast and Shoutcast v1.
     #[serde(default = "default_stream_sid")]
     pub sid: u32,
+    /// Optional Thimeo Stereo Tool on-air processing (post-tap,
+    /// pre-encoder). Off unless fully configured (see
+    /// [`StereoToolConfig`]).
+    pub stereotool: StereoToolConfig,
 }
 
 /// Default Shoutcast v2 stream ID (the DNAS default stream).
@@ -182,6 +188,7 @@ impl std::fmt::Debug for StreamConfig {
             .field("tls", &self.tls)
             .field("protocol", &self.protocol)
             .field("sid", &self.sid)
+            .field("stereotool", &self.stereotool)
             .field("name", &self.name)
             .field("genre", &self.genre)
             .field("description", &self.description)
@@ -210,6 +217,7 @@ impl Default for StreamConfig {
             bitrate_kbps: 128,
             format: StreamFormat::Mp3,
             sid: default_stream_sid(),
+            stereotool: StereoToolConfig::default(),
         }
     }
 }
@@ -240,6 +248,8 @@ impl StreamConfig {
         if self.sid == 0 {
             self.sid = default_stream_sid();
         }
+        let st = std::mem::take(&mut self.stereotool);
+        self.stereotool = st.sanitized();
         self
     }
 }

@@ -133,6 +133,10 @@ pub trait Engine {
     fn stream_stats(&self) -> crate::stream::StreamStats {
         crate::stream::StreamStats::default()
     }
+    /// Optional on-air DSP status line (empty = DSP never started).
+    fn stream_dsp_status(&self) -> String {
+        String::new()
+    }
     /// Queue a now-playing metadata update for the stream.
     fn set_stream_title(&self, _title: &str) {}
     /// Install the mic/line-in config; device applies on next start,

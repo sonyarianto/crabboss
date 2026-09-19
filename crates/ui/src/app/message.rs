@@ -142,6 +142,12 @@ pub(crate) enum Message {
     StreamSidInc,
     StreamSidDec,
     StreamRestart,
+    // Optional on-air DSP (Thimeo Stereo Tool, stream path)
+    StToggle,
+    StBypassToggle,
+    StLibPath(String),
+    StLicenseKey(String),
+    StPresetPath(String),
     MicToggle,
     MicRefreshDevices,
     MicSelectDevice(String),

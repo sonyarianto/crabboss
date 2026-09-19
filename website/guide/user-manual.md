@@ -107,6 +107,19 @@ The Library never touches the broadcast; the Playout desk owns it.
   while live, a red **Apply & restart** button appears for pending
   changes. Every restart rebuffers listeners, so batch your edits.
 
+## Stereo Tool (optional on-air DSP)
+
+- **Settings → Stereo Tool**: enable, then point **Library** at your own
+  `libStereoTool` copy (from Thimeo's plugin SDK — never bundled),
+  paste the **license key**, and pick a **Preset** (`.sts`). **Bypass**
+  keeps everything loaded but passes audio through untouched.
+- Processing sits post-tap, pre-encoder on the stream — monitors stay
+  dry. Applies on stream start/restart. A broken setup fails the start
+  loudly instead of airing unprocessed audio; the license state shows
+  here once the stream flows (unlicensed libraries overlay voice/beeps
+  by Thimeo's own design).
+- The key lives in your local `settings.json` only — never share that file.
+
 ## Sound
 
 - **Settings → Equalizer**: 12-band graphic-EQ fader strip. Drag applies

@@ -40,7 +40,14 @@
     "public": false,
     "bitrate_kbps": 128,
     "format": "mp3",
-    "sid": 1
+    "sid": 1,
+    "stereotool": {
+      "enabled": false,
+      "lib_path": "",
+      "license_key": "",
+      "preset_path": "",
+      "bypass": false
+    }
   },
   "mic": {
     "enabled": false,

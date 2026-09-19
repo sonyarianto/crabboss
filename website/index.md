@@ -34,4 +34,6 @@ features:
     details: SQLite library with search, health and loudness scans, duplicate flagging, and watch-folder auto-sync.
   - title: Honest DSP
     details: 12-band graphic EQ, brickwall limiter, and BS.1770 loudness normalization toward an adjustable target.
+  - title: Stereo Tool Ready
+    details: Optional Thimeo on-air processing on the stream — bring your own library, key, and preset; bypass and license status built in.
 ---
