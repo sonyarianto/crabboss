@@ -19,7 +19,7 @@ A professional radio station management application featuring audio playback, li
 - ✅ **Advertisement Scheduler** — Dated blocks with intro→spot→outro chained breaks
 - ✅ **Cart Wall** — 8 pads with hotkeys, progress, assign-from-library
 - ✅ **12-Band EQ + Limiter + Loudness** — Program EQ, brickwall limiter, BS.1770/R128 normalization
-- ✅ **Streaming Output** — Icecast + Shoutcast v1/v2 source client (MP3/Opus on Icecast, MP3 on Shoutcast, plain + TLS) with auto-reconnect, live-encoder indicator, one-click apply-and-restart, and Settings UI
+- ✅ **Streaming Output** — Icecast + Shoutcast v1/v2 source client (MP3/Opus/HE-AAC on Icecast, MP3 on Shoutcast, plain + TLS) with auto-reconnect, live-encoder indicator, one-click apply-and-restart, and Settings UI
 - ✅ **Stereo Tool DSP** — Optional Thimeo on-air processing on the stream (bring your own library + key + preset, bypass toggle, license status; verified live against the real DLL)
 - ✅ **Microphone/Line-In** — Live input with voice-activated ducking and bed mix
 - ✅ **Reports** — Play logs with ranged reports + CSV/XLSX export

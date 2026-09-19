@@ -1,13 +1,14 @@
 //! Icecast/Shoutcast streaming output (ROADMAP §1.5).
 //!
 //! The cpal mix bus (post-DSP, pre-monitor-volume: exactly what the
-//! program feed plays at full level) is tapped into a [`StreamManager`], which encodes it to MP3 (LAME)
-//! or Opus (in Ogg, constant bitrate) and pushes it to the server as a
-//! source client — Icecast `PUT`/`SOURCE` (mount-based) or Shoutcast
-//! DNAS v1/v2 (`password` + `icy-*` headers), paced at real time as a
-//! live feed requires.
+//! program feed plays at full level) is tapped into a [`StreamManager`], which encodes it to MP3 (LAME),
+//! Opus (in Ogg, constant bitrate), or HE-AAC v1/v2 (FDK, ADTS) and
+//! pushes it to the server as a source client — Icecast `PUT`/`SOURCE`
+//! (mount-based) or Shoutcast DNAS v1/v2 (`password` + `icy-*`
+//! headers), paced at real time as a live feed requires.
 
 mod encoder;
+mod encoder_he_aac;
 mod encoder_mp3;
 mod encoder_opus;
 mod listeners;
@@ -27,13 +28,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
-/// Encoder/container for the stream (MP3 via LAME, Opus in Ogg).
+/// Encoder/container for the stream (MP3 via LAME, Opus in Ogg,
+/// HE-AAC v1/v2 via FDK in ADTS — the last two Icecast-only).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamFormat {
     #[default]
     Mp3,
     Opus,
+    HeAac,
 }
 
 impl StreamFormat {
@@ -42,6 +45,7 @@ impl StreamFormat {
         match self {
             StreamFormat::Mp3 => "audio/mpeg",
             StreamFormat::Opus => "audio/ogg; codecs=opus",
+            StreamFormat::HeAac => "audio/aac",
         }
     }
 
@@ -50,6 +54,7 @@ impl StreamFormat {
         match self {
             StreamFormat::Mp3 => "MP3",
             StreamFormat::Opus => "Opus",
+            StreamFormat::HeAac => "HE-AAC",
         }
     }
 }
@@ -112,7 +117,7 @@ fn default_stream_sid() -> u32 {
 #[serde(rename_all = "lowercase")]
 pub enum StreamProtocol {
     /// Icecast 2 (`PUT` with `SOURCE` fallback, mount-based).
-    /// The default; the only protocol with Opus support.
+    /// The default; the only protocol with Opus/HE-AAC support.
     #[default]
     Icecast,
     /// Shoutcast DNAS 1.x (`password` + `icy-*` headers on the
@@ -396,6 +401,16 @@ mod tests {
         // Old settings.json files have no `format` key: still MP3.
         let cfg: StreamConfig = serde_json::from_str(r#"{"bitrate_kbps":128}"#).unwrap();
         assert_eq!(cfg.format, StreamFormat::Mp3);
+    }
+
+    #[test]
+    fn heaac_format_labels_serializes_and_streams() {
+        assert_eq!(StreamFormat::HeAac.content_type(), "audio/aac");
+        assert_eq!(StreamFormat::HeAac.label(), "HE-AAC");
+        let json = serde_json::to_string(&StreamFormat::HeAac).unwrap();
+        assert_eq!(json, "\"heaac\"");
+        let back: StreamFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, StreamFormat::HeAac);
     }
 
     #[test]

@@ -95,10 +95,11 @@ The Library never touches the broadcast; the Playout desk owns it.
 ## Streaming
 
 - **Settings → Streaming**: protocol (**Icecast** / **Shoutcast v1** /
-  **Shoutcast v2**), host/port/credentials, TLS, format (**MP3**/**Opus**)
+  **Shoutcast v2**), host/port/credentials, TLS, format (**MP3**/**Opus**/**HE-AAC**)
   and bitrate. Opus snaps to its own ladder (24–160 kbps) and needs far
-  fewer bits for the same quality — Icecast only, Shoutcast is MP3-only
-  (picking Shoutcast auto-switches the format).
+  fewer bits for the same quality; HE-AAC (FDK, ADTS) snaps to 24–128 kbps
+  with v2 parametric stereo at ≤48 kbps and v1 SBR above — both Icecast
+  only, Shoutcast is MP3-only (picking Shoutcast auto-switches the format).
 - Icecast uses host/port/**mount**; Shoutcast v1 uses the *source* port
   (usually listener port + 1, e.g. 8001, no mount); Shoutcast v2 uses
   portbase (e.g. 8000) plus a **Stream ID** (1 = default).

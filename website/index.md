@@ -27,7 +27,7 @@ features:
   - title: Playlist Builder
     details: Create manual playlists, reorder with Up/Down, and fire saved rotations to air in stored order — from Home or a scheduler load event. Missing files are flagged and skipped.
   - title: Icecast + Shoutcast Streaming
-    details: MP3 and Opus source client (Icecast) plus Shoutcast v1/v2, with TLS, auto-reconnect, live-encoder readout, and one-click apply-and-restart.
+    details: MP3, Opus, and HE-AAC source client (Icecast) plus Shoutcast v1/v2, with TLS, auto-reconnect, live-encoder readout, and one-click apply-and-restart.
   - title: Scheduler + Ads
     details: Time and weekday events with expiry (including load-a-named-playlist), dated ad blocks with intro → spot → outro chains, and an 8-pad cart wall with hotkeys.
   - title: Library That Scales

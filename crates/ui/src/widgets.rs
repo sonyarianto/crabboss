@@ -155,6 +155,32 @@ pub(crate) fn opus_snap_bitrate(kbps: u32) -> u32 {
         .unwrap_or(96)
 }
 
+/// HE-AAC CBR ladder in kbps: v2 (parametric stereo) territory at the
+/// bottom, v1 (SBR) above 48 kbps. Sits below the MP3 ladder on purpose —
+/// HE-AAC needs far fewer bits for the same quality.
+pub(crate) const HEAAC_LADDER: [u32; 9] = [24, 32, 40, 48, 56, 64, 80, 96, 128];
+
+pub(crate) fn heaac_bitrate_step(current: u32, up: bool) -> u32 {
+    let idx = HEAAC_LADDER
+        .iter()
+        .position(|&b| b >= current)
+        .unwrap_or(HEAAC_LADDER.len() - 1);
+    match up {
+        true => HEAAC_LADDER[(idx + 1).min(HEAAC_LADDER.len() - 1)],
+        false => HEAAC_LADDER[idx.saturating_sub(1)],
+    }
+}
+
+/// Snap an arbitrary kbps (e.g. carried over from another format) to
+/// the nearest HE-AAC rung.
+pub(crate) fn heaac_snap_bitrate(kbps: u32) -> u32 {
+    HEAAC_LADDER
+        .iter()
+        .min_by_key(|&&b| b.abs_diff(kbps))
+        .copied()
+        .unwrap_or(48)
+}
+
 pub(crate) fn duck_ms_step(ladder: &[f32], current: f32, up: bool) -> f32 {
     let idx = ladder
         .iter()
@@ -346,6 +372,25 @@ mod tests {
         assert_eq!(opus_snap_bitrate(320), 160);
         assert_eq!(opus_snap_bitrate(100), 96);
         assert_eq!(opus_snap_bitrate(0), 24);
+    }
+
+    #[test]
+    fn heaac_bitrate_step_walks_low_ladder() {
+        assert_eq!(heaac_bitrate_step(48, true), 56);
+        assert_eq!(heaac_bitrate_step(48, false), 40);
+        assert_eq!(heaac_bitrate_step(128, true), 128);
+        assert_eq!(heaac_bitrate_step(24, false), 24);
+        assert_eq!(heaac_bitrate_step(320, true), 128);
+        assert_eq!(heaac_bitrate_step(8, false), 24);
+    }
+
+    #[test]
+    fn heaac_snap_bitrate_picks_nearest_rung() {
+        assert_eq!(heaac_snap_bitrate(48), 48);
+        assert_eq!(heaac_snap_bitrate(128), 128);
+        assert_eq!(heaac_snap_bitrate(320), 128);
+        assert_eq!(heaac_snap_bitrate(100), 96);
+        assert_eq!(heaac_snap_bitrate(0), 24);
     }
 
     #[test]

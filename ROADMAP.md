@@ -73,7 +73,7 @@ Mixer [12-band EQ -> blend -> gain -> soft-clip -> limiter] per cpal frame ->
        the selected track (crossfaded, Auto-DJ-aware continuity), cold
        start (Play / Auto-DJ toggle begin the first pick), persisted ON/OFF + Up-next
 - [x] Ad scheduler (dated blocks with intros/outros, chained breaks — see §1.3)
-- [x] Icecast output (MP3/Opus — see §1.5); Shoutcast v1/v2 output (MP3 — see §1.5)
+- [x] Icecast output (MP3/Opus/HE-AAC — see §1.5); Shoutcast v1/v2 output (MP3 — see §1.5)
 - [x] Mic/line-in input with ducking (see §1.6)
 - [x] Report generator (play logs → CSV + XLSX + screen; PDF open — see §1.9)
 - [x] File dialog (`rfd`) + import progress in UI (see §1.9) — native multi-select dialog, chunked per-tick import with live status
@@ -95,7 +95,7 @@ Legend: ✅ done · 🟡 partial/scaffold · ❌ not started · — not previous
 | Cart wall | 8+ pads, hotkeys, progress, drag-drop, resize | 8 pads, hotkeys 1–8, per-pad progress + playing highlight, assign-from-library flow | ✅ |
 | Preview / PFL | Pre-listen on a second output without broadcasting | Independent cue bus (second output, click-free fades) + explicit On Air gate; cue never touches program/stream/reports | ✅ |
 | Voice tracking / teasers | Voice tracks, auto-intro, teasers | — | — |
-| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME + Opus, PUT + SOURCE fallback, TLS, paced, reconnect, metadata) + Shoutcast v1/v2 source client (MP3, `:#sid`, admin.cgi titles + viewjson listeners) + Settings UI (protocol + sid selector, MP3-only guard) with live status, live-encoder indicator, one-click restart + listener count + Playout cover art; relay open, live-DNAS validation open | 🟡 |
+| Streaming output | Icecast/Shoutcast + relay, listener stats, artwork | Icecast source client (MP3/LAME + Opus + HE-AAC v1/v2, PUT + SOURCE fallback, TLS, paced, reconnect, metadata) + Shoutcast v1/v2 source client (MP3, `:#sid`, admin.cgi titles + viewjson listeners) + Settings UI (protocol + sid selector, MP3-only guard) with live status, live-encoder indicator, one-click restart + listener count + Playout cover art; relay open, live-DNAS validation open | 🟡 |
 | Mic / line-in | Mixed input, sidechain ducking, bed music | cpal input + `rtrb` ring summed pre-limiter/tap, voice-activated ducker, live device switching, Settings mic panel | ✅ |
 | Silence detector | Dead-air auto-recovery | ✅ cpal mix-bus metering + filler recovery | ✅ |
 | Remote control API | Playbackinfo, insert-after, scheduler on/off, requests | — (web remote UI in §2 instead) | — |
@@ -182,7 +182,9 @@ Explicitly **out of scope**: DTMF phone-line control, CD-grabber (legacy hardwar
 - [ ] Teaser/promo clips scheduled between songs
 
 ### 1.5 Streaming Output
-- [x] Icecast source client (encode + push): MP3/LAME CBR encoder tapped off the
+- [x] Icecast source client (encode + push): MP3/LAME CBR, Opus/Ogg CBR,
+      or HE-AAC v1/v2 CBR (Fraunhofer FDK, ADTS; v2 parametric stereo at
+      ≤48 kbps, v1 SBR above, dedicated low-bitrate ladder) tapped off the
       post-DSP cpal mix bus (pre-monitor-volume), lock-free `rtrb` ring → sender
       thread with real-time pacing, Icecast 2.4 `PUT` with legacy `SOURCE`
       fallback, mount in the request path, `100`-means-go handshake

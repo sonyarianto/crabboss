@@ -9,8 +9,8 @@ no installer yet.
 - **Linux only** — ALSA development libraries:
   - Ubuntu/Debian: `sudo apt-get install libasound2-dev`
   - Fedora: `sudo dnf install alsa-lib-devel`
-- **Opus encoder build tools** — CMake + a C toolchain, because the
-  workspace always builds the bundled Opus encoder for Opus streaming:
+- **Opus + HE-AAC encoder build tools** — CMake + a C/C++ toolchain, because the
+  workspace always builds the bundled Opus and FDK-AAC encoders for streaming:
   - Windows: VS Build Tools (`winget install Kitware.CMake`)
   - Linux/macOS: CMake + gcc/clang
 
